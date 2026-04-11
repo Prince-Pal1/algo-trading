@@ -1,0 +1,26 @@
+[limits]
+max_risk_per_trade = 0.02       # 2% of equity (hard cap)
+max_daily_loss = 0.03           # 3% daily drawdown halt
+max_weekly_loss = 0.06          # 6% weekly drawdown — reduce size
+max_monthly_loss = 0.10         # 10% monthly — halt + review
+max_drawdown = 0.15             # 15% from peak — emergency close all
+max_position_pct = 0.20         # No single position > 20% of equity
+max_portfolio_heat = 0.50       # Max 50% of equity at risk
+max_correlated_exposure = 0.40  # Correlated strategies capped at 40%
+
+[circuit_breakers]
+daily_halt_enabled = true
+weekly_reduce_enabled = true
+weekly_reduce_factor = 0.5      # Cut position sizes by half
+monthly_halt_enabled = true
+max_drawdown_close_all = true
+
+[kelly]
+default_fraction = 0.25         # Quarter Kelly (FORTRESS mode)
+max_fraction = 0.50             # Half Kelly cap
+min_win_rate_for_kelly = 0.45   # Below this, use fixed sizing
+min_trades_for_kelly = 30       # Need 30+ trades before Kelly kicks in
+
+[fat_finger]
+max_order_value_usd = 10000     # No single order > $10K (paper phase)
+max_quantity_multiplier = 10    # No order > 10x average trade size

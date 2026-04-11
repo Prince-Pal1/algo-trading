@@ -1,0 +1,26 @@
+# Copy this to exchanges.toml and fill in your keys
+# exchanges.toml is gitignored — never commit real keys
+
+[binance]
+api_key = "your-binance-api-key"
+api_secret = "your-binance-api-secret"
+testnet = true
+ws_url = "wss://stream.binance.com:9443/ws"
+testnet_ws_url = "wss://testnet.binance.vision/ws"
+
+[alpaca]
+api_key = "your-alpaca-key"
+secret_key = "your-alpaca-secret"
+base_url = "https://paper-api.alpaca.markets"
+paper = true
+
+[icmarkets]
+client_id = ""
+client_secret = ""
+account_id = ""
+demo = true
+
+[ibkr]
+host = "127.0.0.1"
+port = 7497
+client_id = 1

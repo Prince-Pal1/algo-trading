@@ -1,0 +1,13 @@
+[structlog]
+format = "json"                 # "json" | "console"
+level = "INFO"
+file_output = true
+file_path = "data/logs/trading.log"
+max_file_size_mb = 50
+backup_count = 5
+
+[trade_log]
+enabled = true
+db_path = "data/trades.db"      # SQLite
+log_signals = true              # Log every signal, not just trades
+log_risk_checks = true          # Log pre-trade risk check results

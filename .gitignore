@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Data (large files + runtime)
+data/
+*.parquet
+
+# Config with secrets
+config/exchanges.toml
+
+# Environment files
+.env
+*.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Node (MCP servers have their own)
+node_modules/

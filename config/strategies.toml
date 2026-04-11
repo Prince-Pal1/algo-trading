@@ -1,0 +1,31 @@
+# Strategy parameters — each strategy reads its section here
+
+[ema_crossover]
+enabled = true
+risk_profile = "SAFE"
+markets = ["BTCUSDT", "ETHUSDT"]
+timeframe = "1m"
+fast_period = 9
+slow_period = 21
+rsi_period = 7
+rsi_overbought = 70
+rsi_oversold = 30
+volume_confirmation = true
+volume_multiplier = 1.5
+max_risk_per_trade = 0.01       # 1% of equity
+take_profit_ratio = 2.0         # TP = 2x stop loss
+trailing_stop = true
+trailing_pct = 0.005            # 0.5% trail
+
+[asian_range_breakout]
+enabled = false                  # Enable in Phase 2
+risk_profile = "SAFE"
+markets = ["XAUUSD"]
+timeframe = "15m"
+asian_session_start = "00:00"   # UTC
+asian_session_end = "08:00"     # UTC
+breakout_buffer_pips = 5
+take_profit_pips = 50
+stop_loss_pips = 25
+max_risk_per_trade = 0.005      # 0.5% of equity
+max_trades_per_day = 2

@@ -1,0 +1,1474 @@
+# Algorithmic Trading System Blueprint
+
+## Master Architecture, Technology & Strategy Guide
+
+**Created:** April 11, 2026 | **Version:** 1.1 (17 corrections applied)
+**Author:** Prince | **AI Architect:** Claude
+
+---
+
+> **Purpose:** This document is the complete blueprint for building a production-grade, multi-strategy algorithmic trading system. It covers architecture, technology choices, strategy modules, risk management, AI agent design, and a phased build plan. Every recommendation is researched and justified.
+
+---
+
+## Table of Contents
+
+1. [System Architecture](#a-system-architecture)
+2. [Strategy Modules](#b-strategy-modules)
+3. [Technology Stack](#c-technology-stack)
+4. [Options Trading Deep Dive](#d-options-trading-deep-dive)
+5. [Multi-Agent AI Architecture](#e-multi-agent-ai-architecture)
+6. [Data Pipeline Architecture](#f-data-pipeline-architecture)
+7. [Risk Management Framework](#g-risk-management-framework)
+8. [Build Phases & Timeline](#h-build-phases--timeline)
+9. [Project File Structure](#i-project-file-structure)
+10. [Performance Targets & Metrics](#j-performance-targets--metrics)
+11. [Cost Estimates](#k-cost-estimates)
+12. [Sources & References](#l-sources--references)
+
+---
+
+## A. System Architecture
+
+### High-Level Overview
+
+The system is designed as a **modular, event-driven architecture** where each component can be built, tested, and replaced independently. This mirrors how professional quant shops operate — no monolithic scripts.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        ALGO TRADING SYSTEM                                  │
+│                                                                             │
+│  ┌─────────────┐    ┌──────────────┐    ┌──────────────┐                   │
+│  │  BINANCE WS  │    │ TRADINGVIEW  │    │   ALPACA WS   │                  │
+│  │  (Crypto)    │    │    MCP       │    │  (US Stocks)  │                  │
+│  └──────┬───────┘    └──────┬───────┘    └──────┬────────┘                  │
+│         │                   │                    │                           │
+│         └───────────────────┼────────────────────┘                          │
+│                             ▼                                               │
+│              ┌──────────────────────────┐                                   │
+│              │      DATA INGEST LAYER   │  ← WebSocket feeds, tick data     │
+│              │  (asyncio + uvloop)      │                                   │
+│              └────────────┬─────────────┘                                   │
+│                           │                                                 │
+│                    ┌──────┼──────┐                                          │
+│                    ▼      ▼      ▼                                          │
+│              ┌─────────────────────────┐                                    │
+│              │    CANDLE BUILDER /      │  ← Builds OHLCV from ticks        │
+│              │    FEATURE ENGINE        │  ← Computes indicators (pandas-ta)│
+│              └────────────┬─────────────┘                                   │
+│                           │                                                 │
+│              ┌────────────┼────────────────────┐                            │
+│              ▼            ▼                    ▼                             │
+│  ┌───────────────┐ ┌───────────────┐ ┌────────────────┐                    │
+│  │ ULTRA SCALP   │ │   SCALPING    │ │  DAY TRADING   │                    │
+│  │  STRATEGY     │ │   STRATEGY    │ │  + OPTIONS     │                    │
+│  │ (tick/5s/15s) │ │  (1m/5m)      │ │  (15m/1h)      │                   │
+│  └───────┬───────┘ └───────┬───────┘ └───────┬────────┘                    │
+│          │                 │                  │                              │
+│          └─────────────────┼──────────────────┘                             │
+│                            ▼                                                │
+│              ┌──────────────────────────┐                                   │
+│              │     AI AGENT LAYER       │  ← Claude API multi-agent        │
+│              │  (Sentiment, Technical,  │     analysis & regime detection   │
+│              │   Fundamental, Regime)   │                                   │
+│              └────────────┬─────────────┘                                   │
+│                           ▼                                                 │
+│              ┌──────────────────────────┐                                   │
+│              │     SIGNAL AGGREGATOR    │  ← Combines strategy + AI signals│
+│              │   (weighted consensus)   │                                   │
+│              └────────────┬─────────────┘                                   │
+│                           ▼                                                 │
+│              ┌──────────────────────────┐                                   │
+│              │     RISK MANAGER         │  ← SEPARATE PROCESS (ZeroMQ)     │
+│              │  (position sizing, stops,│     Cannot be bypassed            │
+│              │   circuit breakers,      │                                   │
+│              │   portfolio heat, Greeks) │                                  │
+│              └────────────┬─────────────┘                                   │
+│                           ▼                                                 │
+│              ┌──────────────────────────┐                                   │
+│              │   EXECUTION ENGINE       │  ← Smart order routing           │
+│              │  ┌────────┬────────┐     │                                  │
+│              │  │Binance │ Alpaca │     │                                  │
+│              │  │  WS    │  REST  │     │                                  │
+│              │  ├────────┼────────┤     │                                  │
+│              │  │ IBKR   │ Deribit│     │                                  │
+│              │  │  TWS   │  WS   │     │                                  │
+│              │  └────────┴────────┘     │                                  │
+│              └────────────┬─────────────┘                                   │
+│                           ▼                                                 │
+│              ┌──────────────────────────┐                                   │
+│              │   PORTFOLIO TRACKER      │  ← Positions, P&L, exposure      │
+│              └────────────┬─────────────┘                                   │
+│                           ▼                                                 │
+│  ┌────────────┐  ┌──────────────┐  ┌────────────────┐                      │
+│  │  LOGGER    │  │  DASHBOARD   │  │   TELEGRAM     │                      │
+│  │ (structlog │  │ (Grafana +   │  │   ALERTS       │                      │
+│  │  + Loki)   │  │  Dash)       │  │                │                      │
+│  └────────────┘  └──────────────┘  └────────────────┘                      │
+│                                                                             │
+│              ┌──────────────────────────┐                                   │
+│              │      BACKTESTER          │  ← VectorBT (research)           │
+│              │  (offline, same signals) │    NautilusTrader (validation)    │
+│              └──────────────────────────┘    QuantConnect (production)      │
+│                                                                             │
+│  ┌──────────────────────────────────────────────────────┐                   │
+│  │              DATA STORAGE LAYER                       │                  │
+│  │  ┌─────────┐  ┌──────────────┐  ┌────────────────┐  │                  │
+│  │  │  Redis   │  │ TimescaleDB  │  │   File Store   │  │                  │
+│  │  │  (hot)   │  │   (warm)     │  │  (backtest)    │  │                  │
+│  │  └─────────┘  └──────────────┘  └────────────────┘  │                  │
+│  └──────────────────────────────────────────────────────┘                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Inter-Process Communication
+
+```
+Trading Bot Process          Risk Manager Process          Dashboard Process
+       │                            │                            │
+       │◄──── ZeroMQ PUB/SUB ──────►│                            │
+       │      (orders, signals)      │                            │
+       │                            │                            │
+       │────── Redis Streams ───────►│◄───── Redis Streams ──────►│
+       │      (trade log, P&L)       │      (metrics, alerts)     │
+       │                            │                            │
+       ▼                            ▼                            ▼
+  Prometheus ◄──────────── Prometheus ◄──────────── Grafana
+  (metrics)                (metrics)                (visualization)
+```
+
+### Key Architectural Decisions
+
+| Decision | Choice | Why |
+|---|---|---|
+| Event loop | asyncio + uvloop | 2-4x faster than vanilla asyncio, drop-in replacement |
+| JSON parsing | orjson | 10x faster than stdlib json, critical for WebSocket messages |
+| IPC | ZeroMQ (PUB/SUB, PUSH/PULL) | ~10-30us latency, no broker, peer-to-peer |
+| State sharing | Redis Streams | Persistence, replay, consumer groups — Kafka-lite |
+| Risk isolation | Separate process | Trading cannot bypass risk; if risk dies, trading halts |
+| DataFrames | Pandas (primary), Polars (bulk ETL only) | pandas-ta requires pandas; Polars only for parameter sweeps/data ETL |
+
+---
+
+## B. Strategy Modules
+
+### Module 1 — Ultra Scalping (Sub-1 Minute)
+
+**Target Market:** Crypto Perpetual Futures (Binance, Bybit)
+**Timeframe:** Tick data, 5-second, 15-second candles
+**Holding Period:** 2 seconds to 60 seconds
+
+| Parameter | Value |
+|---|---|
+| Trades per day | 10–50 |
+| Target per trade | 0.05–0.30% |
+| Win rate target | 55–65% |
+| Max risk per trade | 0.5% of equity |
+| Max daily drawdown | 2% — halt trading |
+| Execution method | WebSocket only, sub-50ms |
+| Required infrastructure | VPS in AWS Singapore/Tokyo |
+
+**Signal Sources:**
+1. **Order book imbalance** — Bid/ask volume ratio at top 10-20 levels. Imbalance > 0.65 = buy pressure
+2. **CVD (Cumulative Volume Delta) divergence** — Price making new high but CVD declining = reversal signal
+3. **EMA micro-crossovers** — EMA(5) x EMA(13) on 5-second candles
+4. **VWAP deviation** — Price > 1.5 std dev from VWAP = mean reversion entry
+5. **Funding rate spikes** — Extreme funding = crowded positioning = reversal
+
+**Entry Logic (example):**
+```python
+# Ultra Scalp — Mean Reversion on VWAP
+if price > vwap + 1.5 * vwap_std:
+    if order_book_imbalance < 0.4:  # asks dominating
+        if cvd_trend == "declining":
+            signal = "SHORT"
+            stop_loss = vwap + 2.0 * vwap_std
+            take_profit = vwap  # revert to VWAP
+```
+
+**Exit Rules:**
+- Take profit at VWAP (mean reversion target)
+- Stop loss at 2x the target (1:2 risk/reward minimum)
+- Time-based exit: close if not in profit within 60 seconds
+- Trail stop after 50% of target reached
+
+---
+
+### Module 2 — Scalping (1-Minute to 5-Minute)
+
+**Target Market:** Crypto Futures (Binance/OKX) + Forex (IC Markets cTrader)
+**Timeframe:** 1-minute and 5-minute candles
+**Holding Period:** 1 minute to 30 minutes
+
+| Parameter | Value |
+|---|---|
+| Trades per day | 5–15 |
+| Target per trade | 0.2–1.0% |
+| Win rate target | 50–60% |
+| Max risk per trade | 1% of equity |
+| Max daily drawdown | 3% — halt trading |
+| Execution method | WebSocket (primary), REST (backup) |
+| Required infrastructure | VPS or local with good connection |
+
+**Signal Sources:**
+1. **RSI(7) divergence** — Price new low + RSI higher low = bullish divergence
+2. **EMA crossover** — EMA(9) x EMA(21) with volume confirmation
+3. **Bollinger Band squeeze** — Band width < 20-period low → breakout imminent
+4. **Volume breakout** — Volume > 2x 20-period average + price break of range
+5. **Liquidity sweeps** — Price wicks below support then reverses (stop hunt pattern)
+6. **Market structure break** — Higher low broken (bearish) or lower high broken (bullish)
+
+**Entry Logic (example):**
+```python
+# Scalp — EMA Crossover + RSI Filter + Volume Confirmation
+if ema9 > ema21 and prev_ema9 <= prev_ema21:   # bullish crossover
+    if rsi_7 < 65:                                # not overbought
+        if volume > avg_volume_20 * 1.5:          # volume confirms
+            signal = "LONG"
+            stop_loss = recent_swing_low
+            take_profit = entry + 2 * (entry - stop_loss)  # 2R target
+```
+
+**Multi-Timeframe Confirmation:**
+- Trade on 1-minute candles
+- Confirm trend direction on 5-minute candles
+- Check key levels on 15-minute candles
+- Only take trades aligned with the higher timeframe trend
+
+---
+
+### Module 3 — Day Trading + Options (15-Minute to 1-Hour)
+
+**Target Market:** US Equities (IBKR/Alpaca) + Crypto Spot + Options (Deribit/IBKR)
+**Timeframe:** 15-minute and 1-hour candles
+**Holding Period:** 30 minutes to end of day
+
+| Parameter | Value |
+|---|---|
+| Trades per day | 2–5 |
+| Target per trade | 1–5% |
+| Win rate target | 45–55% |
+| Max risk per trade | 2% of equity |
+| Max daily drawdown | 5% — halt trading |
+| Execution method | REST + WebSocket hybrid |
+| Required infrastructure | Local or VPS |
+
+**Signal Sources:**
+1. **Market structure** — Break of structure (BOS), change of character (CHOCH)
+2. **Supply/Demand zones** — Institutional order flow areas on 1H chart
+3. **LLM sentiment analysis** — Claude agent scores news/earnings sentiment
+4. **Macro regime detection** — AI agent classifies market as trending/ranging/volatile
+5. **Pairs trading** — Cointegrated pairs, Kalman filter hedge ratio
+
+**Options Strategies (automated):**
+1. **Iron Condors** — Sell when IV Rank > 50%, 30-45 DTE, manage at 50% profit
+2. **Credit Spreads** — Directional bias + premium collection, 0DTE or weeklies
+3. **Gamma Scalping** — Long straddle + delta hedge when IV is cheap vs realized vol
+4. **Covered Calls** — On existing equity positions for income
+
+**Entry Logic (example):**
+```python
+# Day Trade — Structure Break + Sentiment + Volume
+if market_structure == "bullish_bos":          # break of structure up
+    if ai_sentiment_score > 0.6:               # LLM says bullish
+        if is_in_demand_zone(price):           # at institutional level
+            signal = "LONG"
+            stop_loss = demand_zone_low
+            take_profit = next_supply_zone
+```
+
+---
+
+### Strategy Selection Matrix
+
+| Market Condition | Ultra Scalp | Scalp | Day Trade | Options |
+|---|---|---|---|---|
+| High volatility trending | OFF | ON | ON | Sell premium |
+| Low volatility ranging | ON (mean revert) | ON | OFF | Iron condors |
+| High volatility ranging | ON | ON | OFF | Strangles |
+| News/event driven | OFF | OFF | ON (momentum) | 0DTE directional |
+| Low volatility trending | OFF | ON | ON | Gamma scalp |
+
+The **Meta-Strategist AI Agent** (Section E) decides which modules are active based on current market regime.
+
+---
+
+## C. Technology Stack
+
+### Execution Platforms
+
+| Platform | Markets | Latency | API Type | Cost | Our Use Case |
+|---|---|---|---|---|---|
+| **Binance** (PRIMARY - Crypto) | Crypto futures + spot | 5-20ms from Singapore | REST + WebSocket | Free (0.02/0.04% maker/taker) | Ultra scalping + Scalping |
+| **Interactive Brokers** (PRIMARY - Traditional) | Stocks, options, futures, forex | 1-10ms local TWS | TWS API + FIX | $0.65/contract options, $0.0035/share | Day trading + Options |
+| **Alpaca** (SECONDARY - Stocks) | US stocks, ETFs | 30-100ms REST, 10-50ms WS | REST + WebSocket | Free (commission-free) | Paper trading, simple equity |
+| **Deribit** (CRYPTO OPTIONS) | BTC/ETH options + futures | 2-5ms from London | REST + WebSocket + FIX | 0.03% options | Crypto options strategies |
+| **OKX** (BACKUP - Crypto) | Crypto futures | 5-15ms | REST + WebSocket | 0.02/0.05% (negative maker at VIP) | Market making, backup |
+| **IC Markets** (FOREX/GOLD) | Forex, CFDs, Metals, Crypto CFDs | <40ms (99.6% of orders) | cTrader Open API (Python native) | 0.0 pip raw + $3.50/lot | Forex/Gold scalping — PRIMARY |
+
+> **NOTE (macOS):** The `MetaTrader5` PyPI package only ships Windows x64 wheels (compiled C++). It does NOT work on macOS. IC Markets cTrader (native Python API) and IBKR `ib_insync` (pure Python) replace MT5 entirely.
+
+**Why these choices:**
+- **Binance**: Deepest crypto liquidity globally, best WebSocket API, lowest fees with BNB discount
+- **IBKR**: Only serious choice for equity options algo trading, SmartRouter, 100+ order types. Also replaces MT5 for forex/futures (pure Python, works on macOS)
+- **IC Markets**: Primary forex/gold broker. cTrader Open API has native Python support, 0.0 pip raw spread, no restrictions on algo trading. Best tax treatment for India (income slab rate 5-20% vs crypto's 30% flat)
+- **Alpaca**: Already integrated via MCP, commission-free, excellent for paper trading
+
+### Data Providers
+
+| Provider | Data Type | Assets | Cost | Our Use |
+|---|---|---|---|---|
+| **Binance WebSocket** | Real-time ticks, order book | Crypto | Free | Live trading data |
+| **Tardis.dev** | Historical order flow, L2 book | Crypto (50+ exchanges) | Free (delayed), $49/mo real-time | Backtest order flow strategies |
+| **Polygon.io** | Real-time + historical tick | US stocks, options, forex | $29-199/mo | Stock data, options chains |
+| **Databento** | MBO/MBP L3 data | US futures, equities | Pay-per-use (~$5-50/download) | Futures data when needed |
+| **Dukascopy** | Historical tick forex | Forex (20+ years) | Free | Forex backtesting |
+| **Alpaca API** | Historical 1min bars | US stocks (5+ years) | Free | Quick backtesting |
+| **TradingView MCP** | Chart state, indicators | All via charts | $15-60/mo platform | Visual analysis, Pine Script |
+
+### Backtesting Frameworks
+
+| Framework | Speed | Use Phase | Why |
+|---|---|---|---|
+| **VectorBT Pro** | Fastest (vectorized NumPy) | Research — rapid iteration | 10,000+ parameter combos in seconds, $149 one-time |
+| **NautilusTrader** | Very fast (Rust core) | Validation — tick-level testing | Realistic fill simulation, same code backtest/live, free |
+| **QuantConnect (LEAN)** | Medium (C#/.NET) | Production — live deployment | Full pipeline, connects to Alpaca/IBKR/Binance, free tier |
+| **FreqTrade** | Medium | Crypto bots — quick deployment | Battle-tested, 20+ exchanges, built-in hyperopt, free |
+
+### Signal & Intelligence Tools
+
+| Tool | Purpose | Cost |
+|---|---|---|
+| **pandas-ta** | 150+ technical indicators, vectorized | Free |
+| **Claude API (Anthropic)** | LLM sentiment analysis, earnings, regime detection | ~$3-15/M tokens |
+| **TradingView MCP** | Chart state, indicator values, Pine Script | Already have |
+| **py_vollib** | Options Greeks calculation (Black-Scholes) | Free |
+| **QuantLib-Python** | Vol surface modeling, exotic options pricing | Free |
+| **ccxt / ccxt.pro** | Unified API for 100+ crypto exchanges + WebSocket | Free |
+| **Santiment** | On-chain + social crypto data | $49-300/mo |
+
+### Infrastructure
+
+| Component | Tool | Cost |
+|---|---|---|
+| **VPS (Live Trading)** | AWS EC2 ap-southeast-1 (Singapore) for Binance | ~$30-60/mo |
+| **VPS (Dev/Backtest)** | Hetzner Cloud (best price/performance) | ~$10-20/mo |
+| **Hot Data Cache** | Redis 7 | Free (self-hosted) |
+| **Time-Series DB** | TimescaleDB (PostgreSQL extension) | Free (self-hosted) |
+| **Message Queue** | ZeroMQ (pyzmq) | Free |
+| **Monitoring** | Prometheus + Grafana + Loki | Free (self-hosted) |
+| **Alerts** | Telegram Bot | Free |
+| **Dashboard** | Dash (Plotly) or NiceGUI | Free |
+| **Logging** | structlog + orjson | Free |
+| **Containerization** | Docker + Docker Compose | Free |
+
+### Core Python Libraries
+
+```
+# Core
+asyncio + uvloop          # Async event loop (2-4x faster)
+orjson                    # JSON parsing (10x faster than stdlib)
+pandas                    # DataFrames (primary — pandas-ta compatibility)
+polars                    # Bulk ETL and parameter sweeps only
+msgspec                   # Fast serialization + validation
+httpx                     # Async HTTP client
+
+# Trading
+ccxt[async]               # Unified crypto exchange API
+alpaca-trade-api          # Alpaca SDK (already have)
+ib_insync                 # Interactive Brokers Python (async wrapper)
+# MetaTrader5 REMOVED — Windows-only C++, does not work on macOS
+# Use IC Markets cTrader Open API (Python native) for forex/gold
+# Use IBKR ib_insync (pure Python) for forex/futures/options
+
+# Analysis
+pandas-ta                 # Technical indicators
+numpy                     # Numerical computing
+scipy                     # Statistical tests, optimization
+statsmodels               # Cointegration, regression
+pykalman                  # Kalman filter for pairs trading
+
+# Options
+py_vollib                 # Black-Scholes Greeks
+py_vollib_vectorized      # Vectorized batch Greeks
+quantlib-python           # Vol surface, advanced pricing
+
+# Backtesting
+vectorbt                  # Fast vectorized backtesting
+nautilus_trader            # Tick-level event-driven backtesting
+# FreqTrade REMOVED — separate architecture, maintenance burden
+# Pick TWO: VectorBT (fast sweeps) + NautilusTrader (tick-level + live bridge)
+
+# AI/ML
+anthropic                 # Claude API for agent intelligence
+# LangGraph REMOVED — overkill; use simple orchestrator.py with asyncio.gather()
+# FinRL REMOVED — RL is fragile in financial markets; use gradient boosted trees instead
+smart-money-concepts      # ICT/SMC: order blocks, FVGs, liquidity sweeps
+
+# Infrastructure
+pyzmq                     # ZeroMQ messaging
+redis                     # Redis client
+sqlite3                   # Trade log (Phase 1-3), migrate to TimescaleDB in Phase 7+
+# psycopg — PostgreSQL/TimescaleDB (add when data volume justifies it)
+prometheus-client         # Metrics export
+structlog                 # Structured logging
+python-telegram-bot       # Telegram alerts
+dash                      # Web dashboard
+```
+
+---
+
+## D. Options Trading Deep Dive
+
+### Platform Comparison for Options
+
+| Platform | Options Type | API Quality | Greeks via API | Co-location | Best For |
+|---|---|---|---|---|---|
+| **Interactive Brokers** | US equity/index options (OPRA) | Excellent (TWS API) | Yes (server-side) | Equinix NY | Equity options, SPX, multi-leg |
+| **Deribit** | BTC/ETH options | Excellent (REST/WS/FIX) | Yes (real-time via ticker) | Equinix LD4 London | Crypto options |
+| **Tastytrade** | US equity options | Good (newer REST API) | Basic | No | Premium selling, fee cap at $10/leg |
+
+### Systematic Options Strategies
+
+#### Strategy 1: Iron Condors (Automated)
+
+```
+Entry Rules:
+- IV Rank > 50% (premium is rich)
+- 30-45 DTE (optimal theta decay curve)
+- Sell 16-delta call spread + 16-delta put spread (1 std dev)
+- Wing width: 5-10 points (SPX) or $5 (equities)
+- Collect minimum 1/3 of wing width in credit
+
+Management Rules:
+- Close at 50% of max profit
+- Close at 21 DTE if not managed
+- Roll tested side if short strike breached
+- Max loss: 2x credit received
+
+Position Sizing:
+- Max 3-5% of portfolio per position
+- No more than 5 iron condors simultaneously
+- Reduce size when VIX > 30
+```
+
+#### Strategy 2: 0DTE SPX Credit Spreads
+
+```
+Entry Rules:
+- Time: After 10:00 AM ET (morning range established)
+- Sell 5-10 point wide credit spreads
+- Direction based on: opening range, VWAP slope, AI sentiment
+- Minimum credit: 30% of spread width
+
+Management Rules:
+- Stop loss at 2x credit received
+- Close by 3:00 PM ET regardless
+- Never hold through close (assignment risk)
+- Max 2 positions per day
+
+Risk:
+- Max 1% of equity per trade
+- One tail event can erase 2 weeks of gains — size accordingly
+```
+
+#### Strategy 3: Gamma Scalping
+
+```
+Entry Conditions:
+- Implied Vol < 30-day Realized Vol (IV is cheap — buy options)
+- Buy ATM straddle, 30-45 DTE
+- Delta hedge with underlying
+
+Hedging Rules:
+- Rehedge when portfolio delta drifts > 0.10
+- OR rehedge on fixed schedule (every 2 hours)
+- Compute: shares_to_trade = -delta * contracts * multiplier
+
+P&L Driver:
+- Profit = Gamma scalp income - Theta decay
+- Profitable when: Realized Vol > Implied Vol paid
+
+Exit:
+- Close at 21 DTE (gamma ramp becomes expensive)
+- Close if RV/IV ratio drops below 0.8 (edge disappeared)
+```
+
+#### Strategy 4: Systematic Vol Selling (Strangles)
+
+```
+Entry Rules:
+- IV Rank > 40%
+- Earnings > 30 days away (no binary events)
+- Sell 16-delta put + 16-delta call (undefined risk)
+- Minimum 30 DTE
+
+Management:
+- Close at 50% profit
+- Roll at 21 DTE
+- Defend at 2x notional delta breach
+- Reduce size if VIX > 25
+
+Risk (CRITICAL — undefined risk strategy):
+- Requires portfolio margin ($110K+ on IBKR)
+- Max 2% of capital at risk (based on expected move)
+- Always have a crash hedge (buy far OTM puts at 5-delta)
+```
+
+### Greeks Calculation Engine
+
+```python
+# Primary: py_vollib for fast production Greeks
+from py_vollib.black_scholes import black_scholes as bs
+from py_vollib.black_scholes.greeks import analytical as greeks
+
+price = bs('c', S=100, K=105, t=30/365, r=0.05, sigma=0.20)
+delta = greeks.delta('c', S=100, K=105, t=30/365, r=0.05, sigma=0.20)
+gamma = greeks.gamma('c', S=100, K=105, t=30/365, r=0.05, sigma=0.20)
+vega  = greeks.vega('c', S=100, K=105, t=30/365, r=0.05, sigma=0.20)
+theta = greeks.theta('c', S=100, K=105, t=30/365, r=0.05, sigma=0.20)
+
+# Vectorized for batch (entire options chain):
+from py_vollib_vectorized import vectorized_implied_volatility as iv
+# Calculates IV for 1000 options in milliseconds
+```
+
+### Volatility Surface Modeling
+
+```
+Method: SVI (Stochastic Volatility Inspired) parameterization
+- Jim Gatheral's model: 5 parameters per expiration
+- Guaranteed arbitrage-free with proper constraints
+- Implementation: scipy.optimize.curve_fit with SVI formula
+- Visualization: matplotlib 3D surface plot
+
+Upgrade path: QuantLib SABR model for production
+```
+
+### Options Risk Dashboard Metrics
+
+| Metric | Target | Hard Limit |
+|---|---|---|
+| Portfolio delta | ±10% of NAV | ±20% |
+| Portfolio gamma | Monitor (no hard limit) | Flag if > 1% NAV per 1% move |
+| Portfolio theta | Positive (theta income) | Max 0.5% of NAV/day |
+| Portfolio vega | ±0.5% NAV per vol point | ±1% |
+| Buying power usage | < 50% | < 70% |
+| Cash reserve | > 30% | > 20% (hard floor) |
+
+---
+
+## E. Multi-Agent AI Architecture
+
+### Overview
+
+The AI layer mimics a professional trading desk using specialized Claude-powered agents that analyze, debate, and decide.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    AI AGENT TRADING DESK                         │
+│                                                                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐      │
+│  │ TECHNICAL    │  │ FUNDAMENTAL  │  │  SENTIMENT       │      │
+│  │ ANALYST      │  │ ANALYST      │  │  ANALYST         │      │
+│  │              │  │              │  │                   │      │
+│  │ Reads:       │  │ Reads:       │  │ Reads:           │      │
+│  │ - TV MCP     │  │ - Earnings   │  │ - News APIs      │      │
+│  │ - Indicators │  │ - SEC filings│  │ - Reddit/Twitter │      │
+│  │ - Chart state│  │ - Macro data │  │ - On-chain data  │      │
+│  │              │  │              │  │                   │      │
+│  │ Output:      │  │ Output:      │  │ Output:          │      │
+│  │ Signal +     │  │ Signal +     │  │ Signal +         │      │
+│  │ Confidence   │  │ Confidence   │  │ Confidence       │      │
+│  └──────┬───────┘  └──────┬───────┘  └────────┬─────────┘      │
+│         │                  │                   │                 │
+│         └──────────────────┼───────────────────┘                │
+│                            ▼                                    │
+│              ┌──────────────────────────┐                       │
+│              │     ORDER FLOW AGENT     │                       │
+│              │                          │                       │
+│              │ Reads:                   │                       │
+│              │ - Order book depth       │                       │
+│              │ - CVD, delta, footprint  │                       │
+│              │ - Liquidation data       │                       │
+│              │                          │                       │
+│              │ Output: Microstructure   │                       │
+│              │ bias + strength          │                       │
+│              └────────────┬─────────────┘                       │
+│                           ▼                                     │
+│         ┌──────────────────────────────────┐                    │
+│         │       BULL vs BEAR DEBATE        │                    │
+│         │                                  │                    │
+│         │  Bull Researcher ◄──► Bear       │                    │
+│         │  (argues for)    │    Researcher  │                   │
+│         │                  │    (argues     │                   │
+│         │                  │    against)    │                   │
+│         │                                  │                    │
+│         │  Adversarial reasoning reduces   │                    │
+│         │  overconfident signals            │                   │
+│         └────────────┬─────────────────────┘                    │
+│                      ▼                                          │
+│         ┌──────────────────────────┐                            │
+│         │   META-STRATEGIST        │                            │
+│         │   (Regime Detector)      │                            │
+│         │                          │                            │
+│         │ Classifies current       │                            │
+│         │ market regime:           │                            │
+│         │ - Trending / Ranging     │                            │
+│         │ - High Vol / Low Vol     │                            │
+│         │ - Risk-On / Risk-Off     │                            │
+│         │                          │                            │
+│         │ Decides which strategy   │                            │
+│         │ modules are ACTIVE       │                            │
+│         └────────────┬─────────────┘                            │
+│                      ▼                                          │
+│         ┌──────────────────────────┐                            │
+│         │   RISK MANAGER AGENT    │                             │
+│         │                          │                            │
+│         │ Evaluates:               │                            │
+│         │ - Position sizing        │                            │
+│         │ - Correlation to portf.  │                            │
+│         │ - Greeks exposure        │                            │
+│         │ - Current drawdown       │                            │
+│         │                          │                            │
+│         │ Output: APPROVE/REJECT   │                            │
+│         │ + adjusted size          │                            │
+│         └────────────┬─────────────┘                            │
+│                      ▼                                          │
+│         ┌──────────────────────────┐                            │
+│         │   EXECUTION AGENT       │                             │
+│         │                          │                            │
+│         │ Decides:                 │                            │
+│         │ - Order type (limit/mkt) │                            │
+│         │ - Timing                 │                            │
+│         │ - Slippage optimization  │                            │
+│         │ - Which exchange/route   │                            │
+│         └──────────────────────────┘                            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Implementation Framework
+
+**Primary:** Simple Python orchestrator (`orchestrator.py`) — direct Claude API calls with `asyncio.gather()` for parallel agent execution. No framework overhead.
+
+> **NOTE:** LangGraph was considered but rejected — it adds significant complexity (state machines, conditional edges, serialization) that isn't needed. The code pattern below (direct Claude API calls) is all that's required. Add LangGraph later only if complex conversation state between agents is genuinely needed.
+
+```python
+# Architecture pattern — each agent is a Claude API call with a specific system prompt
+from anthropic import Anthropic
+
+client = Anthropic()
+
+def technical_analyst(chart_data: dict, indicators: dict) -> dict:
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        system="You are a senior technical analyst at a quant hedge fund...",
+        messages=[{
+            "role": "user",
+            "content": f"Analyze: {chart_data}\nIndicators: {indicators}"
+        }]
+    )
+    return parse_signal(response)  # Returns: {signal, confidence, reasoning}
+
+def sentiment_analyst(news: list, social: dict) -> dict:
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        system="You are a sentiment analyst. Score market sentiment...",
+        messages=[{
+            "role": "user",
+            "content": f"News: {news}\nSocial: {social}"
+        }]
+    )
+    return parse_signal(response)
+
+# Orchestrator combines signals with weighted consensus
+def make_decision(tech_signal, sentiment_signal, orderflow_signal, regime):
+    weights = REGIME_WEIGHTS[regime]  # Different weights per regime
+    combined = (
+        tech_signal.confidence * weights["technical"] +
+        sentiment_signal.confidence * weights["sentiment"] +
+        orderflow_signal.confidence * weights["orderflow"]
+    )
+    return combined > THRESHOLD
+```
+
+### Agent Cost Management
+
+| Agent | Frequency | Tokens/Call | Cost/Day (est.) |
+|---|---|---|---|
+| Technical Analyst | Every 5 min | ~2,000 | ~$1-2 |
+| Sentiment Analyst | Every 15 min | ~3,000 | ~$2-4 |
+| Order Flow Agent | Every 1 min | ~1,500 | ~$3-5 |
+| Bull/Bear Debate | Per trade signal | ~5,000 | ~$1-3 |
+| Meta-Strategist | Every 30 min | ~2,000 | ~$0.50-1 |
+| **Total** | | | **~$8-15/day** |
+
+Use **claude-haiku-4-5** for high-frequency agents (order flow, technical) and **claude-sonnet-4-6** for complex reasoning (debate, meta-strategist).
+
+---
+
+## F. Data Pipeline Architecture
+
+### Real-Time Pipeline
+
+```
+Exchange WebSocket              Internal System
+═══════════════                 ═══════════════
+
+Binance aggTrade ──────────►  Tick Processor ──► Redis (latest price)
+                                    │
+Binance depth@100ms ───────►  Book Processor ──► Redis (top-of-book)
+                                    │
+Binance kline_1m ──────────►  Candle Builder ──► Redis + TimescaleDB
+                                    │
+                                    ▼
+                              Feature Engine ──► Indicator Cache (Redis)
+                              (pandas-ta)           │
+                                                    ▼
+                                              Strategy Engine
+                                              (consumes features)
+```
+
+### Historical Data Pipeline
+
+```
+Data Sources                    Processing                    Storage
+════════════                    ══════════                    ═══════
+
+Tardis.dev API ───┐
+                  │
+Binance REST ─────┼──► Download Script ──► Parquet Files ──► TimescaleDB
+                  │    (scheduled daily)    (raw archive)    (queryable)
+Polygon.io ───────┤
+                  │
+Dukascopy ────────┘
+
+                         Backtest Runner
+                              │
+                    ┌─────────┼─────────┐
+                    ▼         ▼         ▼
+               VectorBT  Nautilus  QuantConnect
+               (research) (valid.) (production)
+```
+
+### Database Schema (TimescaleDB)
+
+```sql
+-- OHLCV candles (hypertable, auto-compressed)
+CREATE TABLE candles (
+    time        TIMESTAMPTZ NOT NULL,
+    symbol      TEXT NOT NULL,
+    timeframe   TEXT NOT NULL,  -- '1m', '5m', '15m', '1h'
+    open        DOUBLE PRECISION,
+    high        DOUBLE PRECISION,
+    low         DOUBLE PRECISION,
+    close       DOUBLE PRECISION,
+    volume      DOUBLE PRECISION
+);
+SELECT create_hypertable('candles', 'time');
+
+-- Trade log
+CREATE TABLE trades (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    time_entry      TIMESTAMPTZ NOT NULL,
+    time_exit       TIMESTAMPTZ,
+    strategy        TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    side            TEXT NOT NULL,  -- 'long', 'short'
+    entry_price     DOUBLE PRECISION,
+    exit_price      DOUBLE PRECISION,
+    quantity        DOUBLE PRECISION,
+    pnl_dollars     DOUBLE PRECISION,
+    pnl_percent     DOUBLE PRECISION,
+    r_multiple      DOUBLE PRECISION,
+    fees            DOUBLE PRECISION,
+    stop_loss       DOUBLE PRECISION,
+    take_profit     DOUBLE PRECISION,
+    exit_reason     TEXT,  -- 'take_profit', 'stop_loss', 'signal', 'circuit_breaker'
+    signal_strength DOUBLE PRECISION,
+    market_regime   TEXT,
+    notes           TEXT
+);
+SELECT create_hypertable('trades', 'time_entry');
+
+-- Enable compression (10x storage reduction)
+ALTER TABLE candles SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'symbol, timeframe'
+);
+SELECT add_compression_policy('candles', INTERVAL '7 days');
+```
+
+### Same-Code Backtest/Live Pattern
+
+The critical design principle: **strategy code must be identical for backtest and live trading.** The only thing that changes is the data source and execution adapter.
+
+```python
+# Strategy code — same for backtest and live
+class EMAScalpStrategy:
+    def on_candle(self, candle: Candle, indicators: dict) -> Signal | None:
+        if indicators['ema9'] > indicators['ema21']:
+            if indicators['rsi7'] < 65:
+                return Signal(side='buy', strength=0.7)
+        return None
+
+# Backtest mode:
+engine = BacktestEngine(data=historical_candles)
+engine.run(EMAScalpStrategy())
+
+# Live mode:
+engine = LiveEngine(data_feed=BinanceWebSocket(), executor=BinanceExecutor())
+engine.run(EMAScalpStrategy())  # SAME strategy object
+```
+
+---
+
+## G. Risk Management Framework
+
+### Architecture: Risk as Separate Process
+
+```
+┌─────────────────┐      ZeroMQ REQ/REP      ┌──────────────────┐
+│  Trading Bot     │ ◄──────────────────────► │  Risk Manager    │
+│  Process         │                           │  Process         │
+│                  │  Every order passes       │                  │
+│  Cannot bypass   │  through risk check       │  Independent     │
+│  risk checks     │  before execution         │  process         │
+│                  │                           │                  │
+│  If risk process │                           │  Monitors:       │
+│  dies → bot      │                           │  - P&L           │
+│  halts           │                           │  - Exposure      │
+│                  │                           │  - Drawdown      │
+│                  │                           │  - Greeks        │
+└─────────────────┘                           └──────────────────┘
+```
+
+### Pre-Trade Risk Checks (Every Order)
+
+```python
+def pre_trade_check(order) -> tuple[bool, str]:
+    # 1. Fat finger — price within 2% of mid
+    if abs(order.price - current_mid) / current_mid > 0.02:
+        return False, "Price > 2% from mid"
+
+    # 2. Max position size
+    new_position = positions[order.symbol] + order.signed_qty
+    if abs(new_position) > max_position[order.symbol]:
+        return False, "Exceeds max position"
+
+    # 3. Max order size
+    if abs(order.quantity) > max_order_size[order.symbol]:
+        return False, "Order too large"
+
+    # 4. Daily P&L limit
+    if daily_pnl < -daily_loss_limit:
+        return False, "Daily loss limit reached"
+
+    # 5. Max gross exposure
+    if gross_exposure + abs(order.notional) > max_gross_exposure:
+        return False, "Exceeds gross exposure"
+
+    # 6. Correlation check
+    if would_increase_correlated_exposure(order):
+        return False, "Correlated exposure too high"
+
+    return True, "APPROVED"
+```
+
+### Circuit Breakers
+
+| Breaker | Threshold | Action |
+|---|---|---|
+| Daily loss | -2% (scalp), -3% (day), -5% (options) | Halt all trading for the day |
+| Weekly loss | -5% | Reduce position sizes by 50% |
+| Monthly loss | -10% | Halt trading, require manual review |
+| Max drawdown from peak | -15% | Emergency halt, close all positions |
+| Consecutive losses | 5 in a row | Pause 1 hour, reduce size 50% |
+| Daily trade count | 50 (scalp), 20 (day) | Stop new entries |
+
+### Position Sizing: Fractional Kelly
+
+```
+Full Kelly:    f* = mean_return / variance_of_returns
+Our Target:    f  = 0.25 * f*  (quarter Kelly)
+Hard Cap:      max(f, 0.02)    (never risk > 2% per trade)
+```
+
+| Phase | Kelly Fraction | Max Drawdown Expected | Rationale |
+|---|---|---|---|
+| Paper trading | 0.25 (quarter) | ~12-18% | Learning, calibrating |
+| First 6 months live | 0.25 (quarter) | ~12-18% | Proving backtest stats |
+| After 6 months profitable | 0.50 (half) | ~25-35% | Stats confirmed |
+| Never | 1.0 (full) | ~50-70% | Theoretical only |
+
+### Portfolio Heat Monitor
+
+```
+Rules:
+- Total portfolio heat (capital at risk): max 6%
+- Single position heat: max 2%
+- Single sector/correlation cluster: max 4%
+- Gross exposure: max 200% (for leveraged strategies)
+- Cash/buying power reserve: min 30%
+
+Heat = position_size * (entry_price - stop_loss) / entry_price
+Total_heat = sum of all position heats / total_capital
+```
+
+### Correlation Risk
+
+```
+Rules:
+- Max 30% of capital in positions with pairwise correlation > 0.7
+- All crypto = one cluster (BTC, ETH, SOL are 0.8+ correlated in crashes)
+- All equity indices = one cluster in crashes
+- True diversification = different asset classes + long/short
+```
+
+### Options-Specific Risk
+
+| Greek | Target | Hard Limit | Action if Breached |
+|---|---|---|---|
+| Portfolio delta | ±10% NAV | ±20% NAV | Hedge with underlying |
+| Portfolio vega | Monitor | ±1% NAV per vol point | Reduce vega-sensitive positions |
+| Portfolio theta | Positive | Max 0.5% NAV/day | Don't oversell premium |
+| Gamma | Monitor | Flag if > 1% NAV per 1% move | Awareness, no hard rule |
+
+### Stress Testing
+
+Run nightly:
+- "What if market drops 5% in 1 minute?"
+- "What if VIX spikes 10 points?"
+- "What if BTC drops 20% overnight?"
+- "What if funding rate flips to -0.1%?"
+- Calculate portfolio P&L under each scenario
+
+---
+
+## H. Build Phases (Milestone-Based)
+
+> **NOTE:** The original plan used 9 week-based phases (28 weeks). This has been corrected to 8 milestone-based phases. For a solo developer learning while building, this is realistically 12-18 months. Don't chase timelines — hit milestones.
+
+### Phase 1 — Data Foundation
+
+**Goal:** Core infrastructure + data pipeline
+
+**Deliverables:**
+- [ ] Project structure (folders, `pyproject.toml`, Python venv or uv)
+- [ ] Config system (TOML files)
+- [ ] Async WebSocket client for Binance (tick data + kline streams)
+- [ ] IC Markets cTrader Open API connection (forex/gold data)
+- [ ] Candle builder (build OHLCV from raw ticks in real-time)
+- [ ] Indicator engine (pandas-ta on pandas DataFrames)
+- [ ] Redis for hot data cache
+- [ ] SQLite for trade log (upgrade to TimescaleDB in Phase 7)
+- [ ] Parquet for historical bar storage
+- [ ] structlog + basic Telegram alerts
+- [ ] Configuration system (TOML config files)
+
+> **NOT in Phase 1:** Docker, TimescaleDB, Grafana. These add debugging complexity and premature infrastructure. Use venv, SQLite, and Parquet. Docker only when deploying to VPS (Phase 7).
+
+**Dependencies:** None — this is the foundation
+
+---
+
+### Phase 2 — First Strategy + Backtest + Paper Trade
+
+**Goal:** One working strategy validated by backtest, THEN paper traded
+
+> **CRITICAL:** Never deploy a strategy (even paper) before backtesting it. Backtesting is merged into Phase 2, not deferred to Phase 4.
+
+**Deliverables:**
+- [ ] EMA crossover + RSI scalping strategy (Module 2) — system plumbing test only
+- [ ] Asian Range Breakout on XAUUSD (first real strategy — replicates Apex Drawdown Zero logic)
+- [ ] VectorBT backtest on 2+ years of historical data
+- [ ] Walk-forward validation (in-sample -> out-of-sample split)
+- [ ] Performance metrics: Sharpe, Sortino, max drawdown, win rate, profit factor
+- [ ] NautilusTrader setup for tick-level validation
+- [ ] Paper trading mode (simulated fills from live data)
+- [ ] Basic P&L tracking
+- [ ] Trade logging to SQLite
+- [ ] Historical data downloader (Binance, Alpaca, IC Markets)
+
+**Milestone: Strategy shows positive Sharpe > 1.0 on 2-year backtest with walk-forward validation**
+
+**Dependencies:** Phase 1 complete
+
+---
+
+### Phase 3 — Risk Management + Master Money Management System (M3S)
+
+**Goal:** Robust, independent risk system + AI-powered money management
+
+**Deliverables:**
+- [ ] Risk manager as separate ZeroMQ process
+- [ ] Pre-trade risk checks (all 6: fat finger, max position, daily P&L, gross exposure, correlation, market hours)
+- [ ] Circuit breakers (daily halt, weekly reduce, monthly halt + review, max drawdown emergency close)
+- [ ] Position sizing (fractional Kelly)
+- [ ] Portfolio heat monitor
+- [ ] Correlation-based exposure limits
+- [ ] Kill switch (emergency halt via Telegram command)
+- [ ] **M3S — Master Money Management System:**
+  - [ ] Strategy registry with risk profiles (SAFE / MODERATE / AGGRESSIVE tagging)
+  - [ ] 4 money management modes (Fortress / Balanced / Assault / AI Adaptive)
+  - [ ] Capital allocation engine (Kelly-weighted, correlation-aware, mode-capped)
+  - [ ] Compounding engine (base capital + profit pool tracking, mode-dependent rules)
+  - [ ] AI Advisor agent — Claude "PhD" (runs every 30 min + after P&L >0.5% + end of day)
+  - [ ] Mode switching: manual override via Telegram + AI recommendation
+  - [ ] Telegram notifications: "Switching to BALANCED — FOMC tomorrow"
+
+**Milestone: Risk system prevents paper losses beyond defined limits for 30 consecutive days**
+
+**Dependencies:** Phase 2 complete
+
+---
+
+### Phase 4 — Multi-Exchange Execution
+
+**Goal:** Execute on multiple brokers with <200ms latency
+
+**Deliverables:**
+- [ ] IC Markets execution (cTrader Open API — Python native, forex/gold)
+- [ ] Binance execution (WebSocket orders — crypto)
+- [ ] Alpaca native Python client (supplement existing MCP — US equities)
+- [ ] IBKR execution via `ib_insync` (replaces MT5 — forex + futures + options from one broker)
+- [ ] Paper executor (simulated fills)
+- [ ] Order state tracking and reconciliation
+- [ ] Smart order routing (pick best exchange per instrument)
+
+**Milestone: Successfully execute paper trades on 2+ exchanges with <200ms latency**
+
+**Dependencies:** Phase 3 complete
+
+---
+
+### Phase 5 — AI Agent Intelligence
+
+**Goal:** Multi-agent system for signal enhancement
+
+**Deliverables:**
+- [ ] Claude API integration (direct calls, simple Python orchestrator with asyncio.gather)
+- [ ] Technical Analyst agent (reads TradingView MCP indicators)
+- [ ] Sentiment Analyst agent (Alpaca news API + Claude scoring)
+- [ ] Order Flow agent (book imbalance, CVD analysis)
+- [ ] Bull vs Bear debate system (adversarial reasoning)
+- [ ] Meta-Strategist (market regime detection + module switching)
+- [ ] Caching layer (reduce API costs by 60%+):
+  - Cache sentiment analysis results for 15 min
+  - Cache regime detection for 30 min
+  - Use Haiku for high-frequency calls (10x cheaper)
+  - Use Sonnet only for complex reasoning (debate, meta-strategist)
+  - Batch indicator data to reduce API call count
+- [ ] Agent cost tracking and optimization
+
+**Milestone: AI-enhanced signals improve backtest Sharpe by >0.2 vs non-AI baseline**
+
+**Dependencies:** Phase 2 (strategies), Phase 2 (backtesting to validate AI signals)
+
+---
+
+### Phase 6 — Options Module
+
+**Goal:** Automated options trading via IBKR
+
+**Deliverables:**
+- [ ] IBKR options chain data fetcher
+- [ ] Greeks calculation engine (py_vollib)
+- [ ] Iron condor strategy (automated entry/management/exit)
+- [ ] Credit spread strategy (0DTE SPX)
+- [ ] Portfolio Greeks dashboard (delta, vega, theta, gamma limits)
+- [ ] Delta hedging automation
+- [ ] Deribit integration (crypto options — if tax-viable)
+
+**Milestone: Iron condor strategy shows positive backtest on 1 year of SPX data**
+
+**Dependencies:** Phase 3 (risk management), Phase 2 (backtesting)
+
+---
+
+### Phase 7 — Production Deployment
+
+**Goal:** Full production system running unattended on VPS
+
+**Deliverables:**
+- [ ] Docker Compose for full stack
+- [ ] AWS Singapore VPS for crypto + forex strategies
+- [ ] TimescaleDB migration (replace SQLite + Parquet for warm storage)
+- [ ] Prometheus metrics from all components
+- [ ] Grafana dashboards (system health + trading performance)
+- [ ] Loki log aggregation
+- [ ] Trading dashboard (Dash/NiceGUI)
+- [ ] Automated daily backtest re-runs
+- [ ] Performance reporting (daily Telegram summary)
+
+**Milestone: System runs 7 days unattended on VPS without intervention**
+
+**Dependencies:** All previous phases
+
+---
+
+### Phase 8 — Scale + Optimization
+
+**Goal:** Multi-strategy portfolio, continuous improvement
+
+**Deliverables:**
+- [ ] Additional strategies (2-3 more, uncorrelated):
+  - [ ] Smart Money Concepts (ICT/SMC) — order blocks, FVGs, liquidity sweeps (Python: `smart-money-concepts`)
+  - [ ] Multi-Indicator Fusion — RSI + EMA + VWAP + MACD combined (60.63% proven win rate)
+  - [ ] Statistical Arbitrage — pairs trading (cointegration + Kalman filter)
+  - [ ] CVD Divergence — crypto order flow reversal
+- [ ] Pine Script ingestion pipeline (Claude analyzes Pine -> converts to Python BaseStrategy -> auto-backtest -> deploy)
+- [ ] Ultra scalping module (tick-level signals, VPS required)
+- [ ] Multi-agent debate system (Bull vs Bear)
+- [ ] Meta-Strategist regime detector
+- [ ] Performance dashboard
+- [ ] Funding rate arbitrage (crypto, market-neutral)
+- [ ] Cross-strategy correlation monitoring
+- [ ] Monthly strategy review and optimization cycle
+- [ ] Rust hot paths for bottleneck functions (if needed)
+
+**Milestone: 3+ strategies running with portfolio Sharpe > 1.5**
+
+**Dependencies:** Continuous
+
+---
+
+### India-Specific Tax & Regulatory Notes
+
+> **This section was added post-review. Tax treatment significantly impacts strategy economics.**
+
+| Market | Broker | Tax Rate (India) | Impact on Scalping |
+|---|---|---|---|
+| **Forex/Gold** | IC Markets (offshore) | Income slab rate (5-20%) | BEST — low tax, high frequency viable |
+| **US Equities** | Alpaca / IBKR | 15% LTCG / 30% STCG | MODERATE — depends on holding period |
+| **Crypto** | Binance | 30% flat + 1% TDS per transaction | WORST — destroys high-frequency margins |
+
+**Key insight:** The SAME scalping strategy on Gold (XAUUSD) via IC Markets is **10-25% more profitable after tax** than the identical strategy on BTCUSDT via Binance.
+
+**Action:** Focus high-frequency scalping on forex/gold. Use crypto only for lower-frequency strategies (funding rate arb, swing trades) where wider margins absorb the tax hit.
+
+**Regulatory notes:**
+- **Binance:** Legal in India (registered with FIU-IND in 2025), requires PAN + Aadhaar + KYC
+- **Deribit:** Restricted for Indian residents — derivatives exchange, not registered in India
+- **IBKR:** Available to Indian residents with some restrictions on US options
+- **IC Markets:** Available to Indian residents via offshore entity (not SEBI regulated)
+
+---
+
+## I. Project File Structure
+
+```
+algo-trading/
+│
+├── TRADING_SYSTEM_BLUEPRINT.md        # This document
+├── Algo_Trading_Knowledge_Base.pdf    # Reference PDF
+├── CLAUDE.md                          # Claude Code instructions
+├── pyproject.toml                     # Python project config
+├── MASTER_PLAN.md                     # Full context doc for Claude sessions
+├── FULL_PLAN.md                       # Approved plan with all corrections
+├── requirements.txt                   # Dependencies
+│
+├── config/
+│   ├── settings.toml                  # Main configuration
+│   ├── strategies.toml                # Strategy parameters
+│   ├── risk.toml                      # Risk limits
+│   ├── exchanges.toml                 # Exchange API configs (gitignored)
+│   └── logging.toml                   # Log configuration
+│
+├── src/
+│   ├── __init__.py
+│   ├── main.py                        # Entry point
+│   │
+│   ├── data/                          # Data Layer
+│   │   ├── __init__.py
+│   │   ├── feeds/
+│   │   │   ├── binance_ws.py          # Binance WebSocket feed
+│   │   │   ├── alpaca_ws.py           # Alpaca WebSocket feed
+│   │   │   ├── ibkr_feed.py           # IBKR TWS data feed
+│   │   │   ├── icmarkets_feed.py      # IC Markets cTrader Open API feed
+│   │   │   └── deribit_ws.py          # Deribit WebSocket feed
+│   │   ├── candle_builder.py          # Build OHLCV from ticks
+│   │   ├── feature_engine.py          # Compute indicators
+│   │   ├── order_book.py              # Order book processor
+│   │   └── downloader.py             # Historical data downloader
+│   │
+│   ├── strategies/                    # Strategy Modules
+│   │   ├── __init__.py
+│   │   ├── base.py                    # Base strategy interface
+│   │   ├── ultra_scalp/
+│   │   │   ├── __init__.py
+│   │   │   ├── vwap_reversion.py      # VWAP mean reversion
+│   │   │   ├── orderbook_imbalance.py # Order book signals
+│   │   │   └── cvd_divergence.py      # CVD-based signals
+│   │   ├── scalping/
+│   │   │   ├── __init__.py
+│   │   │   ├── ema_crossover.py       # EMA cross + RSI + volume
+│   │   │   ├── bb_squeeze.py          # Bollinger Band squeeze
+│   │   │   └── structure_break.py     # Market structure signals
+│   │   ├── day_trading/
+│   │   │   ├── __init__.py
+│   │   │   ├── supply_demand.py       # Supply/demand zone trading
+│   │   │   ├── pairs.py              # Pairs trading (Kalman filter)
+│   │   │   └── momentum.py           # Trend-following momentum
+│   │   └── options/
+│   │       ├── __init__.py
+│   │       ├── iron_condor.py         # Systematic iron condors
+│   │       ├── credit_spread.py       # 0DTE credit spreads
+│   │       ├── gamma_scalp.py         # Gamma scalping
+│   │       └── vol_surface.py         # Volatility surface model
+│   │
+│   ├── execution/                     # Execution Layer
+│   │   ├── __init__.py
+│   │   ├── base.py                    # Base executor interface
+│   │   ├── binance_executor.py        # Binance WebSocket orders
+│   │   ├── alpaca_executor.py         # Alpaca REST/WS orders
+│   │   ├── ibkr_executor.py           # IBKR TWS orders (forex+futures+options)
+│   │   ├── icmarkets_executor.py      # IC Markets cTrader orders (forex/gold)
+│   │   ├── deribit_executor.py        # Deribit orders
+│   │   ├── paper_executor.py          # Simulated execution
+│   │   └── order_manager.py           # Order state tracking
+│   │
+│   ├── risk/                          # Risk Management (SEPARATE PROCESS)
+│   │   ├── __init__.py
+│   │   ├── risk_server.py             # ZeroMQ risk server (main)
+│   │   ├── pre_trade.py               # Pre-trade checks
+│   │   ├── circuit_breaker.py         # Circuit breaker logic
+│   │   ├── position_sizer.py          # Kelly criterion + sizing
+│   │   ├── portfolio_heat.py          # Portfolio heat monitor
+│   │   ├── correlation.py             # Correlation-based limits
+│   │   ├── greeks_risk.py             # Options Greeks risk
+│   │   └── stress_test.py             # Scenario analysis
+│   │
+│   ├── agents/                        # AI Agent Layer
+│   │   ├── __init__.py
+│   │   ├── orchestrator.py            # Simple Python orchestrator (asyncio.gather)
+│   │   ├── technical_analyst.py       # Technical analysis agent
+│   │   ├── sentiment_analyst.py       # News/social sentiment agent
+│   │   ├── orderflow_agent.py         # Order flow analysis agent
+│   │   ├── debate.py                  # Bull vs Bear debate
+│   │   ├── meta_strategist.py         # Market regime detector
+│   │   └── prompts/
+│   │       ├── technical.txt          # System prompts for each agent
+│   │       ├── sentiment.txt
+│   │       ├── orderflow.txt
+│   │       ├── bull.txt
+│   │       ├── bear.txt
+│   │       └── regime.txt
+│   │
+│   ├── m3s/                           # Master Money Management System (THE INNOVATION)
+│   │   ├── __init__.py
+│   │   ├── strategy_registry.py       # Register strategies with risk profiles (SAFE/MODERATE/AGGRESSIVE)
+│   │   ├── modes.py                   # 4 modes: Fortress, Balanced, Assault, AI Adaptive
+│   │   ├── allocator.py               # Capital allocation engine (Kelly-weighted, correlation-aware)
+│   │   ├── compounding.py             # Compounding engine (base capital + profit pool)
+│   │   ├── ai_advisor.py              # Claude "PhD" agent — dynamic mode/allocation decisions
+│   │   └── mode_switch.py             # Manual override + AI recommendation + Telegram notifications
+│   │
+│   ├── portfolio/                     # Portfolio Management
+│   │   ├── __init__.py
+│   │   ├── tracker.py                 # Position and P&L tracking
+│   │   ├── greeks_tracker.py          # Portfolio Greeks
+│   │   └── rebalancer.py              # Portfolio rebalancing
+│   │
+│   ├── backtest/                      # Backtesting
+│   │   ├── __init__.py
+│   │   ├── vectorbt_runner.py         # VectorBT parameter sweeps
+│   │   ├── nautilus_runner.py         # NautilusTrader tick-level
+│   │   ├── walk_forward.py            # Walk-forward validation
+│   │   └── report.py                 # Backtest report generator
+│   │
+│   ├── dashboard/                     # Web Dashboard
+│   │   ├── __init__.py
+│   │   ├── app.py                     # Dash/NiceGUI main app
+│   │   ├── pages/
+│   │   │   ├── overview.py            # P&L overview
+│   │   │   ├── positions.py           # Open positions
+│   │   │   ├── trades.py              # Trade journal
+│   │   │   ├── risk.py                # Risk metrics
+│   │   │   ├── greeks.py              # Options Greeks
+│   │   │   └── backtest.py            # Backtest results
+│   │   └── assets/
+│   │       └── style.css
+│   │
+│   └── utils/                         # Shared Utilities
+│       ├── __init__.py
+│       ├── config.py                  # Config loader
+│       ├── logger.py                  # Structured logging setup
+│       ├── telegram.py                # Telegram alert bot
+│       ├── metrics.py                 # Prometheus metrics
+│       └── types.py                   # Shared data types (msgspec)
+│
+├── tests/
+│   ├── test_strategies/
+│   ├── test_risk/
+│   ├── test_execution/
+│   ├── test_data/
+│   └── conftest.py
+│
+├── scripts/
+│   ├── download_data.py               # Download historical data
+│   ├── run_backtest.py                # Run backtests
+│   ├── deploy.sh                      # Deployment script
+│   └── setup_db.sql                   # Database schema
+│
+├── notebooks/
+│   ├── strategy_research.ipynb        # Strategy exploration
+│   ├── pairs_analysis.ipynb           # Cointegration analysis
+│   └── options_analysis.ipynb         # Options strategy analysis
+│
+├── infrastructure/
+│   ├── prometheus.yml                 # Prometheus config
+│   ├── grafana/
+│   │   └── dashboards/
+│   │       ├── system_health.json
+│   │       └── trading_performance.json
+│   └── nginx.conf                     # Reverse proxy (if needed)
+│
+└── data/                              # Local data storage (gitignored)
+    ├── historical/                    # Downloaded historical data
+    ├── backtest_results/              # Backtest output
+    └── logs/                          # Application logs
+```
+
+---
+
+## J. Performance Targets & Metrics
+
+### Per-Strategy Targets
+
+| Metric | Ultra Scalp | Scalping | Day Trading | Options |
+|---|---|---|---|---|
+| Sharpe Ratio | > 1.5 | > 1.2 | > 1.0 | > 0.8 |
+| Sortino Ratio | > 2.0 | > 1.5 | > 1.2 | > 1.0 |
+| Win Rate | 55-65% | 50-60% | 45-55% | 65-80% (selling) |
+| Avg Win / Avg Loss | 1.0-1.5 | 1.5-2.5 | 2.0-3.0 | 0.5-1.0 (selling) |
+| Max Drawdown | < 8% | < 12% | < 15% | < 15% |
+| Profit Factor | > 1.3 | > 1.4 | > 1.5 | > 1.3 |
+| Daily Trades | 10-50 | 5-15 | 2-5 | 1-3 |
+
+### Portfolio-Level Targets
+
+| Metric | Target | Minimum Acceptable |
+|---|---|---|
+| Portfolio Sharpe | > 1.5 | > 1.0 |
+| Portfolio Max Drawdown | < 15% | < 20% |
+| Monthly Return | 3-8% | > 1% |
+| Monthly Win Rate | > 70% of months | > 60% |
+| Max Drawdown Duration | < 30 days | < 60 days |
+| Correlation Between Strategies | < 0.3 | < 0.5 |
+
+### Latency Targets
+
+| Metric | Ultra Scalp | Scalping | Day Trading |
+|---|---|---|---|
+| Data feed → signal | < 5ms | < 50ms | < 500ms |
+| Signal → order sent | < 10ms | < 50ms | < 200ms |
+| Order → fill | < 30ms | < 100ms | < 500ms |
+| Total round trip | < 50ms | < 200ms | < 1 second |
+
+### System Reliability Targets
+
+| Metric | Target |
+|---|---|
+| Uptime | > 99.5% during market hours |
+| Missed signals | < 1% |
+| Failed orders (retryable) | < 0.5% |
+| Data feed disconnections/day | < 3 (with auto-reconnect) |
+| Risk system availability | 100% (if down, trading halts) |
+
+---
+
+## K. Cost Estimates
+
+### Monthly Operating Costs
+
+| Item | Cost/Month | Notes |
+|---|---|---|
+| **AWS VPS (Singapore)** | $30-60 | EC2 t3.medium for Binance trading |
+| **Hetzner VPS (Dev)** | $10-20 | Development and backtesting |
+| **TradingView Pro** | $15-60 | Already have, for MCP |
+| **Polygon.io** | $29-79 | US stock + options data |
+| **Tardis.dev** | $0-49 | Crypto order flow data |
+| **Claude API** | $50-150 | AI agent intelligence ($8-15/day) |
+| **IBKR Market Data** | $10-30 | US options data bundles |
+| **Domain + SSL** | $5 | Dashboard hosting |
+| **Total** | **$150-450/mo** | Scales with usage |
+
+### One-Time Costs
+
+| Item | Cost | Notes |
+|---|---|---|
+| VectorBT Pro | $149 | One-time license |
+| IBKR Account Minimum | $0 | No minimum, but $110K for portfolio margin |
+| Binance Account | $0 | Free, needs KYC |
+| Deribit Account | $0 | Free, needs KYC |
+
+### Break-Even Analysis
+
+At $300/month operating cost:
+- Need $300/month profit to break even
+- With $10,000 capital: need 3% monthly return
+- With $25,000 capital: need 1.2% monthly return
+- With $50,000 capital: need 0.6% monthly return
+- With $100,000 capital: need 0.3% monthly return
+
+---
+
+## L. Sources & References
+
+### Execution Platforms
+- Binance API Docs: https://binance-docs.github.io/apidocs/
+- Interactive Brokers API: https://interactivebrokers.github.io/
+- Deribit API: https://docs.deribit.com/
+- Alpaca API: https://docs.alpaca.markets/
+- OKX API: https://www.okx.com/docs/
+
+### Backtesting & Research
+- VectorBT: https://github.com/polakowo/vectorbt
+- NautilusTrader: https://github.com/nautechsystems/nautilus_trader
+
+### AI & Multi-Agent
+- TradingAgents: https://github.com/TauricResearch/TradingAgents
+- Smart Money Concepts (Python): https://github.com/joshyattridge/smart-money-concepts
+- QLib (Microsoft): https://github.com/microsoft/qlib
+- Anthropic Claude API: https://docs.anthropic.com/
+
+### Data Providers
+- Tardis.dev: https://tardis.dev/
+- Polygon.io: https://polygon.io/
+- Databento: https://databento.com/
+- Santiment: https://santiment.net/
+
+### Options & Greeks
+- py_vollib: https://github.com/vollib/py_vollib
+- QuantLib-Python: https://github.com/lballabio/QuantLib-SWIG
+
+### Execution Brokers
+- IC Markets cTrader Open API: https://help.ctrader.com/open-api/
+- IC Markets: https://www.icmarkets.com/
+
+### Infrastructure
+- uvloop: https://github.com/MagicStack/uvloop
+- orjson: https://github.com/ijl/orjson
+- Pandas: https://pandas.pydata.org/
+- ZeroMQ: https://zeromq.org/
+- TimescaleDB: https://www.timescale.com/ (Phase 7+)
+
+### Knowledge Base
+- Algo Trading Knowledge Base (PDF): included in project root
+- Reddit r/algotrading: https://reddit.com/r/algotrading
+- Reddit r/quant: https://reddit.com/r/quant
+
+---
+
+> **Next Step:** Begin Phase 1 — Data Foundation. Start with `pyproject.toml`, venv, TOML config system, async WebSocket client, and candle builder. NO Docker, NO TimescaleDB yet.
+
+---
+
+> **Version History:**
+> - v1.0 (April 11, 2026) — Original blueprint
+> - v1.1 (April 11, 2026) — Applied 17 corrections: MT5 replaced with IBKR+IC Markets, pandas as primary, backtesting merged into Phase 2, milestone-based phases, India tax section, Docker deferred to Phase 7, LangGraph/FinRL/FreqTrade removed, M3S added to Phase 3, IC Markets as primary forex broker, strategy risk profiling (SAFE/MODERATE/AGGRESSIVE), Pine Script ingestion pipeline
+
+---
+
+*Generated by Claude | April 11, 2026 | Version 1.0*
