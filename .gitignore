@@ -7,8 +7,8 @@ venv/
 dist/
 build/
 
-# Data (large files + runtime)
-data/
+# Data (large files + runtime) — only top-level data/ directory
+/data/
 *.parquet
 
 # Config with secrets

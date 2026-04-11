@@ -21,7 +21,7 @@ _configured = False
 
 
 def _orjson_serializer(data: dict, **_kw) -> str:
-    return orjson.dumps(data).decode()
+    return orjson.dumps(data, option=orjson.OPT_SERIALIZE_NUMPY).decode()
 
 
 def setup_logging() -> None:

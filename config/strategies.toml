@@ -1,7 +1,7 @@
 # Strategy parameters — each strategy reads its section here
 
 [ema_crossover]
-enabled = true
+enabled = false                  # Deprecated: EMA crossover not profitable on crypto intraday
 risk_profile = "SAFE"
 markets = ["BTCUSDT", "ETHUSDT"]
 timeframe = "1m"
@@ -11,11 +11,33 @@ rsi_period = 7
 rsi_overbought = 70
 rsi_oversold = 30
 volume_confirmation = true
-volume_multiplier = 1.5
-max_risk_per_trade = 0.01       # 1% of equity
-take_profit_ratio = 2.0         # TP = 2x stop loss
-trailing_stop = true
-trailing_pct = 0.005            # 0.5% trail
+volume_multiplier = 1.2
+max_risk_per_trade = 0.01
+take_profit_ratio = 2.0
+min_ema_gap_atr = 0.3
+cooldown_bars = 10
+min_sl_atr = 0.5
+max_notional_pct = 2.0
+
+[bb_rsi_mr]
+enabled = true
+risk_profile = "SAFE"
+# Validated symbols: altcoins that mean-revert well on 1h
+# BTC excluded — trends too aggressively even at ADX<20
+markets = ["ETHUSDT", "BNBUSDT", "ADAUSDT", "DOTUSDT", "MATICUSDT"]
+timeframe = "1h"
+bb_period = 20
+rsi_period = 14
+adx_period = 14
+atr_period = 14
+rsi_overbought = 75             # strict: only enter at extremes
+rsi_oversold = 25               # strict: only enter at extremes
+adx_threshold = 20              # strict: only trade in truly flat markets
+sl_atr_mult = 3.0               # 3 ATR stop — room to breathe
+max_hold_bars = 48              # timeout after 48 bars (2 days)
+cooldown_bars = 5               # wait 5 bars after exit
+max_risk_per_trade = 0.01       # 1% equity risk per trade
+max_notional_pct = 2.0          # max position = 2x equity
 
 [asian_range_breakout]
 enabled = false                  # Enable in Phase 2

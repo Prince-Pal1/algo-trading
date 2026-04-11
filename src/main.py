@@ -1,7 +1,7 @@
 """Main entry point — wires the data pipeline and starts the trading engine.
 
-Pipeline: BinanceWS → CandleBuilder → FeatureEngine → Storage
-                                    ↘ (future) StrategyRouter → RiskManager → Execution
+Pipeline: BinanceWS → CandleBuilder → FeatureEngine → StrategyRouter → PaperExecutor
+                                                                       ↘ Storage (signal/trade log)
 
 Usage:
     python -m src.main                          # Run with defaults from config
@@ -22,6 +22,8 @@ from src.data.candle_builder import CandleBuilder
 from src.data.feature_engine import FeatureEngine
 from src.data.feeds.binance_ws import BinanceWebSocketFeed
 from src.data.storage import Storage
+from src.execution.paper_executor import PaperExecutor
+from src.strategies.router import StrategyRouter
 from src.utils.config import get_config
 from src.utils.logger import get_logger
 from src.utils.types import Candle, Tick
@@ -51,6 +53,10 @@ class TradingEngine:
         self.feature_engine = FeatureEngine(indicators=indicators)
         self.storage = Storage()
 
+        # ── Strategy + Execution (wired in start()) ──
+        self.strategy_router: StrategyRouter | None = None
+        self.paper_executor: PaperExecutor | None = None
+
         # ── Stats ──
         self._tick_count = 0
         self._candle_count = 0
@@ -61,6 +67,10 @@ class TradingEngine:
         """Handle raw tick from exchange."""
         self._tick_count += 1
         await self.candle_builder.handle_tick(tick)
+
+        # Update paper executor with latest price
+        if self.paper_executor:
+            self.paper_executor.update_prices(tick.symbol, tick.price)
 
         # Log every 1000 ticks
         if self._tick_count % 1000 == 0:
@@ -98,8 +108,12 @@ class TradingEngine:
         if indicator_vals:
             log.info("features", symbol=symbol, tf=timeframe, **indicator_vals)
 
-        # TODO Phase 2: Route features to StrategyRouter
-        # await self.strategy_router.on_features(symbol, timeframe, features)
+        # Route to strategies → signals → executor
+        if self.strategy_router:
+            signals = await self.strategy_router.on_features(symbol, timeframe, features)
+            if signals and self.paper_executor:
+                for sig in signals:
+                    await self.paper_executor.execute(sig)
 
     async def start(self) -> None:
         """Initialize all components and start the data pipeline."""
@@ -117,6 +131,10 @@ class TradingEngine:
 
         # Initialize storage
         await self.storage.init()
+
+        # Initialize strategy router + paper executor
+        self.paper_executor = PaperExecutor(storage=self.storage)
+        self.strategy_router = StrategyRouter.from_config(storage=self.storage)
 
         # Wire the callback chain:
         #   feed.on_tick → _on_tick → candle_builder.handle_tick

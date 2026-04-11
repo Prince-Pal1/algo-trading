@@ -33,14 +33,16 @@
 | Candle Builder | `src/data/candle_builder.py` | Data Feeds | Feature Engine, Strategies | ✅ working |
 | Feature Engine | `src/data/feature_engine.py` | `ta`, `pandas` | Strategies | ✅ working |
 | Order Book Processor | `src/data/order_book.py` | Binance WS | Ultra Scalp Strategies | 📋 planned |
-| Historical Downloader | `src/data/downloader.py` | `httpx`, Exchange APIs | Backtesting | 📋 planned |
+| Historical Downloader | `src/data/downloader.py` | `httpx`, `certifi` | Backtesting | ✅ working |
 
 ### Strategy Layer (Python -- src/strategies/)
 
 | Module | File | Depends On | Used By | Status |
 |---|---|---|---|---|
-| Base Strategy Interface | `src/strategies/base.py` | -- | All strategies | 📋 planned |
-| EMA Crossover Scalp | `src/strategies/scalping/ema_crossover.py` | Feature Engine, `pandas-ta` | Signal Aggregator | 📋 planned |
+| Base Strategy Interface | `src/strategies/base.py` | -- | All strategies | ✅ working |
+| Strategy Router | `src/strategies/router.py` | BaseStrategy, Config | TradingEngine | ✅ working |
+| EMA Crossover Scalp | `src/strategies/scalping/ema_crossover.py` | Feature Engine, `ta` | Router | ⚠️ unprofitable (disabled) |
+| BB+RSI Mean Reversion | `src/strategies/day_trading/bb_rsi_mr.py` | Feature Engine, `ta` | Router | ✅ validated (OOS PF 1.51) |
 | BB Squeeze | `src/strategies/scalping/bb_squeeze.py` | Feature Engine | Signal Aggregator | 📋 planned |
 | Market Structure Break | `src/strategies/scalping/structure_break.py` | Feature Engine | Signal Aggregator | 📋 planned |
 | VWAP Reversion | `src/strategies/ultra_scalp/vwap_reversion.py` | Order Book, Feature Engine | Signal Aggregator | 📋 planned |
@@ -57,13 +59,13 @@
 
 | Module | File | Depends On | Used By | Status |
 |---|---|---|---|---|
-| Base Executor | `src/execution/base.py` | -- | All executors | 📋 planned |
+| Base Executor | `src/execution/base.py` | -- | All executors | ✅ working |
 | Binance Executor | `src/execution/binance_executor.py` | `ccxt[async]`, Binance WS | Order Manager | 📋 planned |
 | Alpaca Executor | `src/execution/alpaca_executor.py` | `alpaca-trade-api` | Order Manager | 📋 planned |
 | IBKR Executor | `src/execution/ibkr_executor.py` | `ib_insync` | Order Manager | 📋 planned |
 | IC Markets Executor | `src/execution/icmarkets_executor.py` | cTrader Open API | Order Manager | 📋 planned |
 | Deribit Executor | `src/execution/deribit_executor.py` | Deribit WS | Order Manager | 📋 planned |
-| Paper Executor | `src/execution/paper_executor.py` | -- | Order Manager | 📋 planned |
+| Paper Executor | `src/execution/paper_executor.py` | Storage | TradingEngine | ✅ working |
 | Order Manager | `src/execution/order_manager.py` | All Executors | Risk Manager | 📋 planned |
 
 ### Risk Layer (Python -- src/risk/ -- SEPARATE PROCESS via ZeroMQ)
@@ -108,9 +110,10 @@
 | Portfolio Tracker | `src/portfolio/tracker.py` | SQLite, Redis | Risk, M3S, Dashboard | 📋 planned |
 | Greeks Tracker | `src/portfolio/greeks_tracker.py` | `py_vollib` | Risk, Dashboard | 📋 planned |
 | Rebalancer | `src/portfolio/rebalancer.py` | M3S Allocator | Main Loop | 📋 planned |
+| Backtest Engine | `src/backtest/engine.py` | Feature Engine, Strategies | Research | ✅ working |
+| Walk-Forward Validator | `src/backtest/walk_forward.py` | Backtest Engine | Research | ✅ working |
 | VectorBT Runner | `src/backtest/vectorbt_runner.py` | `vectorbt`, `pandas` | Research | 📋 planned |
 | Nautilus Runner | `src/backtest/nautilus_runner.py` | `nautilus_trader` | Validation | 📋 planned |
-| Walk-Forward | `src/backtest/walk_forward.py` | VectorBT Runner | Research | 📋 planned |
 | Backtest Report | `src/backtest/report.py` | `pandas`, `matplotlib` | Research | 📋 planned |
 
 ### Utilities (Python -- src/utils/)
@@ -129,30 +132,32 @@
 
 ## Data Flow
 
-### Live Trading Path
+### Live Trading Path (Phase 2 — working)
+```
+Binance WS → CandleBuilder → FeatureEngine → StrategyRouter → PaperExecutor
+                                                              ↘ Storage (signal/trade log)
+```
+
+### Backtest Path (Phase 2 — working)
+```
+BinanceDownloader → DataFrame → _compute_indicators() → strategy.process() row-by-row
+                                                       → BacktestEngine (SL/TP/slippage sim)
+                                                         → BacktestResult (metrics + equity curve)
+```
+Key principle: `strategy.process()` is called identically in backtest and live. Strategy never knows which mode.
+
+### Future Live Path (Phase 3+)
 ```
 Exchange WS (Binance/IC Markets/Alpaca/IBKR)
   --> Data Ingest (asyncio + uvloop)
     --> Candle Builder (OHLCV from ticks)
-      --> Feature Engine (pandas-ta indicators)
-        --> Strategy Modules (on_candle -> Signal)
-          --> AI Agent Layer (Claude consensus)
-            --> Signal Aggregator (weighted vote)
-              --> Risk Manager [SEPARATE ZeroMQ PROCESS]
-                --> M3S Allocator (position sizing, mode-aware)
-                  --> Execution Engine (smart order routing)
-                    --> Portfolio Tracker (P&L update)
-                      --> Trade Log (SQLite) + Redis (hot state)
-```
-
-### Backtest Path
-```
-Historical Data (Parquet files)
-  --> VectorBT / NautilusTrader
-    --> Same Strategy.on_candle() code
-      --> Simulated fills
-        --> Performance Metrics (Sharpe, drawdown, win rate)
-          --> Backtest Report
+      --> Feature Engine (ta library indicators)
+        --> StrategyRouter → Strategy.on_features() -> Signal
+          --> Risk Manager [SEPARATE ZeroMQ PROCESS]
+            --> M3S Allocator (position sizing, mode-aware)
+              --> Execution Engine (smart order routing)
+                --> Portfolio Tracker (P&L update)
+                  --> Trade Log (SQLite) + Redis (hot state)
 ```
 
 ### M3S Decision Loop
@@ -245,3 +250,8 @@ Trade Fill Event
 | 2026-04-11 | India crypto tax: 30% flat + 1% TDS per transaction destroys high-frequency scalping margins. Focus scalping on forex/gold (IC Markets, slab rate 5-20%). |
 | 2026-04-11 | fpdf2 only supports latin-1 encoding -- Unicode box-drawing chars and em dashes must be replaced with ASCII before PDF generation. |
 | 2026-04-11 | Alpaca MCP API keys are stored as env vars in `~/.claude.json` -- never commit to git. |
+| 2026-04-11 | EMA crossover is unprofitable on crypto intraday. Crypto 1m-15m is ~60-70% mean-reverting. Use mean reversion strategies instead. |
+| 2026-04-11 | Trend-following filters (EMA level, DI+/DI-) are logically contradictory with mean reversion entries. At BB extremes, directional indicators always agree with the extreme. Use regime filters (ADX) instead. |
+| 2026-04-11 | Risk-based position sizing with tight stops on BTC ($50 SL on $68K price) creates 13x+ leverage and $270+ commission per trade. Always cap notional with `max_notional_pct`. |
+| 2026-04-11 | Sharpe calculation with per-candle returns on sparse signal strategies is degenerate (99%+ zero returns). Must resample to daily returns via `pd.to_datetime + resample("D")`. |
+| 2026-04-11 | BTC mean-reverts poorly (PF 0.42) even at ADX<20. Altcoins (BNB, ADA, DOT, MATIC) mean-revert well (PF 1.4-6.9). Exclude BTC from MR universe. |
