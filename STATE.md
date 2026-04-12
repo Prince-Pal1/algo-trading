@@ -31,7 +31,9 @@
 
 ---
 
-## SESSION 20: Deep Correctness Testing — Match Every Number Against Reality — IN PROGRESS
+## SESSION 20: Deep Correctness Testing — Match Every Number Against Reality — COMPLETE
+
+> *Phase numbering note: Phases 4 and 5 were planned as additional TradingView indicator cross-checks but were skipped after TV wasn't available in the next session. Their coverage intent is subsumed by Phase 3 (bit-exact TV indicator cross-val) + Phase 6 (848/848 trade match against TV Strategy Tester). No residual work.*
 
 ### Phase 0: PaperExecutor Commission Bug Fix — COMPLETE
 
