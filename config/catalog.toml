@@ -1,0 +1,885 @@
+# Strategy Research Catalog
+# Each [[strategy]] entry represents a researched or implemented trading strategy.
+# Run `python -m scripts.catalog list` to view all entries.
+# Run `python -m scripts.catalog show <id>` for full detail.
+
+# ── Research-Backed Strategies ───────────────────────────────────────────────
+
+[[strategy]]
+id = "wf_ema"
+name = "Walk-Forward EMA Momentum"
+category = "momentum"
+source_type = "paper"
+source_url = "https://arxiv.org/abs/2602.10785"
+source_label = "arXiv:2602.10785"
+sharpe = 1.252
+max_drawdown_pct = 35.16
+markets = ["BTCUSDT", "ETHUSDT", "BNBUSDT"]
+timeframes = ["1h"]
+effort_days = 3
+status = "researched"
+impl_file = "src/strategies/scalping/ema_crossover_wf.py"
+edge = "Rolling walk-forward optimization of EMA lengths maximizes Robust Sharpe on 60-min. All sub-30-min negative. Break-even fee at 0.4%."
+failure_modes = [
+    "Fee attrition terminal above 0.15% exchange fee",
+    "Constant position flipping in ranging markets",
+    "14-day training window lags sudden regime changes",
+    "35% max drawdown requires portfolio blend with B&H to reduce by 50%",
+]
+notes = "FASTEST path to Phase 2 Sharpe >1.0 target. 1-min Sharpe = -12.71 after fees. Only 60-min viable."
+
+[strategy.key_params]
+train_window_days = 7
+test_window_days = 28
+fee_per_trade = 0.001
+
+[[strategy.links]]
+label = "Analysis Code"
+url = "https://github.com/tmr-crypto/wf_optim_crypto_analysis"
+
+[[strategy.links]]
+label = "Strategy Code"
+url = "https://github.com/tmr-crypto/wf_optim_crypto"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "macro_hft"
+name = "MacroHFT RL Agent"
+category = "rl"
+source_type = "paper"
+source_url = "https://arxiv.org/abs/2406.14537"
+source_label = "KDD 2024"
+sharpe = 3.89
+max_drawdown_pct = 9.67
+markets = ["ETHUSDT", "LTCUSDT", "DOTUSDT"]
+timeframes = ["1m"]
+effort_days = 14
+status = "researched"
+impl_file = "src/strategies/rl/macro_hft.py"
+edge = "Hierarchical multi-agent RL with regime decomposition. Hyper-agent selects sub-agents trained on trend/volatility regimes. Sharpe 3.89 on ETH (OOS, 0.02% fee)."
+failure_modes = [
+    "BTC Sharpe only 0.61 — too efficient at minute frequency",
+    "4-month test window doesn't capture full market cycles",
+    "Requires significant RL engineering expertise to modify/retrain",
+    "EarnHFT predecessor LOST -11.16% on BTC",
+]
+notes = "Best Sharpe but requires PyTorch + RL expertise. Pre-trained checkpoints available in repo."
+
+[strategy.key_params]
+architecture = "hierarchical_multi_agent"
+train_test_split = "Jun-Oct 2023"
+baselines_beaten = "DQN, DDQN, PPO, CDQNRP, CLSTM-PPO, EarnHFT, MACD"
+
+[[strategy.links]]
+label = "GitHub Code"
+url = "https://github.com/ZONG0004/MacroHFT"
+
+[[strategy.links]]
+label = "Pre-trained Models"
+url = "https://github.com/ZONG0004/MacroHFT"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "alpha_as"
+name = "Alpha-AS Market Making"
+category = "market_making"
+source_type = "paper"
+source_url = "https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0277042"
+source_label = "PLOS ONE"
+sharpe = 2.75
+max_drawdown_pct = 15.0
+markets = ["BTCUSD"]
+timeframes = ["tick"]
+effort_days = 28
+status = "researched"
+impl_file = "src/strategies/market_making/alpha_as.py"
+edge = "Non-directional MM with RL-optimized risk aversion. DDQN agent outputs Avellaneda-Stoikov risk parameter from LOB state. Post-only limit orders capture maker rebate."
+failure_modes = [
+    "Violent unidirectional breakouts — stale quotes get filled by panic sellers",
+    "Requires co-located VPS for millisecond latency — without it, edge is killed",
+    "Exchange WebSocket outages during peak volatility leave algo blind",
+    "Spoofing creates false OFI signals",
+    "DolphinDB default params LOSE $27k in 2 days — must train RL agent",
+]
+notes = "Highest infrastructure requirement. Needs L2 tick data, co-location. $100k+ capital minimum."
+
+[strategy.key_params]
+action_cycle_seconds = 5
+order_type = "post_only_limit"
+inventory_penalty = "heavy"
+
+[[strategy.links]]
+label = "HFTFramework"
+url = "https://github.com/javifalces/HFTFramework"
+
+[[strategy.links]]
+label = "hftbacktest"
+url = "https://github.com/nkaz001/hftbacktest"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "pairs_coint"
+name = "Cointegration Pairs Trading"
+category = "stat_arb"
+source_type = "paper"
+source_url = "https://onlinelibrary.wiley.com/doi/full/10.1002/fut.70018"
+source_label = "J. Futures Markets"
+sharpe = 3.97
+max_drawdown_pct = 7.94
+markets = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+timeframes = ["1h", "4h"]
+effort_days = 14
+status = "researched"
+impl_file = "src/strategies/stat_arb/pairs_trading.py"
+edge = "Optimized cointegration with walk-forward validation. BTC-ETH, BTC-SOL spreads. Sharpe 3.97, 7.94% max DD over Jan 2019-May 2024."
+failure_modes = [
+    "Sharpe 3.97 may be overfit despite walk-forward — overfitting ratio analysis needed",
+    "Cointegration can break during structural shifts (e.g., ETH merge, SOL outages)",
+    "Requires simultaneous long/short execution — slippage on both legs",
+]
+notes = "Diversifies from directional to statistical arbitrage. Copula enhancement available (arXiv:2305.06961)."
+
+[strategy.key_params]
+method = "johansen_cointegration"
+entry_zscore = 2.0
+exit_zscore = 0.0
+
+[[strategy.links]]
+label = "Paper"
+url = "https://onlinelibrary.wiley.com/doi/full/10.1002/fut.70018"
+
+[[strategy.links]]
+label = "Copula Enhancement"
+url = "https://arxiv.org/abs/2305.06961"
+
+[[strategy.links]]
+label = "Erasmus Thesis"
+url = "https://thesis.eur.nl/pub/47732"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "vpin_filter"
+name = "VPIN Regime Filter"
+category = "portfolio"
+source_type = "paper"
+source_url = "https://www.sciencedirect.com/science/article/pii/S0275531925004192"
+source_label = "ScienceDirect 2025"
+markets = ["BTCUSDT", "ETHUSDT"]
+timeframes = ["1m", "5m"]
+effort_days = 1
+status = "researched"
+impl_file = "src/data/vpin.py"
+edge = "VPIN > 0.7 predicts imminent price jumps with serial correlation. Use as kill switch for mean-reversion strategies during toxic flow."
+failure_modes = [
+    "Requires tick-level trade flow data for accurate calculation",
+    "Lagging indicator — by the time VPIN spikes, the jump may already be starting",
+]
+notes = "Not a standalone strategy — a filter/kill-switch for ALL other strategies. 1-day implementation."
+
+[strategy.key_params]
+vpin_threshold = 0.7
+bucket_size = 50
+
+[[strategy.links]]
+label = "Paper"
+url = "https://www.sciencedirect.com/science/article/pii/S0275531925004192"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "adaptive_trend"
+name = "AdaptiveTrend Systematic"
+category = "trend_following"
+source_type = "paper"
+source_url = "https://arxiv.org/abs/2602.11708"
+source_label = "arXiv:2602.11708 (Talyxion Research)"
+sharpe = 2.41
+max_drawdown_pct = 12.7
+markets = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+timeframes = ["6h"]
+effort_days = 14
+status = "researched"
+edge = "Multi-component trend following with adaptive trailing stops calibrated to intra-day volatility. 70/30 asymmetric long-short allocation. Tested on 150+ crypto pairs."
+failure_modes = [
+    "No public code — must implement from paper description",
+    "Preprint, not yet peer-reviewed",
+    "High capital requirement for broad 150-pair portfolio",
+    "Fails in prolonged sideways consolidation",
+]
+notes = "Calmar ratio 3.18. 36-month OOS (2022-2024). Monthly rebalancing. $100k+ for full portfolio."
+
+[strategy.key_params]
+signal_interval = "6h"
+rebalance_frequency = "monthly"
+long_short_ratio = "70/30"
+universe_size = 150
+
+[[strategy.links]]
+label = "Paper"
+url = "https://arxiv.org/abs/2602.11708"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "drl_rank"
+name = "DRL Dynamic Learn-to-Rank"
+category = "rl"
+source_type = "paper"
+source_url = "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5494646"
+source_label = "SSRN:5494646"
+sharpe = 2.85
+markets = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+timeframes = ["12h"]
+effort_days = 21
+status = "researched"
+edge = "RL agent dynamically ranks and allocates capital across cryptos. Switches between contrarian (calm) and momentum (stressed) regimes. 4-year walk-forward validated."
+failure_modes = [
+    "Not yet peer-reviewed (SSRN preprint)",
+    "No specific drawdown numbers published",
+    "12-hour granularity is slow — not true scalping",
+    "Regime detection may lag during flash crashes",
+    "Extreme correlation events break diversification assumption",
+    "No public code — must implement from scratch",
+]
+notes = "$50k+ capital needed for multi-asset portfolio allocation. Both trending and ranging markets."
+
+[strategy.key_params]
+decision_interval = "12h"
+regime_switch = "contrarian_vs_momentum"
+portfolio_size = 20
+
+[[strategy.links]]
+label = "Paper"
+url = "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5494646"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "funding_rate_arb"
+name = "Funding Rate Arbitrage (DEX)"
+category = "stat_arb"
+source_type = "paper"
+source_url = "https://www.sciencedirect.com/science/article/pii/S2096720925000818"
+source_label = "ScienceDirect 2025"
+sharpe = 23.55
+markets = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+timeframes = ["8h"]
+effort_days = 7
+status = "researched"
+edge = "Delta-neutral funding rate capture on DEX platforms. Drift: Sharpe 23.55, ApolloX: Sharpe 6.50. CEX (Binance) is DEAD: Sharpe -7.34."
+failure_modes = [
+    "CEX funding rates are too arbitraged — negative Sharpe on Binance",
+    "Only 17% of opportunities are profitable — needs automated scanning",
+    "DEX edge is temporary as platforms mature",
+    "Smart contract risk on DEX platforms",
+    "Requires DEX integration (Solana/Drift) — not in current stack",
+]
+notes = "Highest reported Sharpe but on DEX only. Needs Drift/ApolloX integration. Edge decaying."
+
+[strategy.key_params]
+platform = "drift_dex"
+funding_interval = "8h"
+profitable_opportunity_rate = 0.17
+
+[[strategy.links]]
+label = "Paper"
+url = "https://www.sciencedirect.com/science/article/pii/S2096720925000818"
+
+# ── Internal / Implemented Strategies ────────────────────────────────────────
+
+[[strategy]]
+id = "bb_rsi_mr"
+name = "BB+RSI Mean Reversion"
+category = "mean_reversion"
+source_type = "internal"
+source_url = ""
+source_label = "Internal development"
+sharpe = 0.87
+max_drawdown_pct = 18.0
+markets = ["ETHUSDT", "BNBUSDT", "ADAUSDT", "DOTUSDT", "MATICUSDT"]
+timeframes = ["1h"]
+effort_days = 0
+status = "rejected"
+impl_file = "src/strategies/day_trading/bb_rsi_mr.py"
+edge = "BBands(20) + RSI(14) with ADX<20 regime filter. Trades only in ranging markets. Mean reversion to middle band."
+failure_modes = [
+    "FAILED multi-interval validation: 2/14 intervals profitable (14%)",
+    "Single-window backtest showed +7.19% but negative in most intervals",
+    "BTC excluded — trends too aggressively even at ADX<20",
+    "Verdict: FAIL from StrategyValidator",
+]
+notes = "Phase 2 attempt. Sharpe 0.87 (target >1.0). Multi-interval test exposed survivorship bias in original single-window result."
+
+[strategy.key_params]
+bb_period = 20
+rsi_period = 14
+adx_period = 14
+atr_period = 14
+rsi_overbought = 75
+rsi_oversold = 25
+adx_threshold = 20
+sl_atr_mult = 3.0
+max_hold_bars = 48
+cooldown_bars = 5
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "ema_crossover"
+name = "EMA Crossover Scalping"
+category = "momentum"
+source_type = "internal"
+source_url = ""
+source_label = "Internal development"
+markets = ["BTCUSDT", "ETHUSDT"]
+timeframes = ["1m"]
+effort_days = 0
+status = "rejected"
+impl_file = "src/strategies/scalping/ema_crossover.py"
+edge = "EMA(9)/EMA(21) crossover with RSI filter + volume confirmation. MACD and ADX trend strength filters."
+failure_modes = [
+    "Unprofitable on crypto intraday — trend-following in mean-reverting market",
+    "Static parameters — no walk-forward optimization",
+    "Wrong timeframe — sub-30-min EMA is dead (proven by arXiv:2602.10785)",
+]
+notes = "Disabled in strategies.toml. Superseded by wf_ema research direction."
+
+[strategy.key_params]
+fast_period = 9
+slow_period = 21
+rsi_period = 7
+
+# ── Direction A: Proven Academic Strategies (Session 8 Research) ─────────────
+
+[[strategy]]
+id = "donchian_ensemble"
+name = "Donchian Channel Ensemble Trend Following"
+category = "trend_following"
+source_type = "paper"
+source_url = "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5209907"
+source_label = "SSRN:5209907 (Zarattini et al. 2025)"
+sharpe = 1.58
+max_drawdown_pct = 19.0
+markets = ["BTCUSDT", "ETHUSDT"]
+timeframes = ["1d"]
+effort_days = 4
+status = "researched"
+edge = "Aggregates 9 Donchian channel lookbacks (5-360 days) into composite signal with vol-based sizing. 30% CAGR, 14% alpha vs BTC. Diversification across trend horizons smooths whipsaws."
+failure_modes = [
+    "Choppy range-bound markets trigger conflicting signals across channels",
+    "Sharp V-reversals catch all lookback windows simultaneously wrong",
+    "No public code — must implement from paper description",
+    "Monthly rebalance adds execution complexity",
+]
+notes = "SSRN peer-reviewed. Survivorship-bias-free dataset since 2015. Top 20 liquid cryptos. Sortino 2.03."
+
+[strategy.key_params]
+lookback_periods = "5, 10, 20, 30, 60, 90, 150, 250, 360"
+aggregation = "composite_signal"
+rebalance = "monthly"
+universe = 20
+
+[[strategy.links]]
+label = "Paper"
+url = "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5209907"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "btc_neutral_mr"
+name = "BTC-Neutral Residual Mean Reversion"
+category = "mean_reversion"
+source_type = "blog"
+source_url = "https://medium.com/@briplotnik/systematic-crypto-trading-strategies-momentum-mean-reversion-volatility-filtering-8d7da06d60ed"
+source_label = "briplotnik (Medium + GitHub)"
+sharpe = 2.3
+markets = ["ETHUSDT", "SOLUSDT", "BNBUSDT"]
+timeframes = ["1d"]
+effort_days = 3
+status = "researched"
+edge = "Regresses altcoin returns against BTC to extract idiosyncratic residual. Z-score thresholding on residuals captures coin-specific mispricings that revert faster than raw prices."
+failure_modes = [
+    "Correlated altcoin crashes where residuals spike across the board",
+    "Regime shifts in BTC-altcoin beta relationships",
+    "Low-liquidity coins with wide spreads eat the edge",
+]
+notes = "Code available on GitHub. Combined portfolio (with momentum) Sharpe 1.71, annualized 56%, t-stat 4.07."
+
+[strategy.key_params]
+regression_window = "rolling"
+zscore_entry = 2.0
+zscore_exit = 0.5
+
+[[strategy.links]]
+label = "GitHub Code"
+url = "https://github.com/briplot/systematic-crypto-strategy"
+
+[[strategy.links]]
+label = "Article"
+url = "https://medium.com/@briplotnik/systematic-crypto-trading-strategies-momentum-mean-reversion-volatility-filtering-8d7da06d60ed"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "risk_managed_xsmom"
+name = "Risk-Managed Cross-Sectional Momentum"
+category = "momentum"
+source_type = "paper"
+source_url = "https://www.sciencedirect.com/science/article/abs/pii/S1544612325011377"
+source_label = "Finance Research Letters 2025 (Ao Yang)"
+sharpe = 1.42
+markets = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+timeframes = ["1w"]
+effort_days = 3
+status = "researched"
+edge = "Volatility-scaled cross-sectional crypto momentum. Scales position size inversely to realized portfolio volatility. Unlike equities, crypto lacks extended momentum crashes, so vol-scaling INCREASES returns."
+failure_modes = [
+    "Rare but possible crypto momentum crashes",
+    "High transaction costs from weekly rebalancing across many coins",
+    "Liquidity constraints in smaller altcoins",
+    "Model overfitting to BTC-dominance regime",
+]
+notes = "Academic rigor. Improves unmanaged momentum from Sharpe 1.12 to 1.42. Weekly rebalance, 7-day formation."
+
+[strategy.key_params]
+formation_period_days = 7
+skip_period_days = 1
+holding_period_days = 7
+volatility_target = "adaptive"
+
+[[strategy.links]]
+label = "Paper"
+url = "https://www.sciencedirect.com/science/article/abs/pii/S1544612325011377"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "dynamic_grid"
+name = "Dynamic Grid Trading (DGT)"
+category = "mean_reversion"
+source_type = "paper"
+source_url = "https://arxiv.org/abs/2506.11921"
+source_label = "arXiv:2506.11921 (Chen et al. 2025)"
+markets = ["BTCUSDT", "ETHUSDT"]
+timeframes = ["1m", "5m"]
+effort_days = 4
+status = "researched"
+edge = "Traditional grid has zero expected value (proven mathematically). DGT fixes this by dynamically resetting grid positions. IRR 60-70% on ETH. Captures both trending and mean-reverting regimes."
+failure_modes = [
+    "Fast trending markets where grid resets lag price",
+    "Transaction costs eating profits from frequent grid fills",
+    "Gap moves that skip grid levels",
+    "Parameter sensitivity to grid spacing and reset triggers",
+]
+notes = "Paper proves classic grid = zero expectation. DGT with dynamic resets outperforms both grid and B&H. Code linked from arXiv."
+
+[strategy.key_params]
+grid_levels = 20
+reset_trigger = "adaptive"
+position_per_level = "equal"
+
+[[strategy.links]]
+label = "Paper"
+url = "https://arxiv.org/abs/2506.11921"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "crypto_carry"
+name = "Crypto Carry Trade (Perp Basis)"
+category = "stat_arb"
+source_type = "paper"
+source_url = "https://www.bis.org/publ/work1087.pdf"
+source_label = "BIS Working Paper 1087 (2024)"
+sharpe = 1.80
+markets = ["BTCUSDT", "ETHUSDT"]
+timeframes = ["8h"]
+effort_days = 5
+status = "researched"
+edge = "Long spot + short perpetual captures funding rate. Structural demand imbalance means speculators pay to be long. Equity-like returns with bond-like volatility historically."
+failure_modes = [
+    "Funding rate compression since 2024 — BIS data shows Sharpe declining",
+    "Sharpe turned NEGATIVE in 2025 — edge may be dead",
+    "Basis blowouts during liquidation cascades",
+    "Exchange counterparty risk",
+    "Margin calls during extreme volatility",
+]
+notes = "WARNING: BIS data shows strategy Sharpe compressing since 2024, NEGATIVE in 2025. Past its prime. Deprioritize unless selective in high-funding regimes."
+
+[strategy.key_params]
+funding_entry_threshold = 0.0003
+exit_threshold = 0.0
+hedge_ratio = 1.0
+
+[[strategy.links]]
+label = "BIS Paper"
+url = "https://www.bis.org/publ/work1087.pdf"
+
+[[strategy.links]]
+label = "GitHub Implementation"
+url = "https://github.com/PJdfr/Crypto-Spread-Arbitrage"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "max_breakout"
+name = "N-Day High Breakout (MAX Strategy)"
+category = "breakout"
+source_type = "blog"
+source_url = "https://quantpedia.com/revisiting-trend-following-and-mean-reversion-strategies-in-bitcoin/"
+source_label = "QuantPedia (Sep 2024)"
+markets = ["BTCUSDT"]
+timeframes = ["1d"]
+effort_days = 1
+status = "researched"
+edge = "Buy BTC when price reaches N-day high; exit when falls below. Pure price breakout exploiting BTC's persistent trend behavior. Simplicity is the edge — no overfitting, ~20 lines of code."
+failure_modes = [
+    "Range-bound markets with repeated false breakouts",
+    "Brief relief rallies in declining BTC trigger entries",
+    "10-day lookback gets whipsawed in choppy conditions",
+]
+notes = "Dead simple baseline strategy. 10-day lookback most effective. OOS Feb 2022-Aug 2024 survived bear market. Trivially implementable."
+
+[strategy.key_params]
+lookback_days = 10
+exit_rule = "below_n_day_low"
+
+[[strategy.links]]
+label = "QuantPedia Article"
+url = "https://quantpedia.com/revisiting-trend-following-and-mean-reversion-strategies-in-bitcoin/"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "lstm_gru_ensemble"
+name = "LSTM/GRU Ensemble Long-Short"
+category = "rl"
+source_type = "paper"
+source_url = "https://arxiv.org/abs/2407.18334"
+source_label = "arXiv:2407.18334 (Jabbar & Jalil 2024)"
+sharpe = 3.15
+markets = ["BTCUSDT"]
+timeframes = ["1d"]
+effort_days = 7
+status = "researched"
+edge = "Combines LSTM and GRU predictions into ensemble. Captures non-linear patterns in technical indicator combinations. Post-ETF BTC market has learnable institutional flow patterns."
+failure_modes = [
+    "Regime changes invalidate trained patterns",
+    "Overfitting is the dominant risk — strict walk-forward needed",
+    "High computational cost for walk-forward retraining",
+    "Sharpe 3.15 is suspiciously high — expect 40-60% decay in live trading",
+    "Model decay requires frequent retraining",
+]
+notes = "LSTM cumulative return ~65% in <1 year. RF and SGD top performers among 41 models tested. Treat high Sharpe with skepticism."
+
+[strategy.key_params]
+hidden_units = 128
+sequence_length = 30
+retrain_frequency = "monthly"
+
+[[strategy.links]]
+label = "Paper"
+url = "https://arxiv.org/abs/2407.18334"
+
+[[strategy.links]]
+label = "Supplementary"
+url = "https://arxiv.org/abs/2511.00665"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "qrsi_contrarian"
+name = "Q-RSI Contrarian (Fixed-Horizon Exit)"
+category = "mean_reversion"
+source_type = "blog"
+source_url = "https://menthorq.com/guide/backtesting-results-crypto-quant-models/"
+source_label = "MenthorQ (2025)"
+markets = ["BTCUSDT"]
+timeframes = ["1d"]
+effort_days = 1
+status = "researched"
+edge = "Extreme RSI entries (oversold <20 AND overbought >90) with 5-day SMA filter. All positions exit exactly 10 days after entry. Fixed-horizon removes emotional decisions, captures statistical mean reversion window."
+failure_modes = [
+    "Extended trending markets where 10-day hold is too short",
+    "Flash crashes that don't recover within 10 days",
+    "Low trade frequency — weeks without signals",
+    "No stop loss — individual trades can have large drawdowns",
+]
+notes = "+18% vs BTC +10% over late 2024-mid 2025. Trivially implementable with ta library RSI."
+
+[strategy.key_params]
+rsi_period = 14
+oversold = 20
+overbought = 90
+sma_filter = 5
+holding_period_days = 10
+
+[[strategy.links]]
+label = "MenthorQ Guide"
+url = "https://menthorq.com/guide/backtesting-results-crypto-quant-models/"
+
+# ── Direction B: Different Crypto Strategy Types (Session 8 Research) ────────
+
+[[strategy]]
+id = "bbkc_squeeze"
+name = "BBKC Volatility Squeeze Breakout"
+category = "breakout"
+source_type = "blog"
+source_url = "https://pyquantlab.medium.com/optimizing-the-bollinger-band-keltner-channel-squeeze-strategy-volatility-breakout-trading-in-70b49101cb30"
+source_label = "PyQuantLab (2024)"
+sharpe = 1.031
+markets = ["BTCUSDT"]
+timeframes = ["1d", "4h"]
+effort_days = 3
+status = "researched"
+edge = "Detects when BB contracts inside KC (volatility squeeze). Enters on momentum breakout when squeeze releases. Dual-band system filters false breakouts better than either indicator alone."
+failure_modes = [
+    "Choppy sideways markets produce repeated false squeeze releases",
+    "Over-optimization risk (243 combos tested, best may not generalize)",
+    "Momentum direction after squeeze release can whipsaw in low-liquidity alts",
+    "Trailing stop parameterization is fragile",
+]
+notes = "Best return 265.2%. 108/243 parameter combos had positive Sharpe. ta library has both BB and KC indicators."
+
+[strategy.key_params]
+bb_period = 5
+bb_std = 1.5
+kc_period = 20
+kc_mult = 1.5
+trailing_stop_pct = 1.5
+
+[[strategy.links]]
+label = "Article"
+url = "https://pyquantlab.medium.com/optimizing-the-bollinger-band-keltner-channel-squeeze-strategy-volatility-breakout-trading-in-70b49101cb30"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "ofi_ml_xsection"
+name = "OFI-ML Cross-Sectional Momentum"
+category = "momentum"
+source_type = "paper"
+source_url = "https://www.sciencedirect.com/science/article/pii/S1386418126000029"
+source_label = "EFMA 2025 / ScienceDirect"
+sharpe = 3.55
+markets = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+timeframes = ["1d"]
+effort_days = 7
+status = "researched"
+edge = "Order flow imbalance dominates economic fundamentals for crypto return prediction. Cross-sectional long-short portfolio captures relative mispricing. Break-even cost 0.48%/day (very robust)."
+failure_modes = [
+    "Requires reliable order flow data (not just OHLCV) — data sourcing is bottleneck",
+    "Short-selling constraints reduce short leg effectiveness",
+    "Signal decays as more participants use OFI features",
+    "Daily rebalancing with large cross-section = high operational complexity",
+]
+notes = "Alpha 0.76-0.79% per day (t-stat 5.57). Peer-reviewed. Needs gradient boosting ML model (XGBoost/LightGBM)."
+
+[strategy.key_params]
+ml_model = "gradient_boosting"
+portfolio = "quintile_long_short"
+rebalance = "daily"
+universe_size = 20
+
+[[strategy.links]]
+label = "Paper"
+url = "https://www.sciencedirect.com/science/article/pii/S1386418126000029"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "adturtle"
+name = "AdTurtle (Adaptive Donchian Breakout)"
+category = "breakout"
+source_type = "repo"
+source_url = "https://github.com/Akcanbasri/TurtleTrading"
+source_label = "Gate Research + GitHub (2024)"
+markets = ["BTCUSDT", "ETHUSDT"]
+timeframes = ["1h"]
+effort_days = 3
+status = "researched"
+edge = "Classic Turtle adapted for crypto with sliding ATR stops, exclusion zones to prevent whipsaw re-entries, and dynamic ATR-normalized position sizing. Up to 62.71% annualized, <15% DD."
+failure_modes = [
+    "Choppy/ranging markets cause repeated stop-outs",
+    "62.71% was BEST of grid search — median performance lower",
+    "Optimized on GT/USDT — may not generalize to BTC/ETH",
+    "2024-2025 was trending — bear markets will differ",
+]
+notes = "Open source code. Donchian channels + ATR in ta library. Simple rule-based system."
+
+[strategy.key_params]
+donchian_entry = 20
+donchian_exit = 10
+atr_period = 14
+atr_stop_mult = 2.0
+risk_per_trade_pct = 1.0
+
+[[strategy.links]]
+label = "GitHub Code"
+url = "https://github.com/Akcanbasri/TurtleTrading"
+
+[[strategy.links]]
+label = "Gate Research"
+url = "https://www.gate.com/learn/articles/gate-research-turtle-trading-rules-classic-system-with-annual-returns-up-to-62-71/10867"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "hurst_pairs"
+name = "Hurst-Filtered Pairs Trading"
+category = "stat_arb"
+source_type = "paper"
+source_url = "https://www.mdpi.com/2227-7390/12/18/2911"
+source_label = "MDPI Mathematics 2024"
+sharpe = 1.0
+max_drawdown_pct = 15.7
+markets = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+timeframes = ["1h", "4h"]
+effort_days = 5
+status = "researched"
+edge = "Adds Hurst exponent filter to pairs trading. Only trades pairs where H<0.5 (anti-persistent). Anti-persistent spreads revert faster, improving capital efficiency and reducing drawdowns."
+failure_modes = [
+    "Hurst estimation is noisy at short windows (need 100+ data points)",
+    "Cointegration relationships break during structural shifts",
+    "190 pair combinations from 20 coins — high operational complexity",
+    "16% return with 15.7% DD = Calmar ~1.0 — not spectacular",
+]
+notes = "Enhances existing cointegration pairs strategy. 5.5-year backtest (2019-2024). Python hurst package available."
+
+[strategy.key_params]
+hurst_window = 100
+hurst_threshold = 0.5
+coint_pvalue = 0.05
+zscore_entry = 2.0
+zscore_exit = 0.5
+
+[[strategy.links]]
+label = "Paper"
+url = "https://www.mdpi.com/2227-7390/12/18/2911"
+
+[[strategy.links]]
+label = "Amberdata Guide"
+url = "https://blog.amberdata.io/crypto-pairs-trading-part-2-verifying-mean-reversion-with-adf-and-hurst-tests"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "lgbm_classifier"
+name = "LightGBM Direction Classifier"
+category = "rl"
+source_type = "paper"
+source_url = "https://www.sciencedirect.com/science/article/abs/pii/S1544612318307918"
+source_label = "ScienceDirect + arXiv:2512.12924"
+markets = ["BTCUSDT", "ETHUSDT"]
+timeframes = ["1h", "1d"]
+effort_days = 7
+status = "researched"
+edge = "LightGBM with 50-70 features outperforms LSTM/RF/XGBoost for crypto direction prediction. SHAP feature importance reveals volume-based features dominate. Walk-forward retraining adapts to regime changes."
+failure_modes = [
+    "Overfitting is the dominant risk — strict walk-forward with purging needed",
+    "Feature importance shifts across regimes",
+    "55-60% classification accuracy is typical — edge comes from sizing, not accuracy",
+    "Requires regular retraining (weekly/monthly)",
+    "SHAP computation expensive for large feature sets",
+]
+notes = "LGBM outperforms LSTM in multiple crypto studies. Walk-forward tested across 34 test periods. Volume and volatility features rank highest via SHAP."
+
+[strategy.key_params]
+num_features = 60
+train_window = 2000
+test_window = 200
+num_leaves = 31
+learning_rate = 0.05
+
+[[strategy.links]]
+label = "Paper"
+url = "https://www.sciencedirect.com/science/article/abs/pii/S1544612318307918"
+
+[[strategy.links]]
+label = "Kaggle Notebook"
+url = "https://www.kaggle.com/code/h1yung/crypto-forecasting-using-lgbm"
+
+[[strategy.links]]
+label = "GitHub Pipeline"
+url = "https://github.com/singyanchiu/LGBM-Stock-Prediction"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "liquidation_fade"
+name = "Liquidation Cascade Fade"
+category = "mean_reversion"
+source_type = "blog"
+source_url = "https://www.coinglass.com/pro/futures/LiquidationHeatMap"
+source_label = "CoinGlass + on-chain analysis"
+markets = ["BTCUSDT", "ETHUSDT"]
+timeframes = ["5m", "15m", "1h"]
+effort_days = 7
+status = "researched"
+edge = "Fades self-reinforcing liquidation cascades in crypto perps. Forced selling creates reliable overshoots that revert. Wait for liquidation volume spike exhaustion, enter counter-trend. Pure crypto-native alpha."
+failure_modes = [
+    "Catching a falling knife — cascades can extend further than expected",
+    "Data latency — by the time you detect exhaustion, bounce may have happened",
+    "Exchange-specific data doesn't capture cross-exchange cascades",
+    "Regime dependency — works in high-leverage environments only",
+    "Very precise timing required",
+]
+notes = "No complete backtest system exists. Needs CoinGlass API + custom data pipeline. Highest alpha potential but hardest to backtest."
+
+[strategy.key_params]
+liq_volume_spike_mult = 3.0
+oi_drop_threshold_pct = 5.0
+funding_extreme = -0.0005
+entry_trigger = "liq_rate_declining_2_candles"
+sl_pct = 2.0
+tp_target = "50pct_cascade_range"
+
+[[strategy.links]]
+label = "CoinGlass"
+url = "https://www.coinglass.com/pro/futures/LiquidationHeatMap"
+
+[[strategy.links]]
+label = "TradingView Indicator"
+url = "https://www.tradingview.com/script/32PMF3sV-Crypto-Liquidation-Heatmap/"
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[strategy]]
+id = "mtf_confluence"
+name = "Multi-Timeframe Confluence Filter"
+category = "portfolio"
+source_type = "blog"
+source_url = "https://www.quantifiedstrategies.com/multi-timeframe-analysis/"
+source_label = "QuantifiedStrategies + TradingView"
+markets = ["BTCUSDT", "ETHUSDT"]
+timeframes = ["15m", "1h", "4h", "1d"]
+effort_days = 4
+status = "researched"
+edge = "Not a standalone strategy — a universal filter. Requires HTF trend + MTF structure + LTF trigger alignment. Filters 40-60% of losing trades from any underlying strategy. Reduces drawdown 20-40%."
+failure_modes = [
+    "Reduces trade frequency significantly (fewer setups pass 3 filters)",
+    "Timeframe alignment can lag — by time Daily confirms bullish, move is 30% done",
+    "Need to handle different candle granularities correctly in backtest",
+    "Conflicting signals lead to long no-trade periods",
+]
+notes = "Can layer on top of ANY existing strategy (BB+RSI, WF-EMA, etc.). TradingView Pine script available. Implementation needs multi-bar buffer architecture."
+
+[strategy.key_params]
+htf = "1d"
+htf_indicator = "ema_50"
+mtf = "4h"
+mtf_method = "support_resistance"
+ltf = "1h"
+confluence_required = "all_agree"
+
+[[strategy.links]]
+label = "QuantifiedStrategies"
+url = "https://www.quantifiedstrategies.com/multi-timeframe-analysis/"
+
+[[strategy.links]]
+label = "TradingView Pine Script"
+url = "https://www.tradingview.com/script/MisgW0WB-Multi-Timeframe-Confluence-Indicator/"

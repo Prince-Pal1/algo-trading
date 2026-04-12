@@ -1,0 +1,43 @@
+name: NL EMA Cross
+version: '1.0'
+source_format: natural_language
+markets:
+- BTCUSDT
+timeframe: 1h
+description: Buy when 9 EMA crosses above 21 EMA, sell when 9 EMA crosses below
+parameters: []
+indicators:
+- name: ema
+  period: 9
+  column: EMA_9
+  source: close
+- name: ema
+  period: 21
+  column: EMA_21
+  source: close
+entry_long:
+  type: crossover
+  fast: EMA_9
+  slow: EMA_21
+  column: ''
+  threshold: 0.0
+  sub_conditions: []
+entry_short: null
+exit_long:
+  type: crossunder
+  fast: EMA_9
+  slow: EMA_21
+  column: ''
+  threshold: 0.0
+  sub_conditions: []
+exit_short: null
+stop_loss:
+  type: none
+  value: 0.0
+  period: 14
+take_profit:
+  type: none
+  value: 0.0
+filters: []
+cooldown_bars: 0
+max_hold_bars: 0

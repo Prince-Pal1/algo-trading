@@ -18,7 +18,7 @@ from typing import Any
 import pandas as pd
 from ta.trend import EMAIndicator, SMAIndicator, ADXIndicator, MACD
 from ta.momentum import RSIIndicator, StochasticOscillator
-from ta.volatility import BollingerBands, AverageTrueRange
+from ta.volatility import BollingerBands, AverageTrueRange, DonchianChannel
 from ta.volume import VolumeWeightedAveragePrice
 
 from src.utils.logger import get_logger
@@ -30,6 +30,11 @@ OnFeatures = Callable[[str, str, pd.Series], Coroutine[Any, Any, None]]
 
 # Maximum candles to keep in memory per symbol/timeframe
 MAX_BUFFER_SIZE = 500
+
+# Rows used for indicator computation. Must be large enough for the biggest
+# window to converge (donchian_120 needs 240+, EMA/RSI recursive indicators
+# need ~2-3x window for <0.01% error). 250 covers all current indicators.
+COMPUTE_WINDOW = 250
 
 
 # ── Indicator Definitions ──────────────────────────────────────────────────
@@ -48,70 +53,72 @@ def _compute_indicators(df: pd.DataFrame, indicator_list: list[str]) -> pd.DataF
         length = int(parts[1]) if len(parts) > 1 else None
 
         # Skip if not enough data for the indicator window
-        min_rows = (length or 26) + 5  # +5 buffer for warmup
+        # ADX/Donchian/Stoch need ~2x window; others need ~window+5
+        if name in ("adx", "donchian", "stoch"):
+            min_rows = (length or 14) * 2 + 5
+        else:
+            min_rows = (length or 26) + 5
         if n < min_rows:
             continue
 
         if name == "ema" and length:
             col = f"EMA_{length}"
-            if col not in df.columns:
-                df[col] = EMAIndicator(close=close, window=length).ema_indicator()
+            df[col] = EMAIndicator(close=close, window=length).ema_indicator()
 
         elif name == "sma" and length:
             col = f"SMA_{length}"
-            if col not in df.columns:
-                df[col] = SMAIndicator(close=close, window=length).sma_indicator()
+            df[col] = SMAIndicator(close=close, window=length).sma_indicator()
 
         elif name == "rsi" and length:
             col = f"RSI_{length}"
-            if col not in df.columns:
-                df[col] = RSIIndicator(close=close, window=length).rsi()
+            df[col] = RSIIndicator(close=close, window=length).rsi()
 
         elif name == "bbands" and length:
             upper_col = f"BBU_{length}"
-            if upper_col not in df.columns:
-                bb = BollingerBands(close=close, window=length)
-                df[upper_col] = bb.bollinger_hband()
-                df[f"BBM_{length}"] = bb.bollinger_mavg()
-                df[f"BBL_{length}"] = bb.bollinger_lband()
+            bb = BollingerBands(close=close, window=length)
+            df[upper_col] = bb.bollinger_hband()
+            df[f"BBM_{length}"] = bb.bollinger_mavg()
+            df[f"BBL_{length}"] = bb.bollinger_lband()
 
         elif name == "macd":
-            if "MACD" not in df.columns:
-                macd = MACD(close=close)
-                df["MACD"] = macd.macd()
-                df["MACD_signal"] = macd.macd_signal()
-                df["MACD_hist"] = macd.macd_diff()
+            macd = MACD(close=close)
+            df["MACD"] = macd.macd()
+            df["MACD_signal"] = macd.macd_signal()
+            df["MACD_hist"] = macd.macd_diff()
 
         elif name == "vwap":
-            if "VWAP" not in df.columns:
-                try:
-                    df["VWAP"] = VolumeWeightedAveragePrice(
-                        high=high, low=low, close=close, volume=volume,
-                    ).volume_weighted_average_price()
-                except Exception:
-                    pass  # VWAP needs volume, may fail on sparse data
+            try:
+                df["VWAP"] = VolumeWeightedAveragePrice(
+                    high=high, low=low, close=close, volume=volume,
+                ).volume_weighted_average_price()
+            except Exception:
+                pass  # VWAP needs volume, may fail on sparse data
 
         elif name == "atr" and length:
             col = f"ATR_{length}"
-            if col not in df.columns:
-                df[col] = AverageTrueRange(
-                    high=high, low=low, close=close, window=length,
-                ).average_true_range()
+            df[col] = AverageTrueRange(
+                high=high, low=low, close=close, window=length,
+            ).average_true_range()
 
         elif name == "adx" and length:
             col = f"ADX_{length}"
-            if col not in df.columns:
-                adx = ADXIndicator(high=high, low=low, close=close, window=length)
-                df[col] = adx.adx()
-                df[f"DI+_{length}"] = adx.adx_pos()
-                df[f"DI-_{length}"] = adx.adx_neg()
+            adx = ADXIndicator(high=high, low=low, close=close, window=length)
+            df[col] = adx.adx()
+            df[f"DI+_{length}"] = adx.adx_pos()
+            df[f"DI-_{length}"] = adx.adx_neg()
+
+        elif name == "donchian" and length:
+            col = f"DCH_{length}"
+            dc = DonchianChannel(high=high, low=low, close=close, window=length)
+            df[col] = dc.donchian_channel_hband()
+            df[f"DCL_{length}"] = dc.donchian_channel_lband()
+            df[f"DCM_{length}"] = dc.donchian_channel_mband()
 
         elif name == "stoch" and length:
             col = f"STOCHk_{length}"
-            if col not in df.columns:
-                stoch = StochasticOscillator(high=high, low=low, close=close, window=length)
-                df[col] = stoch.stoch()
-                df[f"STOCHd_{length}"] = stoch.stoch_signal()
+            stoch = StochasticOscillator(high=high, low=low, close=close, window=length)
+            df[col] = stoch.stoch()
+            df[f"STOCHd_{length}"] = stoch.stoch_signal()
 
     return df
 
@@ -139,23 +146,37 @@ class FeatureEngine:
         key = (candle.symbol, candle.timeframe)
         df = self._buffers[key]
 
-        new_row = pd.DataFrame([{
+        # In-place append — avoids full DataFrame copy from pd.concat
+        df.loc[len(df)] = {
             "open": candle.open,
             "high": candle.high,
             "low": candle.low,
             "close": candle.close,
             "volume": candle.volume,
             "timestamp": candle.timestamp,
-        }])
-        df = pd.concat([df, new_row], ignore_index=True)
+        }
 
         # Trim buffer
         if len(df) > MAX_BUFFER_SIZE:
             df = df.iloc[-MAX_BUFFER_SIZE:].reset_index(drop=True)
 
-        # Compute indicators
-        df = _compute_indicators(df, self.indicators)
         self._buffers[key] = df
+
+        # Compute indicators on a tail slice for efficiency.
+        # Full buffer is kept for storage, but ta library only processes
+        # the last COMPUTE_WINDOW rows (enough for all indicators to converge).
+        n = len(df)
+        if n > COMPUTE_WINDOW:
+            compute_df = df.iloc[-COMPUTE_WINDOW:].copy().reset_index(drop=True)
+            compute_df = _compute_indicators(compute_df, self.indicators)
+            # Copy indicator columns from computed slice's last row to main buffer
+            last_row = compute_df.iloc[-1]
+            for col in compute_df.columns:
+                if col not in ("open", "high", "low", "close", "volume", "timestamp"):
+                    df.at[df.index[-1], col] = last_row[col]
+        else:
+            df = _compute_indicators(df, self.indicators)
+            self._buffers[key] = df
 
         # Emit latest row with all indicator values
         if self.on_features and len(df) > 0:

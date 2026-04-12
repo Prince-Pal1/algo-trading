@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import random
 import ssl
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -37,45 +38,61 @@ class BinanceWebSocketFeed:
 
     BASE_URL = "wss://stream.binance.com:9443/ws"
     TESTNET_URL = "wss://testnet.binance.vision/ws"
-    RECONNECT_DELAY = 5  # seconds
+    RECONNECT_BASE = 1.0   # initial backoff seconds
+    RECONNECT_MAX = 60.0   # max backoff seconds
+    RECONNECT_JITTER = 0.1 # 10% jitter
 
     def __init__(
         self,
         symbols: list[str],
         timeframes: list[str] | None = None,
         testnet: bool = True,
+        needed_pairs: set[tuple[str, str]] | None = None,
     ):
         self.symbols = [s.lower() for s in symbols]
         self.timeframes = timeframes or ["1m"]
         self.testnet = testnet
         self._ws: ClientConnection | None = None
         self._running = False
+        self._reconnect_delay = self.RECONNECT_BASE
+
+        # If provided, only subscribe to kline streams for these (symbol, tf) pairs
+        # instead of the full cartesian product of symbols × timeframes.
+        self._needed_pairs = needed_pairs
 
         # Callbacks — set these before calling start()
         self.on_tick: OnTick | None = None
         self.on_candle: OnCandle | None = None
 
-    @property
-    def _url(self) -> str:
-        base = self.TESTNET_URL if self.testnet else self.BASE_URL
+    def _build_streams(self) -> list[str]:
+        """Build stream list — trade ticks for all symbols, klines only for needed pairs."""
         streams = []
         for sym in self.symbols:
             streams.append(f"{sym}@trade")
-            for tf in self.timeframes:
-                streams.append(f"{sym}@kline_{tf}")
+
+        if self._needed_pairs:
+            # Subscribe only to kline streams that strategies actually need
+            for sym, tf in self._needed_pairs:
+                streams.append(f"{sym.lower()}@kline_{tf}")
+        else:
+            # Fallback: cartesian product (legacy behavior)
+            for sym in self.symbols:
+                for tf in self.timeframes:
+                    streams.append(f"{sym}@kline_{tf}")
+        return streams
+
+    @property
+    def _url(self) -> str:
+        base = self.TESTNET_URL if self.testnet else self.BASE_URL
+        streams = self._build_streams()
         return f"{base}/{'/'.join(streams)}"
 
     @property
     def _combined_url(self) -> str:
         """Use combined stream endpoint for multiple streams."""
         base = self.TESTNET_URL if self.testnet else self.BASE_URL
-        # Replace /ws with /stream for combined streams
         base = base.replace("/ws", "/stream")
-        streams = []
-        for sym in self.symbols:
-            streams.append(f"{sym}@trade")
-            for tf in self.timeframes:
-                streams.append(f"{sym}@kline_{tf}")
+        streams = self._build_streams()
         return f"{base}?streams={'/'.join(streams)}"
 
     async def start(self) -> None:
@@ -90,6 +107,7 @@ class BinanceWebSocketFeed:
                 ssl_ctx = ssl.create_default_context(cafile=certifi.where())
                 async with websockets.connect(url, ping_interval=20, ssl=ssl_ctx) as ws:
                     self._ws = ws
+                    self._reconnect_delay = self.RECONNECT_BASE  # reset on success
                     log.info("connected", symbols=self.symbols, timeframes=self.timeframes)
                     await self._listen(ws)
 
@@ -99,8 +117,12 @@ class BinanceWebSocketFeed:
                 log.error("connection_error", error=str(e), type=type(e).__name__)
 
             if self._running:
-                log.info("reconnecting", delay=self.RECONNECT_DELAY)
-                await asyncio.sleep(self.RECONNECT_DELAY)
+                # Exponential backoff with jitter
+                jitter = self._reconnect_delay * self.RECONNECT_JITTER * random.random()
+                delay = self._reconnect_delay + jitter
+                log.info("reconnecting", delay=round(delay, 1))
+                await asyncio.sleep(delay)
+                self._reconnect_delay = min(self._reconnect_delay * 2, self.RECONNECT_MAX)
 
     async def stop(self) -> None:
         """Gracefully disconnect."""

@@ -82,10 +82,117 @@ CREATE TABLE IF NOT EXISTS risk_events (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Backtest run metadata (one strategy + one config + one data window)
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_id TEXT NOT NULL,
+    strategy_version TEXT DEFAULT '1.0',
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    config_json TEXT,
+    params_json TEXT,
+    source_format TEXT DEFAULT 'python',
+    data_fingerprint TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Results for a single run (1:1 with backtest_runs)
+CREATE TABLE IF NOT EXISTS backtest_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES backtest_runs(id),
+    total_return_pct REAL,
+    sharpe REAL,
+    sortino REAL,
+    max_drawdown_pct REAL,
+    win_rate_pct REAL,
+    profit_factor REAL,
+    total_trades INTEGER,
+    avg_win_loss_ratio REAL,
+    calmar REAL,
+    total_commission REAL,
+    buy_hold_return_pct REAL,
+    psr REAL,
+    equity_curve_json TEXT,
+    trades_json TEXT,
+    metrics_json TEXT
+);
+
+-- Protocol-level validation session (groups multiple protocol runs)
+CREATE TABLE IF NOT EXISTS validation_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_id TEXT NOT NULL,
+    strategy_version TEXT DEFAULT '1.0',
+    tier TEXT NOT NULL,
+    protocols_run TEXT,
+    verdict TEXT,
+    summary_json TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Individual protocol results within a validation session
+CREATE TABLE IF NOT EXISTS protocol_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER REFERENCES validation_sessions(id),
+    protocol TEXT NOT NULL,
+    passed BOOLEAN,
+    result_json TEXT,
+    runtime_seconds REAL
+);
+
+-- Risk state key-value persistence (survives restarts)
+CREATE TABLE IF NOT EXISTS risk_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Audit log of every risk decision
+CREATE TABLE IF NOT EXISTS risk_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER NOT NULL,
+    signal_symbol TEXT NOT NULL,
+    signal_strategy TEXT NOT NULL,
+    signal_action TEXT NOT NULL,
+    approved BOOLEAN NOT NULL,
+    reason TEXT,
+    original_risk_pct REAL,
+    adjusted_quantity REAL,
+    checks_json TEXT,
+    equity_at_decision REAL,
+    drawdown_pct REAL,
+    created_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Paper trading position persistence (survives crashes)
+CREATE TABLE IF NOT EXISTS paper_positions (
+    symbol TEXT PRIMARY KEY,
+    side TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    entry_price REAL NOT NULL,
+    current_price REAL NOT NULL,
+    unrealized_pnl REAL DEFAULT 0,
+    strategy_name TEXT NOT NULL,
+    opened_at INTEGER NOT NULL
+);
+
+-- Paper trading equity state (singleton row)
+CREATE TABLE IF NOT EXISTS paper_equity (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    equity REAL NOT NULL,
+    initial_capital REAL NOT NULL,
+    trade_count INTEGER DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol);
 CREATE INDEX IF NOT EXISTS idx_signals_strategy ON signals(strategy);
 CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
 CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);
+CREATE INDEX IF NOT EXISTS idx_backtest_runs_strategy ON backtest_runs(strategy_id);
+CREATE INDEX IF NOT EXISTS idx_validation_sessions_strategy ON validation_sessions(strategy_id);
+CREATE INDEX IF NOT EXISTS idx_risk_decisions_ts ON risk_decisions(timestamp);
+CREATE INDEX IF NOT EXISTS idx_risk_decisions_strategy ON risk_decisions(signal_strategy);
 """
 
 
@@ -123,7 +230,7 @@ class TradeLog:
                 signal.entry_price,
                 signal.stop_loss,
                 signal.take_profit,
-                orjson.dumps(signal.metadata).decode() if signal.metadata else None,
+                orjson.dumps(signal.metadata, option=orjson.OPT_SERIALIZE_NUMPY).decode() if signal.metadata else None,
             ),
         )
         conn.commit()

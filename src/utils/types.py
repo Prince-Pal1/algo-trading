@@ -157,3 +157,6 @@ class RiskDecision(msgspec.Struct):
     reason: str
     original_request: OrderRequest | None = None
     adjusted_quantity: float | None = None  # Risk may resize
+    adjusted_risk_pct: float | None = None  # Kelly-computed risk fraction
+    checks_passed: list[str] | None = None  # Audit trail of passed checks
+    size_multiplier: float = 1.0            # Circuit breaker scaling factor

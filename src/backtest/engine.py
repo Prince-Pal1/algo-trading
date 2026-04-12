@@ -16,10 +16,11 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from src.backtest.metrics import compute_metrics
 from src.data.feature_engine import _compute_indicators
 from src.strategies.base import BaseStrategy
 from src.utils.logger import get_logger
-from src.utils.types import SignalAction
+from src.utils.types import Signal, SignalAction
 
 log = get_logger("backtest")
 
@@ -53,13 +54,21 @@ class BacktestResult:
     equity_curve: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
     metrics: dict = field(default_factory=dict)
     total_candles: int = 0
+    risk_rejections: int = 0
+    risk_rejection_reasons: dict = field(default_factory=dict)
 
 
 class BacktestEngine:
     """Event-driven backtest engine that reuses the live strategy code."""
 
-    def __init__(self, config: BacktestConfig | None = None):
+    def __init__(self, config: BacktestConfig | None = None, risk_manager=None):
+        """Args:
+            config: Backtest configuration.
+            risk_manager: Optional RiskManager instance. When provided, all
+                signals are gated through it (same checks as live trading).
+        """
         self.config = config or BacktestConfig()
+        self._risk_manager = risk_manager
 
     def run(
         self,
@@ -101,6 +110,8 @@ class BacktestEngine:
         trades: list[Trade] = []
         equity = cfg.initial_capital
         equity_history: list[float] = []
+        risk_rejections = 0
+        rejection_reasons: dict[str, int] = {}
 
         # Position state
         position_side: str | None = None   # "LONG" or "SHORT"
@@ -129,7 +140,10 @@ class BacktestEngine:
                             position_quantity, position_entry_idx, i, cfg, "stop_loss",
                         )
                         trades.append(trade)
-                        equity += trade.pnl - trade.commission
+                        equity += trade.pnl  # pnl is already net of commission
+                        if self._risk_manager is not None:
+                            self._risk_manager.update_trade_close(
+                                strategy.name, trade.pnl, symbol)
                         position_side = None
                         strategy._position = "FLAT"
 
@@ -144,7 +158,10 @@ class BacktestEngine:
                             position_quantity, position_entry_idx, i, cfg, "take_profit",
                         )
                         trades.append(trade)
-                        equity += trade.pnl - trade.commission
+                        equity += trade.pnl  # pnl is already net of commission
+                        if self._risk_manager is not None:
+                            self._risk_manager.update_trade_close(
+                                strategy.name, trade.pnl, symbol)
                         position_side = None
                         strategy._position = "FLAT"
 
@@ -168,42 +185,74 @@ class BacktestEngine:
                         position_quantity, position_entry_idx, i, cfg, "signal",
                     )
                     trades.append(trade)
-                    equity += trade.pnl - trade.commission
+                    equity += trade.pnl  # pnl is already net of commission
+                    if self._risk_manager is not None:
+                        self._risk_manager.update_trade_close(
+                            signal.strategy_name, trade.pnl, symbol)
                     position_side = None
 
                 # OPEN new position
                 elif action in (SignalAction.LONG, SignalAction.SHORT) and position_side is None:
-                    # Entry at next bar's open + slippage
                     if i + 1 < n:
+                        # Entry at next bar's open + slippage
                         entry_price = df.iloc[i + 1]["open"]
                         if action == SignalAction.LONG:
                             entry_price *= (1 + cfg.slippage_pct)
                         else:
                             entry_price *= (1 - cfg.slippage_pct)
-                    else:
-                        continue  # can't enter on last bar
 
-                    # Position sizing: risk-based with notional cap
-                    risk_pct = signal.risk_pct or cfg.risk_per_trade
-                    sl = signal.stop_loss
-                    if sl and entry_price != sl:
-                        risk_per_unit = abs(entry_price - sl)
-                        risk_amount = equity * risk_pct
-                        quantity = risk_amount / risk_per_unit
-                    else:
-                        # Fallback: fixed fraction of equity
-                        quantity = (equity * risk_pct) / entry_price
+                        # Gate through risk manager if present
+                        if self._risk_manager is not None:
+                            # Build signal with entry price for risk evaluation
+                            # Use candle timestamp so duplicate filter works in backtests
+                            sig_ts = int(row["timestamp"]) if "timestamp" in df.columns else 0
+                            risk_signal = Signal(
+                                symbol=symbol, action=signal.action,
+                                confidence=signal.confidence,
+                                strategy_name=signal.strategy_name,
+                                timeframe=signal.timeframe,
+                                entry_price=entry_price,
+                                stop_loss=signal.stop_loss,
+                                take_profit=signal.take_profit,
+                                risk_pct=signal.risk_pct or cfg.risk_per_trade,
+                                metadata=signal.metadata,
+                                timestamp=sig_ts or signal.timestamp,
+                            )
+                            self._risk_manager.state.update_equity(equity)
+                            decision = self._risk_manager.evaluate(risk_signal)
+                            if not decision.approved:
+                                risk_rejections += 1
+                                key = decision.reason.split(":")[0]
+                                rejection_reasons[key] = rejection_reasons.get(key, 0) + 1
+                                equity_history.append(equity)
+                                continue
+                            # Use risk-manager-computed quantity
+                            if decision.adjusted_quantity and decision.adjusted_quantity > 0:
+                                quantity = decision.adjusted_quantity
+                            else:
+                                equity_history.append(equity)
+                                continue
+                        else:
+                            # Original sizing: risk-based with notional cap
+                            risk_pct = signal.risk_pct or cfg.risk_per_trade
+                            sl = signal.stop_loss
+                            if sl and entry_price != sl:
+                                risk_per_unit = abs(entry_price - sl)
+                                risk_amount = equity * risk_pct
+                                quantity = risk_amount / risk_per_unit
+                            else:
+                                quantity = (equity * risk_pct) / entry_price
 
-                    # Cap: notional value cannot exceed max_notional_pct × equity
-                    max_qty = (equity * cfg.max_notional_pct) / entry_price
-                    quantity = min(quantity, max_qty)
+                        # Cap: notional value cannot exceed max_notional_pct × equity
+                        max_qty = (equity * cfg.max_notional_pct) / entry_price
+                        quantity = min(quantity, max_qty)
 
-                    position_side = action.value
-                    position_entry_price = entry_price
-                    position_quantity = quantity
-                    position_entry_idx = i
-                    position_stop_loss = signal.stop_loss
-                    position_take_profit = signal.take_profit
+                        position_side = action.value
+                        position_entry_price = entry_price
+                        position_quantity = quantity
+                        position_entry_idx = i
+                        position_stop_loss = signal.stop_loss
+                        position_take_profit = signal.take_profit
 
             equity_history.append(equity)
 
@@ -215,11 +264,14 @@ class BacktestEngine:
                 position_quantity, position_entry_idx, n - 1, cfg, "end_of_data",
             )
             trades.append(trade)
-            equity += trade.pnl - trade.commission
+            equity += trade.pnl  # pnl is already net of commission
+            if self._risk_manager is not None:
+                self._risk_manager.update_trade_close(
+                    strategy.name, trade.pnl, symbol)
             equity_history[-1] = equity
 
         equity_curve = pd.Series(equity_history, index=df["timestamp"].values)
-        metrics = self._compute_metrics(equity_curve, trades, cfg.initial_capital)
+        metrics = compute_metrics(equity_curve, trades, cfg.initial_capital)
 
         log.info("backtest_complete", trades=len(trades), final_equity=round(equity, 2),
                  return_pct=round(metrics.get("total_return_pct", 0), 2),
@@ -230,6 +282,8 @@ class BacktestEngine:
             equity_curve=equity_curve,
             metrics=metrics,
             total_candles=n,
+            risk_rejections=risk_rejections,
+            risk_rejection_reasons=rejection_reasons,
         )
 
     @staticmethod
@@ -265,74 +319,3 @@ class BacktestEngine:
             exit_reason=reason,
         )
 
-    @staticmethod
-    def _compute_metrics(
-        equity_curve: pd.Series,
-        trades: list[Trade],
-        initial_capital: float,
-    ) -> dict:
-        """Compute standard backtest performance metrics."""
-        if len(equity_curve) < 2:
-            return {}
-
-        final_equity = equity_curve.iloc[-1]
-        total_return = final_equity - initial_capital
-        total_return_pct = (total_return / initial_capital) * 100
-
-        # Daily returns for Sharpe/Sortino
-        # Convert timestamp index (Unix ms) to datetime and resample to daily
-        try:
-            equity_dt = equity_curve.copy()
-            equity_dt.index = pd.to_datetime(equity_dt.index, unit="ms")
-            daily_equity = equity_dt.resample("D").last().dropna()
-            daily_returns = daily_equity.pct_change().dropna()
-        except Exception:
-            # Fallback: use per-candle returns if timestamp conversion fails
-            daily_returns = equity_curve.pct_change().dropna()
-
-        avg_return = daily_returns.mean()
-        std_return = daily_returns.std()
-        downside_returns = daily_returns[daily_returns < 0]
-        downside_std = downside_returns.std() if len(downside_returns) > 0 else 0
-
-        # Sharpe ratio (annualized, 365 days for crypto which trades 24/7)
-        annualization = np.sqrt(365)
-        sharpe = (avg_return / std_return * annualization) if std_return > 0 else 0
-        sortino = (avg_return / downside_std * annualization) if downside_std > 0 else 0
-
-        # Max drawdown
-        peak = equity_curve.cummax()
-        drawdown = (equity_curve - peak) / peak
-        max_drawdown = abs(drawdown.min())
-
-        # Trade statistics
-        n_trades = len(trades)
-        if n_trades > 0:
-            winners = [t for t in trades if t.pnl > 0]
-            losers = [t for t in trades if t.pnl <= 0]
-            win_rate = len(winners) / n_trades * 100
-            gross_profit = sum(t.pnl for t in winners) if winners else 0
-            gross_loss = abs(sum(t.pnl for t in losers)) if losers else 0
-            profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
-            avg_win = gross_profit / len(winners) if winners else 0
-            avg_loss = gross_loss / len(losers) if losers else 0
-            avg_win_loss_ratio = avg_win / avg_loss if avg_loss > 0 else float("inf")
-        else:
-            win_rate = 0
-            profit_factor = 0
-            avg_win_loss_ratio = 0
-
-        return {
-            "initial_capital": initial_capital,
-            "final_equity": round(final_equity, 2),
-            "total_return": round(total_return, 2),
-            "total_return_pct": round(total_return_pct, 2),
-            "sharpe": round(sharpe, 3),
-            "sortino": round(sortino, 3),
-            "max_drawdown_pct": round(max_drawdown * 100, 2),
-            "total_trades": n_trades,
-            "win_rate_pct": round(win_rate, 1),
-            "profit_factor": round(profit_factor, 3),
-            "avg_win_loss_ratio": round(avg_win_loss_ratio, 3),
-            "total_commission": round(sum(t.commission for t in trades), 2),
-        }

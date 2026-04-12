@@ -24,7 +24,7 @@ enabled = true
 risk_profile = "SAFE"
 # Validated symbols: altcoins that mean-revert well on 1h
 # BTC excluded — trends too aggressively even at ADX<20
-markets = ["ETHUSDT", "BNBUSDT", "ADAUSDT", "DOTUSDT", "MATICUSDT"]
+markets = ["ETHUSDT", "BNBUSDT", "ADAUSDT", "DOTUSDT", "APTUSDT"]
 timeframe = "1h"
 bb_period = 20
 rsi_period = 14
@@ -38,6 +38,39 @@ max_hold_bars = 48              # timeout after 48 bars (2 days)
 cooldown_bars = 5               # wait 5 bars after exit
 max_risk_per_trade = 0.01       # 1% equity risk per trade
 max_notional_pct = 2.0          # max position = 2x equity
+
+[donchian_ensemble_adx]
+enabled = true
+risk_profile = "SAFE"
+# Trend-following works best on high-momentum, liquid altcoins
+markets = ["ETHUSDT", "BNBUSDT", "NEARUSDT", "AVAXUSDT", "XRPUSDT"]
+timeframe = "1h"
+dc_short = 20
+dc_medium = 55
+dc_long = 120
+atr_period = 14
+sl_atr_mult = 2.5
+max_hold_bars = 120
+cooldown_bars = 5
+min_channels = 2
+adx_trend_threshold = 20
+max_risk_per_trade = 0.015
+
+[vol_momentum]
+enabled = true
+risk_profile = "SAFE"
+# Vol-scaled momentum on high-volatility coins
+markets = ["DOGEUSDT", "ADAUSDT", "DOTUSDT"]
+timeframe = "1h"
+momentum_window = 168
+vol_lookback = 168
+atr_period = 14
+sl_atr_mult = 3.0
+max_hold_bars = 168
+cooldown_bars = 5
+rebalance_interval = 24
+momentum_threshold = 0.01
+max_risk_per_trade = 0.012
 
 [asian_range_breakout]
 enabled = false                  # Enable in Phase 2

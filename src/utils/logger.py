@@ -20,8 +20,19 @@ from src.utils.config import get_config
 _configured = False
 
 
+def _default_serializer(obj):
+    """Handle types orjson can't serialize natively."""
+    if hasattr(obj, "item"):  # numpy scalar → Python scalar
+        return obj.item()
+    if isinstance(obj, set):
+        return list(obj)
+    return str(obj)
+
+
 def _orjson_serializer(data: dict, **_kw) -> str:
-    return orjson.dumps(data, option=orjson.OPT_SERIALIZE_NUMPY).decode()
+    return orjson.dumps(
+        data, option=orjson.OPT_SERIALIZE_NUMPY, default=_default_serializer,
+    ).decode()
 
 
 def setup_logging() -> None:

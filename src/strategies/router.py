@@ -30,6 +30,7 @@ class StrategyRouter:
         self._routes: dict[tuple[str, str], list[BaseStrategy]] = defaultdict(list)
         self._storage = storage
         self._signal_count = 0
+        self._exception_count = 0
 
     def register(self, strategy: BaseStrategy) -> None:
         """Register a strategy. Auto-maps its (symbol, timeframe) pairs."""
@@ -59,7 +60,14 @@ class StrategyRouter:
         signals: list[Signal] = []
 
         for strategy in strategies:
-            signal = strategy.process(symbol, timeframe, features)
+            try:
+                signal = strategy.process(symbol, timeframe, features)
+            except Exception as e:
+                self._exception_count += 1
+                log.error("strategy_exception", strategy=strategy.name,
+                          symbol=symbol, error=str(e), type=type(e).__name__)
+                continue
+
             if signal is not None:
                 signals.append(signal)
                 self._signal_count += 1
@@ -135,6 +143,18 @@ def _load_strategies() -> None:
     try:
         from src.strategies.day_trading.bb_rsi_mr import BBRSIMeanRevStrategy
         register_strategy("bb_rsi_mr", BBRSIMeanRevStrategy)
+    except ImportError:
+        pass
+
+    try:
+        from src.strategies.trend_following.donchian_ensemble import DonchianEnsembleStrategy
+        register_strategy("donchian_ensemble_adx", DonchianEnsembleStrategy)
+    except ImportError:
+        pass
+
+    try:
+        from src.strategies.momentum.vol_momentum import VolMomentumStrategy
+        register_strategy("vol_momentum", VolMomentumStrategy)
     except ImportError:
         pass
 

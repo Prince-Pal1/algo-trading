@@ -96,7 +96,13 @@ class _CandleAccumulator:
 
 
 class CandleBuilder:
-    """Builds OHLCV candles from raw ticks or forwards exchange klines."""
+    """Builds OHLCV candles from raw ticks or forwards exchange klines.
+
+    Dedup logic: when Binance sends kline candles for a (symbol, timeframe),
+    those are authoritative. Tick-built candles are suppressed for that pair
+    to prevent duplicate emission. Tick aggregation is only used for custom
+    timeframes that the exchange doesn't provide (e.g. 5s, 15s).
+    """
 
     def __init__(self, timeframes: list[str] | None = None):
         self.timeframes = timeframes or ["1m"]
@@ -108,6 +114,10 @@ class CandleBuilder:
         )
         self._candle_count = 0
 
+        # (symbol, timeframe) pairs where exchange provides klines — tick-built
+        # candles are suppressed for these to avoid duplicate emission.
+        self._kline_pairs: set[tuple[str, str]] = set()
+
     async def handle_tick(self, tick: Tick) -> None:
         """Aggregate a tick into candles for all configured timeframes."""
         for tf in self.timeframes:
@@ -115,6 +125,11 @@ class CandleBuilder:
                 continue
 
             key = (tick.symbol, tf)
+
+            # Skip tick aggregation for pairs where exchange sends klines
+            if key in self._kline_pairs:
+                continue
+
             acc = self._accumulators.get(key)
             if acc is None:
                 acc = _CandleAccumulator(tick.symbol, tf)
@@ -134,7 +149,13 @@ class CandleBuilder:
         """Forward exchange-provided kline candle (pass-through mode).
 
         Only emits when candle.closed is True (finalized candle).
+        Auto-registers the (symbol, timeframe) pair so tick-built candles
+        are suppressed for it going forward.
         """
+        key = (candle.symbol, candle.timeframe)
+        if key not in self._kline_pairs:
+            self._kline_pairs.add(key)
+
         if candle.closed and self.on_candle:
             self._candle_count += 1
             await self.on_candle(candle)

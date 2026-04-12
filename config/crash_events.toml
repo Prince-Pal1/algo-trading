@@ -1,0 +1,51 @@
+# Crypto Crash Event Database
+# Used by crash_stress protocol to test strategy behavior during known crises.
+# Each event defines a date range where BTC experienced severe drawdown.
+
+[[crash]]
+id = "covid_2020"
+name = "COVID Black Thursday"
+start = "2020-03-12"
+end = "2020-03-15"
+btc_drop_pct = -58
+trigger = "Pandemic panic + BitMEX liquidation cascade"
+
+[[crash]]
+id = "china_ban_2021"
+name = "China Mining Ban"
+start = "2021-05-19"
+end = "2021-05-24"
+btc_drop_pct = -53
+trigger = "China banned crypto mining + Elon Musk Tesla reversal"
+
+[[crash]]
+id = "luna_2022"
+name = "Terra/LUNA Collapse"
+start = "2022-05-07"
+end = "2022-05-13"
+btc_drop_pct = -32
+trigger = "UST depeg → LUNA hyperinflation → contagion"
+
+[[crash]]
+id = "3ac_celsius_2022"
+name = "3AC/Celsius Contagion"
+start = "2022-06-10"
+end = "2022-06-19"
+btc_drop_pct = -38
+trigger = "3AC insolvency → Celsius/Voyager halt withdrawals"
+
+[[crash]]
+id = "ftx_2022"
+name = "FTX Collapse"
+start = "2022-11-06"
+end = "2022-11-10"
+btc_drop_pct = -27
+trigger = "FTX/Alameda fraud revealed → exchange run"
+
+[[crash]]
+id = "japan_carry_2024"
+name = "Japan Carry Trade Unwind"
+start = "2024-08-02"
+end = "2024-08-06"
+btc_drop_pct = -22
+trigger = "BOJ rate hike → yen carry trade liquidation → global risk-off"

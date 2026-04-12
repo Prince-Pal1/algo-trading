@@ -1,0 +1,1 @@
+Buy when 9 EMA crosses above 21 EMA, sell when 9 EMA crosses below

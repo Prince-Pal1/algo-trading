@@ -11,6 +11,9 @@ build/
 /data/
 *.parquet
 
+# Backtest reports (generated per-run)
+/reports/
+
 # Config with secrets
 config/exchanges.toml
 
@@ -29,3 +32,4 @@ config/exchanges.toml
 
 # Node (MCP servers have their own)
 node_modules/
+tradingview-mcp-jackson/

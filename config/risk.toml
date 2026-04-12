@@ -24,3 +24,26 @@ min_trades_for_kelly = 30       # Need 30+ trades before Kelly kicks in
 [fat_finger]
 max_order_value_usd = 10000     # No single order > $10K (paper phase)
 max_quantity_multiplier = 10    # No order > 10x average trade size
+
+[modes]
+default = "AGGRESSIVE"          # Profit-first default
+
+# ── Per-Strategy Profiles ──
+# Strategies without a profile use global defaults (bb_rsi_mr)
+
+[strategy_profiles.donchian_ensemble_adx]
+confidence_floor = 0.5          # Trend signals are inherently uncertain
+use_ev_gate = true              # Use expected value instead of raw confidence
+ev_threshold = 0.4              # conf * (avg_win/avg_loss) must exceed this
+drawdown_sensitivity = 0.6      # 60% of normal drawdown scaling
+drawdown_floor = 0.2            # Never reduce below 20% size
+use_risk_based_limits = true    # Risk-based instead of notional (wide stops)
+max_risk_pct_per_position = 0.04  # 4% risk cap per position
+
+[strategy_profiles.vol_momentum]
+confidence_floor = 0.6
+skip_kelly_vol_scaling = true   # Strategy already has internal vol_scalar
+drawdown_sensitivity = 0.5      # 50% of normal drawdown scaling
+drawdown_floor = 0.3            # Never reduce below 30% size
+use_risk_based_limits = true
+max_risk_pct_per_position = 0.04
