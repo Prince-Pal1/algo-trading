@@ -1,7 +1,21 @@
+> ⚠️ **ARCHIVED — SUPERSEDED (Session 21)**
+>
+> This is the original approved plan from April 11, 2026. It has been superseded by the new single-source-of-truth doc system:
+> - Current phase status → [ROADMAP.md](../../ROADMAP.md)
+> - M3S spec → [docs/M3S_SPEC.md](../M3S_SPEC.md)
+> - Decision rationale → [MASTER_PLAN.md](../../MASTER_PLAN.md)
+> - Live module registry → [ARCHITECTURE.md](../../ARCHITECTURE.md)
+>
+> Content preserved verbatim below for historical reference. Do not edit.
+
+---
+
 # Algo Trading System — Full Approved Plan
 
-**Status:** APPROVED | **Date:** April 11, 2026
+**Status:** APPROVED & PARTIALLY IMPLEMENTED | **Date:** April 11, 2026
 **Author:** Prince | **AI Architect:** Claude
+
+> **Implementation Note (April 12, 2026):** This plan was the approved build order. Phase 1 (Data Foundation) and Phase 2 (Strategy + Backtest) are complete. Key deviations: custom backtest engine instead of VectorBT, `ta` library instead of pandas-ta, BB+RSI Mean Reversion as validated strategy (EMA Crossover deprecated). Session 8 added institutional-grade backtesting (7 protocols, 14 charts, 6 format parsers, Streamlit dashboard). See `STATE.md` for current status.
 
 ---
 

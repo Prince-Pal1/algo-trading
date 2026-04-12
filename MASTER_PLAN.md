@@ -1,10 +1,12 @@
-# MASTER PLAN — Algo Trading System
+ # MASTER PLAN — Algo Trading System
+
+> **Authoritative sources note (added Session 21):** This document records *why* decisions were made. It does **not** track current phase status — for that, see [ROADMAP.md](ROADMAP.md). For current module state, see [ARCHITECTURE.md](ARCHITECTURE.md). For current session state, see [STATE.md](STATE.md).
 
 ## Complete Context Document for Claude Sessions
 
 **Purpose:** This file gives any fresh Claude session ALL the context it needs about this project — who Prince is, what's been built, what's planned, every architectural decision, every research finding, and every correction. Read this first.
 
-**Last Updated:** April 11, 2026
+**Last Updated:** April 12, 2026
 
 ---
 
@@ -91,6 +93,55 @@
 - `/Users/prince/algo-trading/alpaca/trade.js` — placeOrder, getPositions, closePosition, getOrders
 - `/Users/prince/algo-trading/alpaca/package.json` — dependencies
 
+### Crypto Trading Core — COMPLETE (Sessions 3-6)
+
+**Data Pipeline:**
+- `src/main.py` — TradingEngine entry point
+- `src/config.py` — TOML config loader (msgspec Structs)
+- `src/data/feed.py` — Binance WebSocket feed
+- `src/data/candle_builder.py` — Tick → OHLCV candle aggregation
+- `src/data/feature_engine.py` — Technical indicators (ta library)
+- `src/data/storage.py` — SQLite + Parquet storage
+- `src/data/downloader.py` — Historical data downloader (Binance)
+
+**Strategy Layer:**
+- `src/strategies/base.py` — BaseStrategy interface (`on_candle() → Signal | None`)
+- `src/strategies/router.py` — StrategyRouter dispatches candles to active strategies
+- `src/strategies/day_trading/bb_rsi_mr.py` — BB+RSI Mean Reversion (validated winner)
+
+**Backtest Engine:**
+- `src/backtest/engine.py` — Custom event-driven backtest engine (NOT VectorBT)
+- `src/backtest/walk_forward.py` — Walk-forward optimization
+- `src/execution/paper_executor.py` — Paper trading executor
+
+### Institutional-Grade Backtesting System — COMPLETE (Session 8)
+
+**Core Pipeline (Phase A):**
+- `src/backtest/metrics.py` — `compute_metrics()` single source of truth (PSR, DSR, MinBTL, bootstrap)
+- `src/backtest/result_store.py` — `ResultStore.save_run()` atomic triple output (DB + JSON + HTML)
+- `src/backtest/charts.py` — 14 Plotly chart renderers
+- `src/backtest/report.py` — Jinja2 HTML report generator
+- `scripts/backtest.py` — Unified CLI (run, validate, compare, report)
+
+**Protocols (Phase B):**
+- `src/backtest/protocols.py` — 7 test protocols (smoke, spot_check, psr_check, monte_carlo, crash_stress, param_sensitivity, deflated_sharpe)
+- `config/crash_events.toml` — 6 crypto crash events
+- 4 validation tiers (lite/standard/intense/research)
+
+**Visualization (Phase C):**
+- 14 chart types: equity curve, drawdown, monthly heatmap, rolling metrics, trade distribution, MC fan, win/loss streaks, regime performance, crash stress, param sensitivity, radar comparison
+- `src/backtest/quantstats_bridge.py` — QuantStats tearsheet integration
+
+**Multi-Format Ingestion (Phase D):**
+- `src/research/strategy_ir.py` — Strategy YAML IR (universal intermediate representation)
+- `src/research/codegen.py` — IR → Python BaseStrategy code generator
+- 6 parsers: raw rules, natural language, Pine Script v4/v5, webhooks, MQL4/5, Python frameworks (Freqtrade, Backtrader, Jesse, VectorBT)
+- `scripts/import_strategy.py` — Multi-format import CLI with auto-detect
+
+**Dashboard (Phase E):**
+- `src/dashboard/app.py` — Streamlit 5-page interactive dashboard
+- Pages: Backtest Runs, Strategy Deep Dive, Compare Runs, Imported Strategies, Validation
+
 ---
 
 ## 3. Project File Map
@@ -101,17 +152,73 @@ algo-trading/
 |-- MASTER_PLAN.md                      # THIS FILE — full context for Claude sessions
 |-- FULL_PLAN.md                        # The approved plan with all corrections
 |-- TRADING_SYSTEM_BLUEPRINT.md         # Original 1,399-line blueprint (needs 17 corrections applied)
+|-- ARCHITECTURE.md                     # Module registry, data flow, shared state
+|-- STATE.md                            # Session resume point — read FIRST every session
+|-- CLAUDE.md                           # Claude Code instructions
 |-- Algo_Trading_Knowledge_Base.pdf     # Research document
 |-- generate_pdf.py                     # PDF generator script
+|-- pyproject.toml                      # Project dependencies & metadata
 |
-|-- alpaca/                             # Alpaca execution layer
+|-- src/                                # Main source code
+|   |-- main.py                         # TradingEngine entry point
+|   |-- config.py                       # TOML config loader (msgspec Structs)
+|   |
+|   |-- data/                           # Data pipeline
+|   |   |-- feed.py                     # Binance WebSocket feed
+|   |   |-- candle_builder.py           # Tick → OHLCV candle aggregation
+|   |   |-- feature_engine.py           # Technical indicators (ta library)
+|   |   |-- storage.py                  # SQLite + Parquet storage
+|   |   +-- downloader.py              # Historical data downloader (Binance)
+|   |
+|   |-- strategies/                     # Strategy layer
+|   |   |-- base.py                     # BaseStrategy interface
+|   |   |-- router.py                   # StrategyRouter dispatcher
+|   |   +-- day_trading/
+|   |       +-- bb_rsi_mr.py            # BB+RSI Mean Reversion strategy
+|   |
+|   |-- backtest/                       # Institutional backtesting system
+|   |   |-- engine.py                   # Custom event-driven backtest engine
+|   |   |-- metrics.py                  # compute_metrics() — single source of truth
+|   |   |-- result_store.py             # Triple output (DB + JSON + HTML)
+|   |   |-- charts.py                   # 14 Plotly chart renderers
+|   |   |-- report.py                   # Jinja2 HTML report generator
+|   |   |-- protocols.py               # 7 test protocols, 4 validation tiers
+|   |   |-- walk_forward.py             # Walk-forward optimization
+|   |   +-- quantstats_bridge.py        # QuantStats tearsheet integration
+|   |
+|   |-- execution/                      # Execution layer
+|   |   +-- paper_executor.py           # Paper trading executor
+|   |
+|   |-- research/                       # Strategy ingestion & codegen
+|   |   |-- strategy_ir.py              # Strategy YAML IR (intermediate representation)
+|   |   +-- codegen.py                  # IR → Python BaseStrategy code generator
+|   |
+|   +-- dashboard/                      # Streamlit dashboard
+|       +-- app.py                      # 5-page interactive dashboard
+|
+|-- scripts/                            # CLI entry points
+|   |-- backtest.py                     # Unified backtest CLI (run, validate, compare, report)
+|   |-- import_strategy.py              # Multi-format strategy import CLI
+|   |-- dashboard.py                    # Launch Streamlit dashboard
+|   +-- run_verification.py             # Backtest engine verification suite
+|
+|-- config/                             # Configuration files
+|   +-- crash_events.toml               # 6 crypto crash events for stress testing
+|
+|-- tests/                              # Test suite (mirrors src/ structure)
+|
+|-- research/                           # Research notebooks & analysis
+|
+|-- reports/                            # Generated backtest reports (HTML, JSON)
+|
+|-- alpaca/                             # Alpaca execution layer (MCP)
 |   |-- server.js                       # MCP server — Claude calls this to trade
 |   |-- connection.js                   # Alpaca client setup + connection test
 |   |-- trade.js                        # placeOrder, getPositions, closePosition, getOrders
 |   |-- package.json
 |   +-- node_modules/
 |
-+-- tradingview-mcp-jackson/            # TradingView analysis layer
++-- tradingview-mcp-jackson/            # TradingView analysis layer (MCP)
     +-- src/
         +-- server.js                   # MCP server — Claude reads charts via this
 ```
@@ -137,7 +244,7 @@ algo-trading/
 DATA LAYER (WebSocket feeds)
   |
   v
-CANDLE BUILDER / FEATURE ENGINE (OHLCV from ticks, indicators via pandas-ta)
+CANDLE BUILDER / FEATURE ENGINE (OHLCV from ticks, indicators via ta library)
   |
   v
 STRATEGY MODULES (Ultra Scalp | Scalping | Day Trading + Options)
@@ -169,7 +276,7 @@ SCHEDULER + LOGGER (market hours, SQLite trade log, Telegram alerts)
 - **orjson** — 10x faster JSON parsing for WebSocket messages
 - **ZeroMQ PUB/SUB** — Risk manager as separate process (if it dies, trading halts)
 - **Redis (hot) + SQLite/TimescaleDB (warm) + Parquet (cold)** — tiered data storage
-- **pandas** as primary DataFrame library for strategy layer (NOT Polars — pandas-ta compatibility)
+- **pandas** as primary DataFrame library (ta library for indicators, not pandas-ta)
 - **Same-code backtest/live pattern** — `BaseStrategy.on_candle()` runs identically in both modes
 - **structlog** for structured logging
 
@@ -414,71 +521,7 @@ For comparison: hiring a developer = $40,000-$150,000.
 
 ## 12. Corrected Build Phases (Milestone-Based)
 
-### Phase 1 — Data Foundation
-- Project structure (folders, `pyproject.toml`, venv)
-- Config system (TOML files)
-- Async WebSocket clients (Binance ticks + klines, IC Markets via cTrader)
-- Candle builder (OHLCV from raw ticks)
-- Indicator engine (pandas-ta on pandas DataFrames)
-- Redis for hot data cache
-- SQLite for trade log
-- Parquet for historical bar storage
-- structlog + basic Telegram alerts
-- **NO Docker, NO TimescaleDB, NO Grafana**
-
-### Phase 2 — First Strategy + Backtest + Paper Trade
-- EMA crossover + RSI (system test only)
-- Asian Range Breakout on XAUUSD (first real strategy)
-- VectorBT backtest on 2+ years of data
-- Walk-forward validation
-- Performance metrics (Sharpe, Sortino, max drawdown, win rate)
-- Paper trading mode
-- **Milestone: Sharpe > 1.0 on 2-year backtest with walk-forward validation**
-
-### Phase 3 — Risk Management + M3S
-- Risk manager as separate ZeroMQ process
-- Pre-trade checks (fat finger, max position, daily P&L, gross exposure, correlation)
-- Circuit breakers (daily, weekly, monthly, max drawdown)
-- Fractional Kelly position sizing
-- M3S: strategy registry, 4 modes, allocation engine, compounding engine, AI advisor
-- Kill switch via Telegram
-- **Milestone: Risk system prevents losses beyond limits for 30 consecutive days**
-
-### Phase 4 — Multi-Exchange Execution
-- IC Markets execution (cTrader Open API)
-- Binance execution (WebSocket orders)
-- Alpaca native Python client (supplement existing MCP)
-- IBKR execution via `ib_insync`
-- Paper executor (simulated)
-- **Milestone: Paper trades on 2+ exchanges with <200ms latency**
-
-### Phase 5 — AI Agent Intelligence
-- Claude API integration (direct calls, simple orchestrator)
-- Technical Analyst agent, Sentiment Analyst agent
-- Weighted consensus signal aggregation
-- Caching layer (reduce API costs 60%+)
-- **Milestone: AI signals improve backtest Sharpe by >0.2 vs baseline**
-
-### Phase 6 — Options Module
-- IBKR options chain data
-- Greeks engine (py_vollib)
-- Iron condor strategy
-- Portfolio Greeks tracking + delta hedging
-- **Milestone: Iron condor positive on 1 year SPX backtest**
-
-### Phase 7 — Production Deployment
-- Docker Compose
-- AWS Singapore VPS
-- TimescaleDB migration
-- Prometheus + Grafana monitoring
-- **Milestone: System runs 7 days unattended on VPS**
-
-### Phase 8 — Scale
-- 2-3 more uncorrelated strategies
-- Multi-agent debate system (Bull vs Bear)
-- Meta-Strategist regime detector
-- Performance dashboard
-- **Milestone: 3+ strategies running with portfolio Sharpe > 1.5**
+> **Moved.** Live phase status is now in [ROADMAP.md](ROADMAP.md). This file no longer duplicates the phase list — see the Authoritative Sources note at the top of this document.
 
 ---
 
@@ -548,6 +591,7 @@ These are read by Claude on every session start:
 | Docker timing | Phase 7 (not Phase 1) | Premature complexity in early phases |
 | Database timing | SQLite + Parquet first | TimescaleDB in Phase 7 when data volume justifies it |
 | RL/FinRL | Removed | Fragile in financial markets. Gradient boosted trees instead. |
+| Doc architecture (Session 21) | Single-source-of-truth per concern | 4+ files duplicated 8-phase roadmap and drifted independently, causing two wrong "next phase" recommendations in one session. ROADMAP.md now owns phase status exclusively; every other file links to it. Enforced by `scripts/doc_lint.py` + Autonomous Workflow Protocol in CLAUDE.md. |
 
 ---
 
@@ -558,9 +602,9 @@ These are read by Claude on every session start:
 3. **Before implementing a phase:** Read the corresponding phase in Section 12
 4. **Before adding a strategy:** Check the Strategy Priority Order (Section 6)
 5. **For MCP server issues:** Check memory file `feedback_mcp_config.md`
-6. **For detailed competitor numbers:** See `FULL_PLAN.md` (the complete approved plan)
-7. **For the original blueprint:** See `TRADING_SYSTEM_BLUEPRINT.md` (needs corrections applied)
+6. **For detailed competitor numbers:** See `docs/archive/FULL_PLAN.md` (archived Session 21)
+7. **For the original blueprint:** See `BLUEPRINT.md` (FROZEN — original v1.1 spec)
 
 ---
 
-*This document is the single source of truth for the algo trading project. Keep it updated as decisions change.*
+*This document owns **decision rationale and research findings** — the "why" behind the project. For phase status see `ROADMAP.md`, for module state see `ARCHITECTURE.md`, for session state see `STATE.md`. Keep the decision log updated as new decisions are made.*
