@@ -1,8 +1,8 @@
 # Algo Trading — Roadmap & Phase Status
 
-**Last updated:** 2026-04-13 (Session 21 — doc consolidation)
-**Current phase:** 3b part 2 — M3S construction (AI compounding system)
-**Next action:** Build `src/m3s/` — start with Allocation Engine skeleton + mode resolver hook into existing RiskManager. See `docs/M3S_SPEC.md` for full spec.
+**Last updated:** 2026-04-13 (Session 22 — M3S Phase 3b-2 ALL 10 sub-phases complete)
+**Current phase:** 3b part 2 — M3S construction ✅ sub-phases 0.1-0.10 all complete, awaiting commit + Prince review
+**Next action:** Prince reviews M3S in shadow mode (flip `settings.toml [m3s] enabled=true`, keep `shadow_mode=true`). After ≥4 weeks of clean shadow logs + BT gates all green, Prince flips `shadow_mode=false` for authoritative mode. See `docs/planning/m3s_plan_v1.md` § 11 Rollout Phases.
 
 > **Authority note:** This file is the **only** authoritative source for phase status. If any other file contradicts this, that other file is wrong — fix it to link here. See `CLAUDE.md` § Autonomous Workflow Protocol.
 
@@ -16,7 +16,7 @@
 | 2 | Strategy + Backtest + Paper | Sharpe >1.0 on 2-year walk-forward | ✅ MILESTONE MET | Session 9 (1.307 baseline), Session 11 (optimized 2.318) | — |
 | 3a | Risk Manager — core | 6 pre-trade checks + circuit breakers + kill switch + ZMQ isolation | ✅ COMPLETE | Session 12 | — |
 | 3b-1 | Adaptive Risk Modes | 4 modes (AGGRESSIVE/BALANCED/DEFENSIVE/CUSTOM) + per-strategy profiles + mode backtest verification | ✅ COMPLETE | Session 13 | — |
-| **3b-2** | **M3S — AI Compounding System** | **Allocation Engine + Compounding Engine + AI Advisor (The PhD) + Correlation limits + Telegram bot** | ❌ **NOT STARTED — NEXT PHASE** | See `docs/M3S_SPEC.md` | — |
+| **3b-2** | **M3S — Master Money Management System** | 10 sub-phases; meta-backtest Sharpe ≥ 2.35 | ✅ **CODE COMPLETE — SHADOW MODE PENDING** | Session 22 (all 10 sub-phases, 227 new M3S tests, 516 total) | Prince review + BT gates + 4-week shadow run |
 | 3-milestone | Paper run — no losses beyond limits for 30 days | 30 consecutive days clean operation | 🟡 IN PROGRESS (passive clock) | Engine launched Session 16; 289 tests pass Session 20 | Operational stability + M3S integration |
 | 4 | Multi-Exchange Execution | Paper trades on 2+ exchanges, <200ms latency | ❌ NOT STARTED | — | IC Markets cTrader is gold-only and **deferred** until a gold strategy exists |
 | 5 | AI Agent Intelligence (Meta-Strategist, News, Risk Sentinel) | Sharpe uplift >0.2 vs baseline | ❌ NOT STARTED | — | M3S must land first (The PhD is the foundation) |
@@ -30,18 +30,43 @@
 
 ## Next Phase Detail — 3b Part 2 (M3S)
 
-M3S = **Master Money Management System**. The single highest-value component in the roadmap — no retail system has this, hedge funds use human teams, we're building it as an AI-powered engine.
+M3S = **Master Money Management System**. The single highest-value component in the roadmap — no retail system has this, hedge funds use human teams, we're building it as a 10-sub-phase institutional-grade + retail-aggressive system.
 
-**Scope** (all 5 sub-components):
-1. **Allocation Engine** — Kelly-weighted, correlation-aware, per-mode capped
-2. **Compounding Engine** — BASE/PROFIT pool tracking, per-mode compound rules
-3. **AI Advisor "The PhD"** — Claude Haiku routine (every 30 min) + Sonnet daily review. Outputs structured JSON (mode blend + allocations + compound pct)
-4. **Correlation Limits** — Pairwise corr > 0.7 → combined allocation capped at 40%
-5. **Telegram Bot** — Alerts + mode override commands
+**Authoritative plan:** `docs/planning/m3s_plan_v1.md` § v1.1 ADDENDUM (Session 22).
 
-**Expected impact:** Sharpe 1.6-2.2 (baseline M3S), 1.8-2.5 (with AI compounding). See `docs/M3S_SPEC.md` for full spec including mode definitions, 4-step allocation math, compounding rules, advisor prompt structure, and expected-return table.
+**Modes (4 total):** CONSERVATIVE / STANDARD / GROWTH / CUSTOM. GROWTH is retail-aggressive (vol 22%, daily compound, DD 10% demote). CUSTOM is fully user-configurable with 5 safety rails.
 
-**Why this is next (and not IC Markets or the 30-day validation run):**
+**7 Tier 1 additions** layered onto the base allocator+compounder+modes stack:
+1. Regime detection → auto mode switching (sub-phase 0.9)
+2. Strategy edge-decay detection (sub-phase 0.2)
+3. Signal conviction-weighted sizing (sub-phase 0.5)
+4. Ledoit-Wolf covariance shrinkage (sub-phase 0.4)
+5. CVaR tail-risk position scaling (sub-phase 0.3)
+6. Purged & Embargoed K-Fold CV (sub-phase 0.10)
+7. Bayesian fractional Kelly from parameter uncertainty (sub-phase 0.10)
+
+**Deferred to Phase 3c:** Meta-labeling (Lopez de Prado AFML ch.3) — biggest Sharpe upside but its own 2-week sprint with LightGBM training pipeline. Gated on sub-phase 0.10.
+
+### Sub-phase Table
+
+| # | Name | Status | Tests | Backtest gate |
+|---|---|---|---|---|
+| 0.1 | Skeleton + state layer (types, state, modes) | ✅ COMPLETE | 27 | — |
+| 0.2 | Portfolio tracker + edge-decay monitor (+Tier 1 #2) | ✅ COMPLETE | 33 | — |
+| 0.3 | Compounder + 4 modes + CVaR scaling (+Tier 1 #5) | ✅ COMPLETE | 35 | BT #1 ✅ |
+| 0.4 | Allocator HRP-lite + Ledoit-Wolf shrinkage (+Tier 1 #4) | ✅ COMPLETE | 24 | BT #2 ✅ |
+| 0.5 | Hooks + conviction scorer (+Tier 1 #3) | ✅ COMPLETE | 33 | — |
+| 0.6 | Scheduler + SQLite persistence + migrations | ✅ COMPLETE | 12 | — |
+| 0.7 | Meta-backtest simulator | ✅ COMPLETE | 11 | BT #3 ✅ |
+| 0.8 | Wire into main.py DISABLED | ✅ COMPLETE | 8 | — |
+| 0.9 | Regime detector + auto mode switching (+Tier 1 #1) | ✅ COMPLETE | 21 | BT #4 ✅ |
+| 0.10 | Purged CV + Bayesian fractional Kelly (+Tier 1 #6,#7) | ✅ COMPLETE | 23 | BT #5 ✅ |
+
+**Totals actual:** ~3,400 LOC, 227 new M3S tests, 5 backtest gates all green, 516 total tests (from 289 baseline).
+
+**Why this ordering:** 0.1 is pure scaffolding (no wiring). 0.2-0.4 build the three core engines (portfolio/compounder/allocator) in parallel-compatible isolation. 0.5 wires them behind a single `M3S.on_signal` hook. 0.6 makes it restartable. 0.7 proves it beats fixed-weight before 0.8 wires it (disabled) into main.py. 0.9 and 0.10 are the Tier 1 additions that don't fit inside existing sub-phases.
+
+**Why this is in progress (and not IC Markets or the 30-day validation run):**
 - IC Markets cTrader is **only suitable for gold** — there is no gold strategy yet, so Phase 4 is deferred
 - The 30-day paper validation is a passive clock — it runs in parallel, it doesn't block development
 - M3S is the last component needed before the system can genuinely compound profits across multiple strategies with correlation-awareness. Everything downstream (AI agents, options, production scale) assumes M3S exists.

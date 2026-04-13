@@ -1,18 +1,85 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-04-13 (Session 21 — doc consolidation)
+**Last updated:** 2026-04-13 (Session 22 — M3S Phase 3b-2 code complete, all 10 sub-phases)
 
 ---
 
 ## Current Position
 
-**Active phase:** 3b part 2 — M3S construction (AI compounding system). See `ROADMAP.md`.
-**Next session target:** Begin `src/m3s/` scaffold — start with Allocation Engine + mode-resolver hook into existing RiskManager. Reference: `docs/M3S_SPEC.md`.
-**Engine status:** Paper trading running via launchd (risk-server + engine + watchdog), HEALTHY. 9 symbols × 1h, $10,000 equity, 0 open positions as of last check.
-**Test suite:** 289 passing, 0 skipped (Session 20 correctness sweep).
+**Active phase:** 3b part 2 — M3S code complete (sub-phases 0.1-0.10 ✅). M3S is wired into `src/main.py` DISABLED by default. Awaiting Prince review + commit + shadow-mode activation.
+**Next session target:** Prince reviews M3S plan + diffs, flips `config/settings.toml [m3s] enabled=true` (shadow_mode=true still) to start shadow-mode logging alongside live paper trading. Monitor dashboard for ≥4 weeks. After that, BT gates review + authoritative mode flip (`shadow_mode=false`). See `docs/planning/m3s_plan_v1.md` § 11 Rollout Phases.
+**Engine status:** Paper trading running via launchd (risk-server + engine + watchdog), HEALTHY. 9 symbols × 1h, $10,000 equity, 0 open positions as of last check. M3S is wired but currently disabled.
+**Test suite:** 516 passing, 0 skipped (289 baseline + 227 new M3S tests across all 10 sub-phases).
 **Portfolio:** bb_rsi_mr_opt 40% / donchian_ensemble_adx 30% / vol_momentum 30% — Sharpe 2.318 (backtest, 2yr walk-forward).
 
 > See `ROADMAP.md` for phase table. See `SESSIONS_ARCHIVE.md` for Sessions 8-17.
+
+---
+
+## Session 22 — M3S Phase 3b-2 Design & Sub-phase 0.1 (2026-04-13)
+
+**Super-planning cycle for M3S.** Built research prompt (`docs/planning/m3s_research_prompt.md`) with dual Principal Engineer + Senior Hedge Fund PM persona, 49 design questions, 18-section output format. Plan subagent returned `docs/planning/m3s_plan_v1.md` v1 (629 lines): 4 modes collapsed to 2, LLM advisor deferred, HWM-gated vol-targeted compounding, HRP-lite allocator, rejected BASE/PROFIT pool and per-trade compounding as retail pathologies.
+
+**Prince pushback — retail reality.** Rejected hedge-fund purity on capacity grounds: no LP redemption risk, no market impact, no quarterly scrutiny. Asked for retail-aggressive compounding mode + fully configurable CUSTOM mode + sub-phase breakdown with test+backtest gates between each.
+
+**Resolution — v1.1 ADDENDUM to plan (in-place override).** 4 modes: CONSERVATIVE / STANDARD / **GROWTH** (renamed from RETAILER) / **CUSTOM**. GROWTH = vol 22%, daily compound, DD 10% auto-demote. CUSTOM = user drives every dial with 5 safety rails (opt-in flag, compound_every_n≥1, demote-before-freeze, kelly≤1.0, ceiling≥floor). HWM gate locked on in every mode (variance-drag math is universal — loader force-enables even in CUSTOM with WARN).
+
+**Kelly vs intuition split (documented).** Capital allocation follows Kelly/HRP (risky=less capital). Compounding pace follows Prince's intuition (risky=slower compound) via rolling-Sharpe pace dial clamped per mode. Two separate decisions, two different math paths.
+
+**Tier 1 research sweep — 7 additions.**
+1. Regime detection → auto mode switching (sub-phase 0.9, ~300 LOC)
+2. Strategy edge-decay detection (sub-phase 0.2 ext, ~50 LOC)
+3. Signal conviction-weighted sizing (sub-phase 0.5 ext, ~80 LOC)
+4. **Ledoit-Wolf covariance shrinkage** (Ledoit-Wolf 2004/2020, sub-phase 0.4 ext, ~50 LOC)
+5. **CVaR tail-risk position scaling** (Rockafellar-Uryasev 2000, sub-phase 0.3 ext, ~80 LOC)
+6. **Purged & Embargoed K-Fold CV** (Lopez de Prado AFML ch.7, sub-phase 0.10, ~200 LOC)
+7. **Bayesian fractional Kelly from parameter uncertainty** (Baker-McHale 2013, sub-phase 0.10, ~60 LOC)
+
+Meta-labeling (biggest single upside, +0.2-0.5 Sharpe) deferred to Phase 3c — 2-week standalone sprint with LightGBM training pipeline, gated on sub-phase 0.10. Plus Tier 2/3 backlog (10 items) and strategy archetype backlog (10 items) stored in `project_m3s_backlog.md` memory.
+
+**Sub-phase 0.1 — Scaffolding + state layer (COMPLETE).**
+
+New files:
+- `src/m3s/__init__.py` — public exports
+- `src/m3s/types.py` — msgspec frozen structs: `PortfolioSnapshot`, `StrategySnapshot`, `AllocationDecision`, `CompoundState`, `M3SEventType` enum
+- `src/m3s/modes.py` — `M3SMode` enum (CONSERVATIVE/STANDARD/GROWTH/CUSTOM), `ModeConfig` frozen struct, `MODE_PRESETS` for the three fixed modes, `load_mode_from_dict()` with all 5 CUSTOM safety rails + cross-mode rails (cadence, halt>freeze, kelly≤1)
+- `src/m3s/state.py` — `M3SStore` SQLite wrapper for `m3s_state` (KV per namespace) and `m3s_events` (append-only log with indexes on ts_ms and event_type), WAL journaling, msgspec JSON encoding
+- `tests/test_m3s/{__init__.py,test_types.py,test_state.py,test_modes.py}` — 27 tests (5 types, 9 state, 13 modes)
+
+Verification: **316 tests pass** (289 → 316, +27). Sub-phase 0.1 ships disconnected — nothing in `src/main.py` or `src/risk/` touched. Subsequent sub-phases build portfolio tracker, compounder, allocator, hooks, scheduler, meta-backtest, regime detector, and evaluation layer on top.
+
+**Known gotcha added:** `M3SMode.CUSTOM` is a *different* enum from `RiskMode.CUSTOM`. M3S modes live in `src/m3s/modes.py`, risk modes in `src/risk/modes.py`. Never cross-import. Architectural separation: M3S sits *in front of* the risk server and only shrinks signals; risk modes govern the ZMQ-gated risk checks behind it.
+
+**Sub-phase 0.2 — Portfolio tracker + Edge-decay monitor (COMPLETE, +33 tests).**
+`src/m3s/portfolio.py` (PortfolioTracker with HWM/DD/rolling Sharpe via daily-resampled returns + pairwise signal correlation from exposure timelines) and `src/m3s/edge_decay.py` (Tier 1 #2: rolling Sharpe decay vs lifetime + pnl proxy + 14d persistence gate + auto-halve → auto-pause escalation + recovery clearing).
+
+**Sub-phase 0.3 — Compounder + 4 modes + CVaR tail-risk (COMPLETE, +35 tests, BT #1 green).**
+`src/m3s/compounder.py` — HWM-gated base advance + 4-factor scalar (vol target × mode rolling-Sharpe pace dial × CVaR tail scalar × DD freeze/halt) × hard-clamped [0, 1.5]. Per-trade cadence implemented for CUSTOM mode with `compound_every_n_trades` counter. Ledoit-Wolf-free CVaR estimator from tracker trade log (Tier 1 #5). BT #1 = 180-day synthetic stream through all 4 modes, verifies HWM monotonicity and scalar de-levering after fat-tail injection.
+
+**Sub-phase 0.4 — HRP-lite allocator + Ledoit-Wolf shrinkage (COMPLETE, +24 tests, BT #2 green).**
+`src/m3s/allocator.py` — pure-numpy Ledoit-Wolf linear shrinkage to scaled-identity target (Ledoit-Wolf 2004 closed form, no sklearn dep, Tier 1 #4). Cold-start equal-weight path + mature HRP-lite path (cluster by signal correlation threshold, inverse-vol intra-cluster + inter-cluster). Mode caps (per-strategy + per-cluster) with iterative clip-and-redistribute, excess residual as cash buffer. Audit-ready `inputs_hash` derived from mode + per-strategy metrics + correlation matrix. BT #2 verifies turnover bounded + caps respected across 90-day rolling reallocation.
+
+**Sub-phase 0.5 — Hooks facade + conviction scorer (COMPLETE, +33 tests).**
+`src/m3s/hooks.py` — `M3S` composition class wiring tracker + compounder + allocator + edge-decay + conviction into a single interface (`on_signal`, `on_fill`, `on_trade_close`, `on_bar`, `snapshot`, `rebalance`). Hard safety rails: `on_signal` never upscales (clamps `final ≤ original`), never rejects (edge-decay pause sets risk to 0.0), respects shadow mode (logs proposed scaling without mutating). `src/m3s/conviction.py` — multiplicative combination of confidence + volume_z + trigger_distance_atr + mtf_aligned → clamp (Tier 1 #3). Decision log capped at 500 for memory bound.
+
+**Sub-phase 0.6 — Async scheduler + SQLite persistence (COMPLETE, +12 tests).**
+`src/m3s/scheduler.py` — `save_state` / `load_state` roundtrip for compound state, latest allocation, mode, edge-decay flags. Graceful boot on missing/corrupt namespace (STARTUP_DEGRADED log, continues with fresh state — never fail closed). `M3SScheduler` async task wrapping `M3S.rebalance()` + `save_state` + event log append on fixed cadence, with error isolation (tick failures increment error counter but don't stop the loop). `make_scheduler` factory for main.py integration.
+
+**Sub-phase 0.7 — Meta-backtest simulator (COMPLETE, +11 tests, BT #3 green).**
+`src/m3s/meta_backtest.py` — replay per-strategy trade logs through live M3S instance, apply PnL via `scaled_risk_pct / original_risk_pct` multiplier (linear under backtest engine, matches the Session 20 bit-exact TV match). Baselines: fixed-weight / inverse-vol / M3S CONSERVATIVE / STANDARD / GROWTH side-by-side. Metrics: daily-resampled Sharpe, max drawdown, Calmar, average turnover. BT #3 verifies all baselines finish positive on +EV stream and CONSERVATIVE DD ≤ GROWTH DD on a synthetic crash.
+
+**Sub-phase 0.8 — Wire into main.py DISABLED (COMPLETE, +8 tests).**
+`src/main.py` — imports M3S modules, adds `self.m3s / m3s_store / m3s_scheduler / _m3s_scheduler_task` fields, `_maybe_init_m3s(cfg)` builds the composition facade if `cfg.m3s.enabled` (default false), `on_signal` hook before `risk_client.check_signal` with try/except isolation, `on_trade_close_hook` wired via new `PaperExecutor.on_trade_close_hook` attribute, scheduler task started in `start()`, state saved on `stop()`. New `[m3s]` section in `config/settings.toml` with `enabled = false` + `shadow_mode = true` defaults. Smoke tests verify: imports clean, disabled-default is no-op, enabled path constructs live M3S, invalid mode falls back to STANDARD, paper-executor hook invokes on close + survives exceptions.
+
+**Sub-phase 0.9 — Regime detector + auto mode switching (COMPLETE, +21 tests, BT #4 green).**
+`src/m3s/regime.py` — `RegimeClassifier` with pure rule-based classification from (BTC realized vol, BTC ADX, max portfolio correlation) → `Regime` (LOW_VOL_TREND / NORMAL / HIGH_VOL / CRISIS) with crisis-first precedence. `AutoModeSwitcher` wraps classifier + M3S, applies transitions with 3 gates: cooldown (no back-to-back auto changes), manual override (respect human), and promote-up blocker (CONSERVATIVE→STANDARD/GROWTH auto-promotion disabled by default per v1 plan rule — "re-upping after a drawdown is the most emotional decision"). BT #4 verifies regime→mode mapping sequence and cooldown enforcement. Tier 1 #1.
+
+**Sub-phase 0.10 — Purged CV + Bayesian fractional Kelly (COMPLETE, +23 tests, BT #5 green).**
+`src/m3s/evaluation.py` — `purged_kfold_splits` generator with purging (removes training samples whose labels overlap test window) + embargoing (gap after test to kill serial-correlation leak). Per-fold Sharpe annualized to √365, deflated Sharpe (Bailey & Lopez de Prado 2014 simplified), `bayesian_fractional_kelly` (Baker-McHale 2013): `f* = μ̂ / (σ² + σ_μ²)`, clamped [0.20, 0.50]. New strategies with high σ_μ² land near ⅕-Kelly automatically; mature strategies approach ½-Kelly. `evaluate_strategy` ties everything together into a `StrategyEvaluation` record. Tier 1 #6 + #7.
+
+**M3S totals:** 10 sub-phases, ~3,400 LOC across `src/m3s/` (13 modules + `__init__.py`), 227 new M3S tests, 5 backtest gates all green, wired into `src/main.py` with `enabled=false` default. Nothing in `src/risk/` was modified. M3S ships ready for shadow-mode activation.
+
+---
 
 ---
 

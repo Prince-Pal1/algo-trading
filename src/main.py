@@ -25,6 +25,15 @@ from src.data.feeds.binance_ws import BinanceWebSocketFeed
 from src.data.storage import Storage
 from src.data.warmup import warmup
 from src.execution.paper_executor import PaperExecutor
+from src.m3s.allocator import Allocator as M3SAllocator
+from src.m3s.compounder import Compounder as M3SCompounder
+from src.m3s.conviction import ConvictionScorer
+from src.m3s.edge_decay import EdgeDecayMonitor
+from src.m3s.hooks import M3S
+from src.m3s.modes import MODE_PRESETS, M3SMode
+from src.m3s.portfolio import PortfolioTracker
+from src.m3s.scheduler import M3SScheduler, load_state, save_state
+from src.m3s.state import M3SStore
 from src.monitoring.heartbeat import Heartbeat
 from src.strategies.router import StrategyRouter
 from src.utils.config import get_config
@@ -69,6 +78,12 @@ class TradingEngine:
         self.paper_executor: PaperExecutor | None = None
         self.risk_client: RiskClient | None = None
 
+        # ── M3S (sub-phase 0.8: wired but disabled by default) ──
+        self.m3s: M3S | None = None
+        self.m3s_store: M3SStore | None = None
+        self.m3s_scheduler: M3SScheduler | None = None
+        self._m3s_scheduler_task: asyncio.Task | None = None
+
         # ── Monitoring ──
         self._heartbeat: Heartbeat | None = None
         self._heartbeat_task: asyncio.Task | None = None
@@ -81,6 +96,71 @@ class TradingEngine:
         self._rejection_count = 0
         self._last_candle_time: float = 0
         self._start_time: float = 0
+
+    def _maybe_init_m3s(self, cfg) -> None:
+        """Initialize M3S if `cfg.m3s.enabled`. Default: disabled (no-op).
+
+        Sub-phase 0.8 ships M3S wired but turned off. Setting
+        `m3s.enabled=true` in config/settings.toml activates it in shadow
+        mode — which still has no functional effect on trades because
+        shadow_mode=true by default. Authoritative mode requires a second
+        explicit config change (`m3s.shadow_mode=false`) after the BT gate
+        series has passed.
+        """
+        settings = cfg.settings if hasattr(cfg, "settings") else {}
+        m3s_cfg = settings.get("m3s", {}) if isinstance(settings, dict) else {}
+        enabled = bool(m3s_cfg.get("enabled", False))
+
+        if not enabled:
+            log.info("m3s_disabled")
+            return
+
+        mode_name = str(m3s_cfg.get("mode", "STANDARD")).upper()
+        shadow_mode = bool(m3s_cfg.get("shadow_mode", True))
+        db_path = str(m3s_cfg.get("db_path", "data/m3s.sqlite"))
+        cadence_hours = float(m3s_cfg.get("rebalance_cadence_hours", 24.0))
+
+        try:
+            mode = MODE_PRESETS[M3SMode(mode_name)]
+        except (ValueError, KeyError) as e:
+            log.warning("m3s_mode_invalid", mode=mode_name, fallback="STANDARD", error=str(e))
+            mode = MODE_PRESETS[M3SMode.STANDARD]
+
+        initial_equity = self.paper_executor.equity if self.paper_executor else 10_000.0
+        tracker = PortfolioTracker(initial_equity=initial_equity)
+        compounder = M3SCompounder(mode=mode, tracker=tracker)
+        allocator = M3SAllocator(mode=mode, tracker=tracker)
+        edge_decay = EdgeDecayMonitor()
+        conviction = ConvictionScorer()
+
+        self.m3s = M3S(
+            mode=mode,
+            tracker=tracker,
+            compounder=compounder,
+            allocator=allocator,
+            edge_decay=edge_decay,
+            conviction_scorer=conviction,
+            shadow_mode=shadow_mode,
+        )
+        self.m3s_store = M3SStore(db_path)
+        load_state(self.m3s, self.m3s_store)
+
+        # Wire paper executor → M3S trade-close hook (advances compounder).
+        if self.paper_executor:
+            self.paper_executor.on_trade_close_hook = self.m3s.on_trade_close
+
+        self.m3s_scheduler = M3SScheduler(
+            self.m3s, self.m3s_store, cadence_seconds=cadence_hours * 3600.0,
+        )
+        self._m3s_scheduler_task = asyncio.create_task(self.m3s_scheduler.run())
+
+        log.info(
+            "m3s_initialized",
+            mode=mode.name.value,
+            shadow=shadow_mode,
+            cadence_hours=cadence_hours,
+            db_path=db_path,
+        )
 
     async def _on_tick(self, tick: Tick) -> None:
         """Handle raw tick from exchange."""
@@ -148,6 +228,14 @@ class TradingEngine:
             if signals and self.paper_executor:
                 self._signal_count += len(signals)
                 for sig in signals:
+                    # M3S hook (sub-phase 0.8): shrink risk_pct before risk gate.
+                    # Safe no-op when disabled or in shadow mode.
+                    if self.m3s is not None:
+                        try:
+                            sig = self.m3s.on_signal(sig)
+                        except Exception as e:
+                            log.warning("m3s_on_signal_failed", error=str(e),
+                                        strategy=sig.strategy_name)
                     if self.risk_client:
                         decision = self.risk_client.check_signal(sig)
                         if not decision.approved:
@@ -205,6 +293,9 @@ class TradingEngine:
             log.warning("risk_client_failed", error=str(e))
             self.risk_client = None
 
+        # Initialize M3S (sub-phase 0.8: disabled by default; ships as scaffolding).
+        self._maybe_init_m3s(cfg)
+
         # Historical warmup: load candles to prime indicators + strategy state
         warmup_result = await warmup(
             self.feature_engine, self.strategy_router,
@@ -252,10 +343,31 @@ class TradingEngine:
                      positions=len(self.paper_executor._positions),
                      equity=round(self.paper_executor.equity, 2))
 
-        # 3. Close storage
+        # 3. Persist M3S state and stop scheduler (sub-phase 0.8)
+        if self.m3s is not None and self.m3s_store is not None:
+            try:
+                save_state(self.m3s, self.m3s_store)
+                log.info("m3s_state_persisted")
+            except Exception as e:
+                log.warning("m3s_persist_failed", error=str(e))
+        if self.m3s_scheduler is not None:
+            self.m3s_scheduler.stop()
+        if self._m3s_scheduler_task is not None:
+            self._m3s_scheduler_task.cancel()
+            try:
+                await self._m3s_scheduler_task
+            except asyncio.CancelledError:
+                pass
+        if self.m3s_store is not None:
+            try:
+                self.m3s_store.close()
+            except Exception as e:
+                log.warning("m3s_store_close_failed", error=str(e))
+
+        # 4. Close storage
         await self.storage.close()
 
-        # 4. Stop heartbeat last (external monitors see us alive until cleanup done)
+        # 5. Stop heartbeat last (external monitors see us alive until cleanup done)
         if self._heartbeat:
             self._heartbeat.stop()
         if self._heartbeat_task:

@@ -104,14 +104,26 @@
 
 ### M3S -- Master Money Management (Python -- src/m3s/)
 
+Phase 3b-2. Canonical plan: `docs/planning/m3s_plan_v1.md` § v1.1 ADDENDUM. Sub-phase 0.1 (scaffolding) complete Session 22; remaining sub-phases listed in `ROADMAP.md`.
+
 | Module | File | Depends On | Used By | Status |
 |---|---|---|---|---|
-| Strategy Registry | `src/m3s/strategy_registry.py` | -- | Allocator, AI Advisor | 📋 planned |
-| Mode Manager | `src/m3s/modes.py` | -- | Allocator, Compounding | 📋 planned |
-| Capital Allocator | `src/m3s/allocator.py` | Registry, Modes, `numpy` | Main Loop | 📋 planned |
-| Compounding Engine | `src/m3s/compounding.py` | Portfolio Tracker, Modes | Main Loop | 📋 planned |
-| AI Advisor | `src/m3s/ai_advisor.py` | `anthropic`, All M3S modules | Mode Manager, Allocator | 📋 planned |
-| Mode Switch | `src/m3s/mode_switch.py` | Telegram, AI Advisor | Mode Manager | 📋 planned |
+| M3S Types (msgspec) | `src/m3s/types.py` | `msgspec` | all M3S modules | ✅ sub-phase 0.1 (Session 22) |
+| Mode Manager (4 modes + CUSTOM rails) | `src/m3s/modes.py` | `msgspec`, logger | Compounder, Allocator, Hooks | ✅ sub-phase 0.1 (Session 22) |
+| SQLite State Store | `src/m3s/state.py` | `sqlite3`, `msgspec` | Scheduler, Hooks, meta_backtest | ✅ sub-phase 0.1 (Session 22) |
+| Portfolio Tracker | `src/m3s/portfolio.py` | Types, stdlib | Allocator, Compounder, Edge-Decay | ✅ sub-phase 0.2 |
+| Edge-Decay Monitor (Tier 1 #2) | `src/m3s/edge_decay.py` | Types, Portfolio Tracker | Allocator | ✅ sub-phase 0.2 |
+| Compounder (+ CVaR, Tier 1 #5) | `src/m3s/compounder.py` | Types, Modes, Portfolio Tracker | Hooks | ✅ sub-phase 0.3 |
+| Allocator HRP-lite (+ Ledoit-Wolf, Tier 1 #4) | `src/m3s/allocator.py` | `numpy`, Portfolio Tracker | Hooks | ✅ sub-phase 0.4 (pure-numpy LW, no sklearn dep) |
+| Conviction Scorer (Tier 1 #3) | `src/m3s/conviction.py` | Types, Signal | Hooks | ✅ sub-phase 0.5 |
+| Integration Hooks | `src/m3s/hooks.py` | Allocator, Compounder, Conviction, Edge-Decay, State | `src/main.py`, Router | ✅ sub-phase 0.5 |
+| Scheduler (async weekly/daily tick) | `src/m3s/scheduler.py` | Hooks, State, `asyncio` | `src/main.py` task | ✅ sub-phase 0.6 (+ save_state/load_state) |
+| Meta-Backtest Simulator | `src/m3s/meta_backtest.py` | Hooks, Portfolio Tracker, trade logs | CLI `scripts/m3s_cli.py` | ✅ sub-phase 0.7 |
+| Regime Detector (Tier 1 #1) | `src/m3s/regime.py` | stdlib | Scheduler, Mode Manager | ✅ sub-phase 0.9 (RegimeClassifier + AutoModeSwitcher) |
+| Evaluation Layer (Purged CV + Bayesian Kelly, Tier 1 #6-7) | `src/m3s/evaluation.py` | `numpy` | Allocator, Strategy Admission | ✅ sub-phase 0.10 |
+| M3S CLI | `scripts/m3s_cli.py` | Hooks, State | Manual ops (freeze/thaw/status) | 📋 not built yet — add on demand |
+| AI Advisor (deferred) | `src/m3s/advisor.py` | `anthropic`, State | Scheduler (read-only shadow) | 📋 Phase 3c |
+| Meta-Labeling filter (deferred) | `src/m3s/signal_filter/meta_label.py` | `lightgbm`, Evaluation | Hooks | 📋 Phase 3c |
 
 ### AI Agents (Python -- src/agents/)
 
@@ -179,7 +191,7 @@
 | Metrics | `src/utils/metrics.py` | `prometheus-client` | Monitoring (Phase 7) | 📋 planned |
 | Types | `src/utils/types.py` | `msgspec` | All modules | ✅ working |
 | Storage (SQLite+Parquet+Redis) | `src/data/storage.py` | `sqlite3`, `pyarrow`, `redis` | All modules | ✅ working (incl. backtest_*, validation_*, paper_positions, paper_equity tables) |
-| Main Entry Point | `src/main.py` | All data layer, warmup, heartbeat | -- | ✅ working (warmup → live feed, heartbeat, graceful shutdown) |
+| Main Entry Point | `src/main.py` | All data layer, warmup, heartbeat, M3S (disabled default) | -- | ✅ working (warmup → live feed, heartbeat, graceful shutdown, M3S wired sub-phase 0.8) |
 | Heartbeat Monitor | `src/monitoring/heartbeat.py` | `orjson`, `asyncio` | TradingEngine | ✅ working (60s heartbeat.json, stale detection, kill file watcher, signal/exception metrics, WARNING status) |
 | Watchdog | `scripts/watchdog.py` | stdlib only (no src/ imports) | launchd | ✅ working (90s checks, 180s stale alert, 360s kill, writes watchdog_status.json + alerts.log) |
 | Pre-Flight Check | `scripts/preflight.py` | zmq, websockets, src.utils.config | Manual / start_paper.sh | ✅ working (8 checks: config, data, risk server, WS, disk, kill file, DB, PIDs) |
@@ -214,6 +226,37 @@ BinanceDownloader → DataFrame → _compute_indicators() → strategy.process()
                                                          → BacktestResult (metrics + equity curve)
 ```
 Key principle: `strategy.process()` is called identically in backtest and live. Strategy never knows which mode.
+
+### Live Path with M3S (sub-phase 0.8, DISABLED by default)
+```
+Feed → CandleBuilder → FeatureEngine → StrategyRouter → Signal
+                                                         |
+                                                         ▼
+                              M3S.on_signal (sub-phase 0.8 hook, shadow-mode default)
+                                         │  - allocator weight (HRP-lite + Ledoit-Wolf)
+                                         │  - compounder scalar (vol target × Sharpe pace × CVaR × DD)
+                                         │  - conviction multiplier (Tier 1 #3)
+                                         │  - edge-decay factor (halved / paused)
+                                         │  - hard rail: scaled ≤ original risk_pct
+                                         ▼
+                                   RiskClient (ZMQ) → RiskServer process (untouched)
+                                         ▼
+                                   PaperExecutor.execute(signal) → Fill
+                                         ▼
+                                   PaperExecutor._close_position → on_trade_close_hook → M3S.on_trade_close
+                                                                                            ├── tracker update
+                                                                                            └── compounder advance (per-trade cadence, CUSTOM only)
+
+Scheduled tick (async):
+  M3SScheduler.run() → M3S.rebalance()
+      ├── allocator.compute(snapshot) → AllocationDecision (persisted to m3s_state)
+      ├── compounder.update_base(snapshot, trigger="scheduled")
+      ├── edge_decay.check(snapshot, now_ms) → halve/pause transitions
+      └── [AutoModeSwitcher.maybe_switch if regime inputs are provided]
+
+Persistence: m3s_state (compound/allocation/mode/edge_decay namespaces) + m3s_events (audit log).
+Rollback: `settings.toml [m3s] enabled = false` → M3S does not initialize. Engine runs unchanged.
+```
 
 ### Future Live Path (Phase 3+)
 ```
@@ -290,6 +333,8 @@ Trade Fill Event
 | `risk_decisions` | RiskManager._log_decision() | Dashboard, Audit | Every risk decision with checks_json + equity snapshot |
 | `paper_positions` | PaperExecutor | PaperExecutor.restore_state() | Open positions (crash recovery) |
 | `paper_equity` | PaperExecutor | PaperExecutor.restore_state() | Equity + trade count (singleton, crash recovery) |
+| `m3s_state` | M3SStore.put() (sub-phase 0.1) | Scheduler, Hooks, crash recovery | (namespace, key, value JSON, updated_ts_ms) — compound base/HWM, active mode, latest allocation |
+| `m3s_events` | M3SStore.append_event() (sub-phase 0.1) | Meta-backtest, Dashboard, Audit | Append-only log (allocation / compound_update / mode_transition / dd_freeze / custom_config_loaded) |
 
 ### Parquet Files (data/)
 
@@ -316,6 +361,7 @@ Trade Fill Event
 | `config/settings.toml` | All modules | `mode`, `log_level`, `telegram_token` |
 | `config/strategies.toml` | Strategies, M3S Registry | Strategy params, risk profiles (SAFE/MODERATE/AGGRESSIVE) |
 | `config/risk.toml` | Risk Server, Circuit Breaker | Max DD, daily limits, Kelly fraction, [modes] default, [strategy_profiles.*] |
+| `config/m3s.toml` (sub-phase 0.8) | M3S Scheduler, Hooks | M3S enabled/phase, mode, allocator, compounder, CUSTOM safety rails, regime detector, edge-decay, conviction, evaluation (see m3s_plan_v1.md §A8) |
 | `config/exchanges.toml` | Execution Layer | API keys, endpoints, paper/live flag (GITIGNORED) |
 | `config/logging.toml` | Logger | Log format, output paths, structlog config |
 | `~/.claude.json` | Claude MCP | MCP server paths, Alpaca env vars |
@@ -344,6 +390,8 @@ Trade Fill Event
 | 2026-04-12 | Compare subcommand loads equity curves from DB JSON, normalizes to returns, combines equal-weight. Portfolio Sharpe 1.315 with avg pairwise correlation 0.031 across 5 altcoins. |
 | 2026-04-12 | Donchian Channel breakout: `ta.DonchianChannel` includes current bar's high/low, so `close > DCH_N` is impossible (close <= high always). Must compare close against PREVIOUS bar's channel values via `self._prev_features`. |
 | 2026-04-12 | BTC-Neutral MR z-score reverts 100% within 20 bars mathematically, but price-based SL/TP fires before z-reversion. The mismatch between z-space exits and price-space stops makes the strategy unprofitable. |
+| 2026-04-13 | M3S `M3SMode.CUSTOM` is distinct from `RiskMode.CUSTOM` — M3S modes (CONSERVATIVE/STANDARD/GROWTH/CUSTOM) live in `src/m3s/modes.py`, risk modes (AGGRESSIVE/BALANCED/DEFENSIVE/CUSTOM) live in `src/risk/modes.py`. Two separate enums on purpose — M3S sits in front of the risk server and shrinks signals; risk modes govern the ZMQ risk checks behind it. Never cross-import. |
+| 2026-04-13 | M3S `compound_hwm_gate` is force-enabled on every mode including CUSTOM. Loader logs a WARN and overrides `compound_hwm_gate=False` to True because variance-drag math applies universally — no-HWM compounding is mathematically negative-EV regardless of mode aggression. |
 | 2026-04-12 | Strategies needing reference symbol data (e.g., BTC for beta-neutral): add `"ref_symbol": "BTCUSDT"` to STRATEGY_REGISTRY entry. `cmd_run()` downloads it and adds `ref_close` column to OHLCV. |
 | 2026-04-12 | Multi-strategy portfolio (bb_rsi_mr + donchian + vol_momentum) achieves Sharpe 1.748 with near-zero cross-strategy correlation (-0.049, -0.033). Mean-reversion + trend + momentum = 3 uncorrelated edge types. |
 | 2026-04-12 | `dc_short`, `bb_period`, `rebalance_interval`, `vol_target` have ZERO effect on Sharpe within ±20% grid. The strategy edge comes from other params — don't waste optimization time on these. |

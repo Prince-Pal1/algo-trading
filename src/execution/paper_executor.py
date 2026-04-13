@@ -44,6 +44,11 @@ class PaperExecutor(BaseExecutor):
         self._trade_count = 0
         self._last_price_persist: float = 0.0  # throttle price updates to DB
 
+        # Optional trade-close callback (M3S hook, sub-phase 0.8).
+        # Signature: (strategy: str, pnl: float, symbol: str, ts_ms: int) -> None
+        # Set externally after construction.
+        self.on_trade_close_hook = None
+
     async def execute(self, signal: Signal) -> Fill | None:
         """Execute a signal with simulated fill."""
         if signal.action == SignalAction.HOLD:
@@ -254,6 +259,14 @@ class PaperExecutor(BaseExecutor):
         # Persist: remove closed position, update equity
         self._remove_position(symbol)
         self._persist_equity()
+
+        # M3S hook (sub-phase 0.8): notify of realized PnL per closed trade.
+        # Safe no-op when not wired (hook is None by default).
+        if self.on_trade_close_hook is not None:
+            try:
+                self.on_trade_close_hook(pos.strategy_name, net_pnl, symbol, fill.timestamp)
+            except Exception as e:
+                log.warning("on_trade_close_hook_failed", error=str(e))
 
         log.info(
             "paper_close",

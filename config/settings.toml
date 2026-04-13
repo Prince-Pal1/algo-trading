@@ -22,3 +22,16 @@ market_hours_only = true
 market_open = "09:30"           # ET
 market_close = "16:00"          # ET
 timezone = "US/Eastern"
+
+[m3s]
+# Master Money Management System — phase 3b-2 (wired sub-phase 0.8, disabled).
+#
+# Flip to true ONLY after reviewing BT #1/#2/#3 results in the meta-backtest.
+# Even when enabled, shadow_mode=true means M3S logs proposed scaling without
+# mutating signals. Authoritative mode requires a second explicit flip
+# (shadow_mode=false) after ≥4 weeks of shadow logs look clean.
+enabled = false
+mode = "STANDARD"               # CONSERVATIVE | STANDARD | GROWTH | CUSTOM
+shadow_mode = true              # true = log only, no signal mutation
+db_path = "data/m3s.sqlite"
+rebalance_cadence_hours = 24.0
