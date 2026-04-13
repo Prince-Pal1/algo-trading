@@ -152,6 +152,27 @@ The top 6 configurations all share `sl_atr_mult ∈ {2.5, 3.0}` + `adx_threshold
 
 ---
 
+## Phase 4 skeleton — IC Markets cTrader Open API (2026-04-14)
+
+Shipped the skeleton + unit tests without waiting for Spotware's KYC approval. All code is testable with mocked transport so the real credentials can plug in later. `ctrader-open-api` v0.9.2 installed — the install downgraded protobuf 7.34.1 → 3.20.1 but the 920-test crypto suite still passes (verified, zero regressions).
+
+**New files:**
+- `src/data/feeds/icmarkets_feed.py` — feed adapter using the Spotware `Client` + `TcpProtocol` transport. `ICMarketsConfig.from_env()` loads creds from env. `ICMarketsFeed.start()` authenticates the app, authenticates the account, loads the symbol catalog, and subscribes to spot quotes + live trendbars for the configured symbols/timeframes. Message dispatcher routes `ProtoOASpotEvent` + `ProtoOAExecutionEvent` to the right handlers.
+- `src/execution/icmarkets_executor.py` — `BaseExecutor` implementation with async order placement. `execute()` builds a `ProtoOANewOrderReq`, sends it via a shared send-message callback (from the feed's client), and awaits a correlated `ProtoOAExecutionEvent` via a `clientMsgId`-keyed pending-order map. 10-second timeout per order. `on_execution_event()` is called by the feed's message dispatcher to resolve pending futures into `Fill` objects.
+- `scripts/ctrader_token_helper.py` — one-shot OAuth exchange. Reads `CTRADER_CLIENT_ID` + `CTRADER_CLIENT_SECRET` from `.env`, opens browser to Spotware auth, catches redirect on `http://localhost:8080/callback`, exchanges code for access + refresh tokens, writes back to `.env`. Uses `EndPoints.AUTH_URI`/`EndPoints.TOKEN_URI` from the library for canonical URLs.
+- `.env.example` — template with all six required env vars: client_id, client_secret, access_token, refresh_token, account_id, environment. `.env` is gitignored.
+- `tests/test_data/test_icmarkets_feed.py` (9 tests) + `tests/test_execution/test_icmarkets_executor.py` (6 tests): 15 total, all passing with mocked transport.
+
+**Spotware application status:** `algo-trading-gold` app registered at openapi.ctrader.com with `Access your account and trade` scope. Status currently **Submitted** — Spotware's KYC review takes up to 3 business days. BUT the Sandbox page on openapi.ctrader.com/apps/<id>/playground already mints working tokens for the dev's own cTrader ID:
+- "Account info" scope → available immediately (read-only, no trading)
+- "Account info and trading" scope → gated on Active status (post-KYC)
+
+**Starting strategy:** use the read-only token NOW to drive G.3 Week 1 (Days 1-7 shadow mode, log-only, no orders placed). When KYC flips the app to Active, mint a new token with trading scope and advance to G.3 Day 8+ with real paper order placement on the IC Markets demo.
+
+**Current test count:** 935 passing on feat/gold-refactor (920 + 15 new from Phase 4 skeleton).
+
+---
+
 ## Session 22 Day 0.5 Addendum — Feature enrichment, LightGBM fix, Funding-MR (2026-04-13 late evening)
 
 Three-phase autonomous shipment while the wall clock ticks toward the 2026-04-14 Day 1 cron wake-up.

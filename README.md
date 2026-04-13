@@ -60,11 +60,12 @@ algo-trading/
 │   ├── main.py                    # Entry point -- TradingEngine
 │   ├── config.py                  # TOML config loader (msgspec)
 │   ├── data/
-│   │   ├── feeds/binance_ws.py    # Binance WebSocket feed
-│   │   ├── candle_builder.py      # Tick -> OHLCV candle aggregation
-│   │   ├── feature_engine.py      # Technical indicators (ta library)
-│   │   ├── storage.py             # SQLite + Parquet storage
-│   │   └── downloader.py          # Historical data downloader (Binance)
+│   │   ├── feeds/binance_ws.py         # Binance WebSocket feed
+│   │   ├── feeds/icmarkets_feed.py     # IC Markets cTrader Open API feed (Phase 4 skeleton)
+│   │   ├── candle_builder.py           # Tick -> OHLCV candle aggregation
+│   │   ├── feature_engine.py           # Technical indicators (ta library)
+│   │   ├── storage.py                  # SQLite + Parquet storage
+│   │   └── downloader.py               # Historical data downloader (Binance)
 │   ├── strategies/
 │   │   ├── base.py                # BaseStrategy interface + leverage_range schema (G.0c)
 │   │   ├── router.py              # StrategyRouter -- dispatches candles
@@ -121,7 +122,8 @@ algo-trading/
 │   │   └── parsers/               # 6 format parsers (Pine, MQL, NL, webhook, YAML, Python framework)
 │   ├── execution/
 │   │   ├── base.py                # Executor interface
-│   │   └── paper_executor.py      # Paper trading executor
+│   │   ├── paper_executor.py      # Paper trading executor
+│   │   └── icmarkets_executor.py  # IC Markets cTrader executor (Phase 4 skeleton)
 │   ├── utils/
 │   │   ├── types.py               # Signal, Fill, LeverageGrant (G.2b) + LeverageReasonCode
 │   │   ├── instruments.py         # Instrument registry (G.0b) — XAUUSD, tick_size, contract_size

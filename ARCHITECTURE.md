@@ -29,7 +29,7 @@
 | Historical Warmup | `src/data/warmup.py` | FeatureEngine, StrategyRouter, Downloader, ParquetStore | TradingEngine | ✅ working (200 candles from Parquet/REST, signals discarded) |
 | Alpaca WebSocket Feed | `src/data/feeds/alpaca_ws.py` | `alpaca-trade-api`, `asyncio` | Candle Builder | 📋 planned |
 | IBKR Data Feed | `src/data/feeds/ibkr_feed.py` | `ib_insync` | Candle Builder | 📋 planned |
-| IC Markets Feed | `src/data/feeds/icmarkets_feed.py` | cTrader Open API | Candle Builder | 📋 planned |
+| IC Markets Feed | `src/data/feeds/icmarkets_feed.py` | `ctrader-open-api`, Twisted, Types | TradingEngine (gold) | ✅ Phase 4 skeleton (unit tests with mocks; live smoke test pending credentials) |
 | Deribit WebSocket Feed | `src/data/feeds/deribit_ws.py` | `asyncio`, `websockets` | Candle Builder | 📋 planned |
 | Candle Builder | `src/data/candle_builder.py` | Data Feeds | Feature Engine, Strategies | ✅ working |
 | Feature Engine | `src/data/feature_engine.py` | `ta`, `pandas` | Strategies | ✅ working |
@@ -80,7 +80,7 @@
 | Binance Executor | `src/execution/binance_executor.py` | `ccxt[async]`, Binance WS | Order Manager | 📋 planned |
 | Alpaca Executor | `src/execution/alpaca_executor.py` | `alpaca-trade-api` | Order Manager | 📋 planned |
 | IBKR Executor | `src/execution/ibkr_executor.py` | `ib_insync` | Order Manager | 📋 planned |
-| IC Markets Executor | `src/execution/icmarkets_executor.py` | cTrader Open API | Order Manager | 📋 planned |
+| IC Markets Executor | `src/execution/icmarkets_executor.py` | `ctrader-open-api`, asyncio | TradingEngine (gold) | ✅ Phase 4 skeleton (NewOrder/ClosePosition request flow + async Future correlation via clientMsgId) |
 | Deribit Executor | `src/execution/deribit_executor.py` | Deribit WS | Order Manager | 📋 planned |
 | Paper Executor | `src/execution/paper_executor.py` | Storage, sqlite3 | TradingEngine | ✅ working (execute + execute_order, position persistence, crash recovery via restore_state()) |
 | Order Manager | `src/execution/order_manager.py` | All Executors | Risk Manager | 📋 planned |
