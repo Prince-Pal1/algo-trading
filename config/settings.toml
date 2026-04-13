@@ -35,6 +35,32 @@ shadow_mode = true              # true = log only, no signal mutation
 db_path = "data/m3s.sqlite"
 rebalance_cadence_hours = 24.0
 
+[m3s_gold]
+# Gold-specific M3S bucket (separate from crypto M3S above).
+# Only used by LeveragedBacktestEngine + gold paper/live runs.
+enabled = true
+mode = "STANDARD"
+aggregate_leverage_cap = 80.0
+news_calendar_path = "config/news_calendar.csv"
+
+[m3s_gold.allocation]
+# Split of the gold allocation between the institutional book (Tiers 1-4,
+# disciplined leverage) and the aggressive retail sub-book (Tier 5, 1000×
+# scalping). Backtest sweep (G.2g) determines the Calmar-optimal split.
+institutional_pct = 0.70
+aggressive_pct = 0.30
+
+[m3s_gold.aggressive_sub_book]
+position_size_pct = 0.05
+allow_size_override = true
+override_cap_pct = 0.10
+max_drawdown_pct = 0.50
+daily_loss_limit_pct = 0.30
+cooldown_days_after_halt = 7
+weekly_refund_enabled = true
+weekly_refund_cap_pct = 1.00
+max_concurrent_positions = 3
+
 [meta_label]
 # Phase 3c meta-label filter (Session 22 sprint).
 # Runs BEFORE M3S so features match training distribution. Filter decision
