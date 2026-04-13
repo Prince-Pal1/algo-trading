@@ -87,12 +87,20 @@ max_trades_per_day = 2
 
 [funding_carry]
 # Strategy A — Perpetual Funding Rate Carry (Phase 3b-3).
-# v1 uses the synthetic `BTCUSDT-CARRY` symbol — paper trading polls Binance
-# Futures /fapi/v1/fundingRate every 8h and feeds synthetic candles into the
-# normal pipeline. Real multi-leg Futures execution is deferred to v2.
-# See docs/planning/strategy_a_funding_carry_research.md for the research memo.
-# Gate history: A.1 PASS · A.3 Sharpe=2.584 (PASS) · A.4 MC/fee/crash/WF-OOS PASS · A.5 M3S integration PASS
-enabled = false                 # flip to true after A.5 integration verification
+# v1 uses the synthetic `BTCUSDT-CARRY` symbol. The FundingSyntheticFeed
+# (src/data/feeds/funding_synthetic_feed.py) polls /fapi/v1/premiumIndex
+# every 5 min and emits a synthetic bar at each 8h settlement. Signals
+# route through M3S → risk_client → paper_executor via
+# TradingEngine._handle_carry_signal. Real multi-leg Futures execution
+# deferred to v2.
+# Gate history:
+#   A.1 research: PASS (retail Sharpe 0.6-0.9)
+#   A.3 synthetic backtest: Sharpe 2.584
+#   A.4 MC/fee/crash/WF-OOS: PASS
+#   A.5 M3S integration: PASS
+#   Real data backtest (4.3 years): Sharpe 0.533 (soft pass, above 0.3 kill),
+#     +2.62% total return, 62 trades, max DD 0.36%
+enabled = true                  # ACTIVATED Session 22 after real-data backtest
 risk_profile = "SAFE"
 markets = ["BTCUSDT-CARRY"]
 timeframe = "8h"

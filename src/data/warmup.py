@@ -76,6 +76,14 @@ async def warmup(
         for symbol, tf in pairs:
             key = f"{symbol.upper()}_{tf}"
 
+            # Skip synthetic symbols (e.g., BTCUSDT-CARRY for funding carry).
+            # These don't have real OHLCV on Binance spot and are served by
+            # dedicated feeds (e.g., FundingSyntheticFeed).
+            if "-CARRY" in symbol.upper():
+                log.info("warmup_skip_synthetic", symbol=symbol, tf=tf)
+                result[key] = 0
+                continue
+
             # Try Parquet first
             df = parquet.load(symbol.upper(), tf)
 

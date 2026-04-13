@@ -22,6 +22,7 @@ import pandas as pd
 from src.data.candle_builder import CandleBuilder
 from src.data.feature_engine import FeatureEngine
 from src.data.feeds.binance_ws import BinanceWebSocketFeed
+from src.data.feeds.funding_synthetic_feed import FundingSyntheticFeed
 from src.data.storage import Storage
 from src.data.warmup import warmup
 from src.execution.paper_executor import PaperExecutor
@@ -83,6 +84,10 @@ class TradingEngine:
         self.m3s_store: M3SStore | None = None
         self.m3s_scheduler: M3SScheduler | None = None
         self._m3s_scheduler_task: asyncio.Task | None = None
+
+        # ── Funding Carry live feed (Phase 3b-3 Strategy A) ──
+        self.funding_feed: FundingSyntheticFeed | None = None
+        self._funding_feed_task: asyncio.Task | None = None
 
         # ── Monitoring ──
         self._heartbeat: Heartbeat | None = None
@@ -188,6 +193,84 @@ class TradingEngine:
             cadence_hours=cadence_hours,
             db_path=db_path,
         )
+
+    def _maybe_start_funding_feed(self) -> None:
+        """Start the FundingSyntheticFeed if funding_carry is enabled.
+
+        The feed polls Binance Futures premium-index endpoint every 5 min
+        and emits a synthetic carry candle at each 8h settlement. Signals
+        flow through `_handle_carry_signal` → risk_client → paper_executor.
+        Runs as an async task and shuts down cleanly with the engine.
+        """
+        cfg = get_config()
+        strat_cfg = cfg.get_strategy("funding_carry")
+        if not strat_cfg.get("enabled", False):
+            log.info("funding_feed_disabled")
+            return
+
+        # Build strategy from config + start the feed task
+        try:
+            from src.strategies.carry.funding_carry import FundingCarryStrategy
+            carry_strategy = FundingCarryStrategy.from_config("funding_carry")
+        except Exception as e:
+            log.warning("funding_feed_strategy_load_failed", error=str(e))
+            return
+
+        self.funding_feed = FundingSyntheticFeed(
+            strategy=carry_strategy,
+            on_signal=self._handle_carry_signal,
+            symbol="BTCUSDT",
+            friction_pct=float(strat_cfg.get("friction_pct", 0.00005)),
+        )
+        self._funding_feed_task = asyncio.create_task(self.funding_feed.run())
+        log.info("funding_feed_started", symbol="BTCUSDT")
+
+    async def _handle_carry_signal(self, signal: Signal) -> None:
+        """Route a funding-carry signal through M3S + risk + paper executor.
+
+        Called by FundingSyntheticFeed on every new synthetic carry bar.
+        Mirrors the _on_features signal-handling path but for 8h-cadence
+        carry bars that don't come from the normal candle pipeline.
+        """
+        self._signal_count += 1
+
+        # M3S hook (shrink risk_pct, shadow-mode default)
+        if self.m3s is not None:
+            try:
+                signal = self.m3s.on_signal(signal)
+            except Exception as e:
+                log.warning("carry_m3s_on_signal_failed", error=str(e))
+
+        # Risk gate
+        if self.risk_client:
+            try:
+                decision = self.risk_client.check_signal(signal)
+            except Exception as e:
+                log.warning("carry_risk_check_failed", error=str(e))
+                return
+            if not decision.approved:
+                self._rejection_count += 1
+                log.warning("carry_signal_rejected", reason=decision.reason,
+                            symbol=signal.symbol, action=signal.action.value)
+                return
+            if decision.adjusted_risk_pct is not None:
+                signal = Signal(
+                    symbol=signal.symbol, action=signal.action,
+                    confidence=signal.confidence, strategy_name=signal.strategy_name,
+                    timeframe=signal.timeframe, entry_price=signal.entry_price,
+                    stop_loss=signal.stop_loss, take_profit=signal.take_profit,
+                    risk_pct=decision.adjusted_risk_pct,
+                    metadata=signal.metadata, timestamp=signal.timestamp,
+                )
+
+        # Paper executor — carries still route through the same execute() path.
+        # Note: the synthetic BTCUSDT-CARRY symbol has no real order book; the
+        # executor will produce a simulated fill at the synthetic close price,
+        # which is the correct shadow-mode behavior.
+        if self.paper_executor:
+            fill = await self.paper_executor.execute(signal)
+            if fill and self.risk_client:
+                self.risk_client.report_fill(fill, signal.strategy_name)
 
     async def _on_tick(self, tick: Tick) -> None:
         """Handle raw tick from exchange."""
@@ -323,6 +406,9 @@ class TradingEngine:
         # Initialize M3S (sub-phase 0.8: disabled by default; ships as scaffolding).
         self._maybe_init_m3s(cfg)
 
+        # Initialize funding carry live feed if enabled (Strategy A paper activation).
+        self._maybe_start_funding_feed()
+
         # Historical warmup: load candles to prime indicators + strategy state
         warmup_result = await warmup(
             self.feature_engine, self.strategy_router,
@@ -391,6 +477,17 @@ class TradingEngine:
             except Exception as e:
                 log.warning("m3s_store_close_failed", error=str(e))
 
+        # 3b. Stop funding carry live feed (Strategy A)
+        if self.funding_feed is not None:
+            self.funding_feed.stop()
+            await self.funding_feed.close()
+        if self._funding_feed_task is not None:
+            self._funding_feed_task.cancel()
+            try:
+                await self._funding_feed_task
+            except asyncio.CancelledError:
+                pass
+
         # 4. Close storage
         await self.storage.close()
 
@@ -453,26 +550,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def _get_symbols_from_config() -> list[str]:
-    """Pull enabled strategy symbols from strategies.toml."""
-    cfg = get_config()
-    symbols = set()
-    for name, strat in cfg.strategies.items():
-        if strat.get("enabled", False):
-            for market in strat.get("markets", []):
-                symbols.add(market.lower())
-    return list(symbols) or ["btcusdt"]
+    """Pull enabled strategy symbols from strategies.toml (excluding synthetics)."""
+    pairs = _get_needed_pairs_from_config()
+    return sorted({sym.lower() for sym, _tf in pairs}) or ["btcusdt"]
 
 
 def _get_timeframes_from_config() -> list[str]:
-    """Pull enabled strategy timeframes from strategies.toml."""
-    cfg = get_config()
-    timeframes = set()
-    for name, strat in cfg.strategies.items():
-        if strat.get("enabled", False):
-            tf = strat.get("timeframe")
-            if tf:
-                timeframes.add(tf)
-    return list(timeframes) or ["1m"]
+    """Pull enabled strategy timeframes from strategies.toml (excluding synthetics)."""
+    pairs = _get_needed_pairs_from_config()
+    return sorted({tf for _sym, tf in pairs}) or ["1m"]
 
 
 def _get_needed_pairs_from_config() -> set[tuple[str, str]]:
@@ -480,6 +566,10 @@ def _get_needed_pairs_from_config() -> set[tuple[str, str]]:
 
     Used to avoid Cartesian-product waste: if only ETHUSDT needs 5m,
     don't subscribe/warmup/compute 5m for all 9 symbols.
+
+    Synthetic symbols (those containing "-CARRY", "-SYNTH", etc.) are
+    excluded — they're served by dedicated feeds, not by the normal
+    Binance WS subscription.
     """
     cfg = get_config()
     pairs: set[tuple[str, str]] = set()
@@ -490,8 +580,13 @@ def _get_needed_pairs_from_config() -> set[tuple[str, str]]:
         if not tf:
             continue
         for market in strat.get("markets", []):
+            m = market.upper()
+            if "-CARRY" in m or "-SYNTH" in m:
+                continue  # skip synthetic symbols — served by dedicated feeds
             pairs.add((market.lower(), tf))
     return pairs
+
+
 
 
 async def run(args: argparse.Namespace) -> None:
