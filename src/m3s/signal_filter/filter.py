@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 
 from src.m3s.signal_filter.features import FEATURE_KEYS, build_meta_features
+from src.m3s.signal_filter.train import training_feature_keys
 from src.m3s.types import PortfolioSnapshot
 from src.utils.logger import get_logger
 from src.utils.types import Signal, SignalAction
@@ -147,9 +148,13 @@ class MetaLabelFilter:
         features: pd.Series | None,
         snapshot: PortfolioSnapshot | None,
     ) -> np.ndarray:
+        # Use the training-time feature keys so the X matrix shape matches
+        # what the classifier was fit with (non-predictive keys like
+        # entry_price_ref / portfolio_equity are masked out).
+        keys = training_feature_keys()
         feat_dict = build_meta_features(signal, features, snapshot)
-        row = np.zeros((1, len(FEATURE_KEYS)), dtype=float)
-        for j, key in enumerate(FEATURE_KEYS):
+        row = np.zeros((1, len(keys)), dtype=float)
+        for j, key in enumerate(keys):
             v = feat_dict.get(key)
             if v is None:
                 row[0, j] = 0.0

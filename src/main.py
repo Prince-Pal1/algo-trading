@@ -29,6 +29,7 @@ from src.execution.paper_executor import PaperExecutor
 from src.m3s.signal_filter.audit import CloseInfo, audit_close, audit_signal
 from src.m3s.signal_filter.features import build_meta_features
 from src.m3s.signal_filter.filter import MetaLabelFilter
+from src.m3s.signal_filter.strategy_history import StrategyHistoryCache
 from src.m3s.allocator import Allocator as M3SAllocator
 from src.m3s.compounder import Compounder as M3SCompounder
 from src.m3s.conviction import ConvictionScorer
@@ -97,6 +98,13 @@ class TradingEngine:
         # so the close handler can UPDATE the right row.
         self._audit_conn = None
         self._audit_ids_by_pos: dict[tuple[str, str], int] = {}
+
+        # ── Phase 3c strategy history cache (feeds deferred feature keys) ──
+        # In-process ring buffer updated on every signal + close. Read at
+        # feature-build time to populate strategy_win_rate_last_20,
+        # strategy_pnl_z_last_20, hours_since_last_signal,
+        # bars_since_last_trade_close.
+        self._strategy_history = StrategyHistoryCache(window=20)
 
         # ── Phase 3c meta-label filter (shadow mode by default) ──
         self.meta_filter: MetaLabelFilter | None = None
@@ -250,7 +258,11 @@ class TradingEngine:
             return
         try:
             snap = self.m3s.snapshot() if self.m3s is not None else None
-            features_dict = build_meta_features(signal, features, snapshot=snap)
+            features_dict = build_meta_features(
+                signal, features, snapshot=snap,
+                strategy_history=self._strategy_history,
+                m3s=self.m3s,
+            )
             audit_id = audit_signal(
                 conn, run_id="live",
                 signal=signal,
@@ -261,6 +273,11 @@ class TradingEngine:
                 # Track audit_id by (strategy, symbol) so the close handler
                 # can look it up. Last-signal-wins on rapid-fire same-pair.
                 self._audit_ids_by_pos[(signal.strategy_name or "", signal.symbol)] = audit_id
+            # Record the signal in the history cache AFTER the audit write
+            # so the NEXT signal's `hours_since_last_signal` reflects this one.
+            self._strategy_history.record_signal(
+                signal.strategy_name or "", int(signal.timestamp or 0)
+            )
         except Exception as e:
             log.warning("live_audit_signal_failed", error=str(e),
                         strategy=signal.strategy_name)
@@ -307,6 +324,17 @@ class TradingEngine:
             )
         except Exception as e:
             log.warning("live_audit_close_failed", audit_id=audit_id, error=str(e))
+
+        # Record in the strategy history cache for future feature builds.
+        # meta_label proxy for live closes: pnl > 0 → 1 else 0. The weekly
+        # retrain overwrites this with the triple-barrier label anyway,
+        # but the live cache is used at feature-build time for the
+        # NEXT signal's rolling stats.
+        self._strategy_history.record_close(
+            strategy, pnl=pnl,
+            meta_label=1 if pnl > 0 else 0,
+            ts_ms=ts_ms,
+        )
 
     def _maybe_init_meta_filter(self, cfg) -> None:
         """Construct the MetaLabelFilter if [meta_label] enabled in settings.

@@ -159,6 +159,14 @@ def _load_strategies() -> None:
         pass
 
     try:
+        from src.strategies.carry.funding_mean_reversion import (
+            FundingMeanReversionStrategy,
+        )
+        register_strategy("funding_mean_reversion", FundingMeanReversionStrategy)
+    except ImportError:
+        pass
+
+    try:
         from src.strategies.carry.funding_carry import FundingCarryStrategy
         register_strategy("funding_carry", FundingCarryStrategy)
     except ImportError:

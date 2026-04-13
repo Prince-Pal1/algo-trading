@@ -111,6 +111,30 @@ max_drawdown_kill_pct = 0.03    # 3% unrealized DD kills the position
 max_hold_bars = 0               # 0 = no time stop
 cooldown_bars = 3               # wait 3 epochs after exit before re-entering
 
+[funding_mean_reversion]
+# Backlog #8 — Funding-rate mean reversion (Session 22+ addition).
+# Fades extreme funding spikes: SHORT on top-quantile funding (crowded longs
+# expected to mean-revert down), LONG on bottom-quantile (crowded shorts
+# expected to rebound). Orthogonal to funding_carry which harvests normal
+# structural funding; this strategy trades the *tail* of the distribution.
+#
+# Status: not yet validated. Ships DISABLED until Stage 3-7 validation clears.
+# Research script: scripts/research_funding_mr.py
+enabled = false
+risk_profile = "SAFE"
+markets = ["BTCUSDT"]
+timeframe = "8h"
+max_risk_per_trade = 0.01
+quantile_window = 270          # ~90 days of 8h epochs
+high_quantile = 0.95
+low_quantile = 0.05
+mid_quantile = 0.50
+atr_sl_mult = 2.5
+atr_period = 14
+max_hold_bars = 6              # ≤ 48h
+cooldown_bars = 2
+long_only = false
+
 [clenow_momentum]
 # Strategy B — Cross-Sectional Altcoin Momentum (Clenow) — 💀 KILLED AT B.3
 # Obituary: docs/strategy_obituaries/strategy_b_clenow_momentum.md

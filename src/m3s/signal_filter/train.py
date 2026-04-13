@@ -58,6 +58,19 @@ LGBM_MIN_SAMPLES = 500          # below this, don't even try LightGBM
 LGBM_MIN_AUC_UPLIFT = 0.03      # LightGBM must beat LR by this to be picked
 MODEL_ARTIFACT_DIR = Path("data/models/meta_label")
 
+# Feature keys present in FEATURE_KEYS but excluded from training X.
+# Reasons:
+#   entry_price_ref    — raw price level; not a feature, only for reconstruction
+#   portfolio_equity   — raw account equity; leaks time/cohort info on backtest
+#   portfolio_hwm      — same problem as equity
+#   m3s_alloc_weight_now — derived from allocator state, not independent
+_TRAINING_FEATURE_EXCLUDES: frozenset[str] = frozenset({
+    "entry_price_ref",
+    "portfolio_equity",
+    "portfolio_hwm",
+    "m3s_alloc_weight_now",
+})
+
 
 # ══════════════════════════════════════════════════════════════════════
 # Result dataclass
@@ -128,6 +141,15 @@ def load_training_data(
     return df
 
 
+def training_feature_keys() -> list[str]:
+    """Return FEATURE_KEYS minus the excluded-from-training entries.
+
+    Keeps stable order. Used by `build_xy` and by callers who need to
+    match column indices back to feature names.
+    """
+    return [k for k in FEATURE_KEYS if k not in _TRAINING_FEATURE_EXCLUDES]
+
+
 def build_xy(
     df: pd.DataFrame,
     feature_keys: list[str] = None,
@@ -136,9 +158,13 @@ def build_xy(
 
     X is (n_samples, n_features). Missing feature values are filled with 0
     (equivalent to "no signal" for most of our features).
+
+    By default, non-predictive keys (entry_price_ref, portfolio_*, allocator
+    state) are excluded — callers can pass `feature_keys=FEATURE_KEYS` to
+    include everything for compatibility with older code.
     """
     if feature_keys is None:
-        feature_keys = FEATURE_KEYS
+        feature_keys = training_feature_keys()
 
     n = len(df)
     n_features = len(feature_keys)
@@ -175,30 +201,100 @@ def _split_train_test(n: int, test_fraction: float = 0.2) -> tuple[np.ndarray, n
     return train_idx, test_idx
 
 
+# Mini grid search candidates — focused on small-n regularization. The
+# default LightGBM params produced null predictors on 1000-2000 row
+# datasets in the Session 22 sprint (all-zero feature importance,
+# AUC=0.500). These candidates trade depth for regularization.
+_LGBM_GRID: list[dict[str, Any]] = [
+    # Baseline (original Session 22 params)
+    dict(n_estimators=400, max_depth=4, num_leaves=15, min_child_samples=20,
+         learning_rate=0.03),
+    # Heavy regularization, small model
+    dict(n_estimators=200, max_depth=3, num_leaves=7, min_child_samples=50,
+         learning_rate=0.03),
+    # Very heavy regularization
+    dict(n_estimators=200, max_depth=3, num_leaves=7, min_child_samples=100,
+         learning_rate=0.05),
+    # Moderate (compromise between baseline and heavy)
+    dict(n_estimators=300, max_depth=4, num_leaves=15, min_child_samples=30,
+         learning_rate=0.03),
+    # Deeper but slower learning rate
+    dict(n_estimators=200, max_depth=5, num_leaves=31, min_child_samples=20,
+         learning_rate=0.02),
+    # Shallow + fast (cheap, often wins on small data)
+    dict(n_estimators=500, max_depth=3, num_leaves=7, min_child_samples=30,
+         learning_rate=0.05),
+]
+
+_LGBM_COMMON = dict(
+    reg_alpha=0.1,
+    reg_lambda=0.1,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    objective="binary",
+    class_weight="balanced",
+    random_state=42,
+    verbose=-1,
+)
+
+
 def _fit_lightgbm(
     X_train: np.ndarray,
     y_train: np.ndarray,
     sample_weight: np.ndarray,
+    params: dict[str, Any] | None = None,
 ) -> Any:
-    """Fit LightGBM binary classifier with shallow trees for small-n data."""
-    params = dict(
-        n_estimators=400,
-        max_depth=4,
-        num_leaves=15,
-        min_child_samples=20,
-        learning_rate=0.03,
-        reg_alpha=0.1,
-        reg_lambda=0.1,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        objective="binary",
-        class_weight="balanced",
-        random_state=42,
-        verbose=-1,
-    )
-    model = lgb.LGBMClassifier(**params)
+    """Fit LightGBM binary classifier with given or default params."""
+    if params is None:
+        params = _LGBM_GRID[0]
+    merged = {**_LGBM_COMMON, **params}
+    model = lgb.LGBMClassifier(**merged)
     model.fit(X_train, y_train, sample_weight=sample_weight)
     return model
+
+
+def _fit_lightgbm_tuned(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    sample_weight: np.ndarray,
+) -> tuple[Any, dict[str, Any], float]:
+    """Mini grid search over LightGBM hyperparameters.
+
+    Trains each candidate on `X_train` + `y_train`, evaluates AUC on
+    `X_val` + `y_val` (held out from the training time-order split),
+    returns (best_model, best_params, best_auc).
+
+    If all candidates produce degenerate models (single class predicted,
+    AUC not computable), returns the baseline candidate with AUC=0.5.
+    """
+    best_model: Any = None
+    best_params: dict[str, Any] = _LGBM_GRID[0]
+    best_auc: float = -1.0
+
+    for cand_params in _LGBM_GRID:
+        try:
+            model = _fit_lightgbm(X_train, y_train, sample_weight, params=cand_params)
+            proba = model.predict_proba(X_val)[:, 1]
+            if len(np.unique(y_val)) <= 1:
+                auc = 0.5
+            else:
+                auc = roc_auc_score(y_val, proba)
+        except Exception:
+            continue
+        if auc > best_auc:
+            best_auc = float(auc)
+            best_params = cand_params
+            best_model = model
+
+    if best_model is None:
+        # Everything failed — return baseline fit as a degraded fallback
+        best_model = _fit_lightgbm(X_train, y_train, sample_weight, params=_LGBM_GRID[0])
+        best_params = _LGBM_GRID[0]
+        best_auc = 0.5
+
+    return best_model, best_params, best_auc
 
 
 class ScaledLR:
@@ -289,7 +385,16 @@ def fit_meta_classifier(
     X, y, t0, t1 = build_xy(df)
     n_features = X.shape[1]
     mean_y = float(y.mean())
-    weights = sample_uniqueness_weights(t0, t1)
+    raw_weights = sample_uniqueness_weights(t0, t1)
+    # Normalize to mean=1.0. Purged uniqueness weights are bounded in [0, 1]
+    # and often ~0.0005 on our harvest data, which starves LightGBM's
+    # `min_child_samples` check and produces null-predictor trees. Scaling
+    # to mean=1.0 preserves relative down-weighting while keeping the
+    # effective sample count intact.
+    if raw_weights.mean() > 0:
+        weights = raw_weights / raw_weights.mean()
+    else:
+        weights = raw_weights
 
     train_idx, test_idx = _split_train_test(n_samples, test_fraction=0.2)
     X_train, X_test = X[train_idx], X[test_idx]
@@ -310,19 +415,25 @@ def fit_meta_classifier(
         lr_auc = 0.5
         lr_proba = np.full(len(y_test), 0.5)
 
-    # Optionally train LightGBM
+    # Optionally tune + train LightGBM via mini grid search
     lgbm_auc = None
     lgbm_proba = None
     lgbm_model = None
+    lgbm_params: dict[str, Any] | None = None
     if HAVE_LIGHTGBM and n_samples >= LGBM_MIN_SAMPLES:
         try:
-            lgbm_model = _fit_lightgbm(X_train, y_train, w_train)
+            lgbm_model, lgbm_params, _ = _fit_lightgbm_tuned(
+                X_train, y_train, X_test, y_test, w_train,
+            )
             lgbm_proba = lgbm_model.predict_proba(X_test)[:, 1]
             lgbm_auc = (
                 roc_auc_score(y_test, lgbm_proba)
                 if len(np.unique(y_test)) > 1 else 0.5
             )
-            notes_lines.append(f"AB lgbm_auc={lgbm_auc:.3f} lr_auc={lr_auc:.3f}")
+            notes_lines.append(
+                f"AB lgbm_auc={lgbm_auc:.3f} lr_auc={lr_auc:.3f} "
+                f"(best_params={lgbm_params})"
+            )
         except Exception as e:
             notes_lines.append(f"lightgbm training failed: {e}")
             lgbm_auc = None
@@ -353,13 +464,15 @@ def fit_meta_classifier(
 
     cal_slope = _calibration_slope(y_test, y_proba)
 
-    # Feature importance (LightGBM native or LR abs coefs)
+    # Feature importance (LightGBM native or LR abs coefs). Use the
+    # training feature key list so indices align with the X matrix.
+    train_keys = training_feature_keys()
     feat_imp: dict[str, float] = {}
     if model_type == "lightgbm":
         try:
             importances = model.feature_importances_
             total = float(importances.sum()) or 1.0
-            for i, k in enumerate(FEATURE_KEYS):
+            for i, k in enumerate(train_keys):
                 feat_imp[k] = float(importances[i] / total)
         except Exception:
             pass
@@ -367,7 +480,7 @@ def fit_meta_classifier(
         try:
             coefs = model.lr.coef_[0]
             total = float(np.abs(coefs).sum()) or 1.0
-            for i, k in enumerate(FEATURE_KEYS):
+            for i, k in enumerate(train_keys):
                 feat_imp[k] = float(abs(coefs[i]) / total)
         except Exception:
             pass

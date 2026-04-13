@@ -27,12 +27,16 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 from src.m3s.types import PortfolioSnapshot
 from src.utils.types import Signal, SignalAction
+
+if TYPE_CHECKING:
+    from src.m3s.hooks import M3S
+    from src.m3s.signal_filter.strategy_history import StrategyHistoryCache
 
 
 # Stable feature key list. Order matters for reproducibility; new
@@ -97,6 +101,9 @@ def build_meta_features(
     signal: Signal,
     features: pd.Series | None,
     snapshot: PortfolioSnapshot | None = None,
+    *,
+    strategy_history: "StrategyHistoryCache | None" = None,
+    m3s: "M3S | None" = None,
 ) -> dict[str, Any]:
     """Build a flat feature dict for one signal.
 
@@ -109,6 +116,12 @@ def build_meta_features(
             (e.g., funding carry synthetic feed).
         snapshot: optional M3S PortfolioSnapshot. If None, book-level
             features are None.
+        strategy_history: optional in-process ring buffer that tracks
+            recent win rate / pnl stats / signal cadence per strategy.
+            If None, the 4 strategy-history keys stay None (backward
+            compat — equivalent to ignoring those features at train time).
+        m3s: optional M3S facade. If provided and has a `last_allocation()`,
+            `m3s_alloc_weight_now` is populated for this signal's strategy.
 
     Returns:
         dict with keys from FEATURE_KEYS; missing values are None.
@@ -178,11 +191,40 @@ def build_meta_features(
         if funding is not None:
             out["funding_rate_abs"] = abs(funding)
 
-    # vol_regime_idx, strategy_win_rate_last_20, strategy_pnl_z_last_20,
-    # hours_since_last_signal, bars_since_last_trade_close, m3s_alloc_weight_now:
-    # intentionally left as None — wire these in a follow-up phase once we
-    # have (a) a RegimeClassifier service, (b) a strategy-history cache
-    # accessible at signal time, and (c) a live AllocationDecision reference.
+    # ── Strategy history (populated when cache is provided) ───────
+    if strategy_history is not None:
+        ts_for_history = int(signal.timestamp or 0)
+        if ts_for_history > 0:
+            stats = strategy_history.stats_for(
+                signal.strategy_name or "", ts_for_history
+            )
+            if stats.strategy_win_rate_last_20 is not None:
+                out["strategy_win_rate_last_20"] = float(stats.strategy_win_rate_last_20)
+            if stats.strategy_pnl_z_last_20 is not None:
+                out["strategy_pnl_z_last_20"] = float(stats.strategy_pnl_z_last_20)
+            if stats.hours_since_last_signal is not None:
+                out["hours_since_last_signal"] = float(stats.hours_since_last_signal)
+            if stats.bars_since_last_trade_close is not None:
+                out["bars_since_last_trade_close"] = float(
+                    stats.bars_since_last_trade_close
+                )
+
+    # ── M3S allocator current weight ──────────────────────────────
+    if m3s is not None:
+        try:
+            alloc = m3s.last_allocation()
+            if alloc is not None and signal.strategy_name:
+                w = alloc.weights.get(signal.strategy_name)
+                if w is not None:
+                    out["m3s_alloc_weight_now"] = float(w)
+        except Exception:
+            # M3S facade missing method or allocation not yet computed —
+            # silently skip. Not a bug, just early-boot.
+            pass
+
+    # vol_regime_idx: still intentionally None. Wiring it requires a
+    # stateful RegimeClassifier service that updates on every rebalance
+    # — deferred to a future phase with its own hot-path perf budget.
 
     return out
 

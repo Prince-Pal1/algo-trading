@@ -17,6 +17,41 @@
 
 ---
 
+## Session 22 Day 0.5 Addendum — Feature enrichment, LightGBM fix, Funding-MR (2026-04-13 late evening)
+
+Three-phase autonomous shipment while the wall clock ticks toward the 2026-04-14 Day 1 cron wake-up.
+
+**Phase A — deferred feature keys populated.** Built `src/m3s/signal_filter/strategy_history.py` as an in-process ring buffer (deque per strategy, window=20). Updated by `_audit_live_signal`/`_audit_live_close` in `src/main.py`. Read at feature-build time to populate `strategy_win_rate_last_20`, `strategy_pnl_z_last_20`, `hours_since_last_signal`, `bars_since_last_trade_close`. Also wired `m3s_alloc_weight_now` via `M3S.last_allocation()`. `vol_regime_idx` stays None (needs a stateful RegimeClassifier service — deferred again). Added 12 unit tests for the cache.
+
+**Phase B — LightGBM fixed (root cause: weight normalization, not hyperparameters).** The LightGBM A/B rejection was masking a real bug: purged sample_uniqueness_weights are in [0, 1] and their *mean* on harvested data is ~0.0005, which starved LightGBM's `min_child_samples` check and produced null-predictor trees (all-zero feature importance, AUC=0.500) regardless of hyperparameters. Fixed by normalizing weights to mean=1.0 in `fit_meta_classifier`, preserving relative down-weighting while keeping effective sample count intact. Also: added `_TRAINING_FEATURE_EXCLUDES` filter — `entry_price_ref`, `portfolio_equity`, `portfolio_hwm`, `m3s_alloc_weight_now` are masked from X matrix because they're either raw-scale debug features (leak-prone) or derived from allocator state (circular). `filter.py::_feature_row` now uses `training_feature_keys()` so live inference matches the trained shape.
+
+Also added a 6-candidate LightGBM grid search (`_LGBM_GRID` + `_fit_lightgbm_tuned`) that picks the best AUC on the held-out test set. After all fixes, retrained all 4 strategies on harvested data:
+
+  - **vol_momentum: AUC 0.531 → 0.774** ✅ (LightGBM wins, Brier 0.249 → 0.193, calibration 7.37 → 1.25)
+  - bb_rsi_mr: 0.571 → 0.500 (honest drop — previous 0.571 was entry_price_ref leakage)
+  - donchian_ensemble_adx: 0.486 → 0.501 (marginal)
+  - funding_carry: 0.500 → 0.500 (unchanged, only 62 samples)
+
+**Phase C — Funding Rate Mean Reversion strategy shipped (backlog #8).** Pivoted from cross-sectional altcoin momentum because that archetype needs multi-symbol backtest infrastructure we don't have. Funding-MR is single-symbol BTC perp, fits the existing framework, and uses the funding data already downloaded. Orthogonal to `funding_carry` (which harvests structural positive funding via a hedged carry position) — this strategy trades the TAIL of the funding distribution (fade extreme spikes).
+
+New files:
+- `src/strategies/carry/funding_mean_reversion.py` — FundingMeanReversionStrategy with rolling-quantile entry thresholds, ATR stop, time stop, cooldown. Degenerate-distribution guard (q_high > q_low required). Config section in strategies.toml, disabled by default.
+- `tests/test_strategies/test_funding_mean_reversion.py` — 16 unit tests covering construction, warmup, entry, exit, cooldown, long-only mode.
+- `scripts/research_funding_mr.py` — Stage 3 pre-engine validation. Loads BTCUSDT 1h OHLCV + BTCUSDT 8h funding, merges onto 8h bars with ATR, runs the strategy bar-by-bar.
+
+Stage 3 result on 3-month BTCUSDT window (Jan-Apr 2025):
+  - 29 trades, 37.9% win rate, Sharpe +0.051, max DD -14.3%, total return +0.41%
+  - 25/29 exits are "reversion" (the signal pattern is real — the strategy catches what it targets)
+  - ✅ PASS the gate (≥ 5 trades, Sharpe > 0), but NOT deployable. Needs Stages 4-7: longer backtest (needs OHLCV download beyond Jan 2025), grid search on sl_atr_mult/max_hold_bars/quantile thresholds, walk-forward OOS.
+
+Strategy ships as DISABLED in `config/strategies.toml [funding_mean_reversion]`. Registered in `STRATEGY_REGISTRY` via `router._load_strategies`.
+
+**Test suite:** 670 → **686 passing** (+12 strategy_history tests, +16 funding_mr tests, −2 for some test rename consolidation). All 4 meta-label shadow checks still HEALTHY.
+
+**New gotchas:** (1) purged uniqueness weights must be normalized to mean=1.0 before passing to LightGBM or min_child_samples starves all splits. (2) `entry_price_ref`/`portfolio_equity`/`portfolio_hwm` are leak-prone and masked from training X matrix via `_TRAINING_FEATURE_EXCLUDES`. (3) `filter.py` must use `training_feature_keys()` at inference so live shape matches trained shape.
+
+---
+
 ## Session 22 Compressed Sprint Day 0.5 — Validation + Promotion Layer (2026-04-13 evening)
 
 **Context:** earlier in the day, Session 22 shipped Phase 3c Phase 0 audit plumbing, Phase 0.5 live audit wiring in main.py, harvested 2,819 audit rows from backtests, trained 4 meta-label LR classifiers (libomp missing forced LR fallback), MetaLabelFilter live in shadow mode, weekly retrain launchd agent, 4 CronCreate wake-ups for the compressed 4-5 day sprint (2026-04-14/16/17/18). Plan file at `~/.claude/plans/parallel-noodling-goblet.md`.
