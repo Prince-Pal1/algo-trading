@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.algo-trading.sprint-day-1</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>scripts/sprint_wakeup.sh</string>
+        <string>--day</string>
+        <string>1</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/prince/algo-trading</string>
+
+    <!-- Fires at 2026-04-14 09:03 local (Day 1 status check). launchd
+         StartCalendarInterval interprets Month/Day/Hour/Minute in local
+         time. After firing, the job stays loaded but won't fire again
+         until 2027-04-14 — by which time the sentinel will no-op it. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Month</key>
+        <integer>4</integer>
+        <key>Day</key>
+        <integer>14</integer>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>3</integer>
+    </dict>
+
+    <!-- One-shot job. Don't run at load. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>ThrottleInterval</key>
+    <integer>300</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/prince/algo-trading/data/logs/sprint_day1_launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/prince/algo-trading/data/logs/sprint_day1_launchd_err.log</string>
+</dict>
+</plist>
