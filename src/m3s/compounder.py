@@ -177,6 +177,61 @@ class Compounder:
         self._mode = mode
         self._state.mode = mode.name.value
 
+    # ── Leverage picker (G.0c.3 — regime-aware target leverage) ─────
+
+    def target_leverage(
+        self,
+        leverage_range: tuple[float, float],
+        snapshot: PortfolioSnapshot,
+    ) -> float:
+        """Return a target effective leverage within `leverage_range` based on
+        current portfolio regime (mode + drawdown + HWM distance).
+
+        Strategies declare their leverage_range; M3S picks the actual level
+        per regime. This is the G.0c.3 leverage-first hook. Strategies that
+        want leverage should call this method at signal time to get a
+        regime-appropriate value, then set `signal.leverage` before emitting.
+
+        Decision heuristic (intentionally simple; more sophisticated regime
+        rules can be added without changing the interface):
+          - CONSERVATIVE mode → always min of range
+          - STANDARD mode    → middle of range when drawdown < 2%, min otherwise
+          - GROWTH mode      → max of range when drawdown < 5%, middle when
+                               < 10%, min when deeper
+          - CUSTOM mode      → middle of range (CUSTOM has its own rules,
+                               users can override by setting signal.leverage
+                               explicitly)
+
+        Caps:
+          - NEVER exceeds max(leverage_range) no matter what mode says
+          - NEVER below min(leverage_range) for live signals
+          - If range is (1, 1) (default crypto), always returns 1.0
+        """
+        lo, hi = float(leverage_range[0]), float(leverage_range[1])
+        if lo < 1.0:
+            lo = 1.0
+        if hi < lo:
+            hi = lo
+        if lo >= hi:
+            # Single-point range — just return it
+            return lo
+
+        dd = float(snapshot.drawdown_pct)
+        mode_name = self._mode.name.value
+
+        if mode_name == "CONSERVATIVE":
+            return lo
+        if mode_name == "STANDARD":
+            return lo + (hi - lo) * 0.5 if dd < 0.02 else lo
+        if mode_name == "GROWTH":
+            if dd < 0.05:
+                return hi
+            if dd < 0.10:
+                return lo + (hi - lo) * 0.5
+            return lo
+        # CUSTOM or unknown — conservative middle
+        return lo + (hi - lo) * 0.5
+
     # ── Scalar composition (called on every signal) ─────────────────
 
     def risk_scalar(self, snapshot: PortfolioSnapshot) -> float:
