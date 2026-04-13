@@ -93,7 +93,12 @@ class OrderBookSnapshot(msgspec.Struct):
 
 
 class Signal(msgspec.Struct):
-    """Output of BaseStrategy.on_candle() — a trading signal."""
+    """Output of BaseStrategy.on_candle() — a trading signal.
+
+    G.0c (2026-04-13) added `leverage` and `margin_used_pct` fields for
+    the leverage-first strategy architecture. They are optional — None
+    preserves the pre-G.0c behavior (implicit 1× leverage).
+    """
     symbol: str
     action: SignalAction
     confidence: float           # 0.0 to 1.0
@@ -105,6 +110,9 @@ class Signal(msgspec.Struct):
     risk_pct: float | None = None   # Suggested risk as fraction of equity
     metadata: dict | None = None
     timestamp: int = 0
+    # G.0c — leverage is a first-class parameter
+    leverage: float | None = None       # effective leverage requested (None = 1×)
+    margin_used_pct: float | None = None  # % of account margin this position would consume
 
 
 # ── Orders & Fills ─────────────────────────────────────────────────────────
