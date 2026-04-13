@@ -54,6 +54,18 @@ Master plan: `~/.claude/plans/parallel-noodling-goblet.md`. Branch: `feat/gold-r
 | G.2c | Inline leverage gates + RCU portfolio view + AGGRESSIVE_RETAIL profile | ✅ COMPLETE | `f891e57` | 14 | InlineLeverageGates + VersionedPortfolioView + profiles.aggressive_retail |
 | G.2g | Split sweep: Calmar-optimal institutional_pct | ✅ COMPLETE | `05494c8` | 1 | run_multi engine path + run_split_sweep.py; optimal = 0.95 (1h data, untuned aggressive) |
 | Merge | feat/gold-refactor → main | 📋 SCHEDULED | — | — | 2026-04-17 ~09:30 after Day 4 sprint cron |
+| Tuning | donchian_gold tuning + XAUUSD M5 download + Tier 5 re-tune on M5 | ❌ NOT STARTED | — | — | Post-merge. Required before G.3 shadow has meaningful data |
+| **G.3** | **30-day paper clock — IC Markets cTrader demo, 5-step ramp** | ❌ NOT STARTED | — | — | Needs Phase 4 (IC Markets connection) un-deferred + tuning pass |
+| G.3 Day 1-7 | Shadow mode, L=1 institutional only, aggressive disabled | ❌ NOT STARTED | — | — | — |
+| G.3 Day 8-14 | Institutional L=5, aggressive 1% sizing | ❌ NOT STARTED | — | — | — |
+| G.3 Day 15-21 | Institutional L=10, aggressive 2% sizing | ❌ NOT STARTED | — | — | — |
+| G.3 Day 22-28 | Institutional L=25, aggressive 3% sizing | ❌ NOT STARTED | — | — | — |
+| G.3 Day 29-30 | Institutional full cap 80×, aggressive full 5% | ❌ NOT STARTED | — | — | Gate to live: 0 forced liquidations, inst DD<5%, aggr DD<30%, 100+ inst trades, 50+ aggr trades |
+| Live ramp | Real-money gold on IC Markets, weeks 5+ | ❌ NOT STARTED | — | — | Week 1-4 @ 10× max, Week 5-12 @ 20-30×, Month 4+ @ 40-60× on best tier |
+| **G.4** | Dynamic budget allocator (floor + dynamic hybrid) | ❌ NOT STARTED | — | — | Post-live. 1 week of work once tier history exists |
+| **G.5** | Tick reconstruction for scalper validation | ❌ NOT STARTED | — | — | Optional. Run bridge model vs Dukascopy ticks, validate hit-count error < 10% |
+| **G.6** | Adaptive leverage governor ML model | ❌ NOT STARTED | — | — | Train on `leverage_grants` table once 500+ rows exist. Phase 5 tie-in |
+| **G.7** | Alpha vs leverage attribution dashboard | ❌ NOT STARTED | — | — | Needs live trade history to be meaningful |
 
 **Test counts:** 905 passing as of commit `19592de` (734 baseline + G.0/G.0c/G.1/G.2a-G.2f additions).
 
