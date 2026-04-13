@@ -59,6 +59,13 @@ class RiskConfig(msgspec.Struct, frozen=True):
     fat_finger_max_value: float = 10_000.0
     fat_finger_max_qty_mult: float = 10.0
 
+    # [leverage] — G.0c leverage-first safety gates
+    # Hard caps enforced by RiskManager. Cannot be overridden by M3S.
+    max_aggregate_leverage: float = 100.0   # portfolio-wide max effective leverage
+    max_per_position_leverage: float = 500.0  # hard cap per signal, absolute
+    liquidation_buffer_pct: float = 0.20    # reject if stop puts us within 20% of margin call
+    leverage_gates_enabled: bool = True     # feature flag — can disable for crypto-only runs
+
     # [transport]
     zmq_addr: str = "tcp://127.0.0.1:5555"
     zmq_timeout_ms: int = 2000
@@ -81,8 +88,9 @@ class RiskConfig(msgspec.Struct, frozen=True):
             cb = risk.get("circuit_breakers", {})
             kelly = risk.get("kelly", {})
             ff = risk.get("fat_finger", {})
+            lev = risk.get("leverage", {})
         else:
-            limits = cb = kelly = ff = {}
+            limits = cb = kelly = ff = lev = {}
 
         return cls(
             max_risk_per_trade=limits.get("max_risk_per_trade", 0.02),
@@ -104,6 +112,10 @@ class RiskConfig(msgspec.Struct, frozen=True):
             kelly_min_trades=kelly.get("min_trades_for_kelly", 30),
             fat_finger_max_value=ff.get("max_order_value_usd", 10_000.0),
             fat_finger_max_qty_mult=ff.get("max_quantity_multiplier", 10.0),
+            max_aggregate_leverage=lev.get("max_aggregate_leverage", 100.0),
+            max_per_position_leverage=lev.get("max_per_position_leverage", 500.0),
+            liquidation_buffer_pct=lev.get("liquidation_buffer_pct", 0.20),
+            leverage_gates_enabled=lev.get("gates_enabled", True),
             strategy_profiles=cls._parse_profiles(risk),
         )
 
