@@ -1,8 +1,8 @@
 # Algo Trading — Roadmap & Phase Status
 
-**Last updated:** 2026-04-13 (Session 22 — M3S Phase 3b-2 ALL 10 sub-phases complete)
-**Current phase:** 3b part 2 — M3S construction ✅ sub-phases 0.1-0.10 all complete, awaiting commit + Prince review
-**Next action:** Prince reviews M3S in shadow mode (flip `settings.toml [m3s] enabled=true`, keep `shadow_mode=true`). After ≥4 weeks of clean shadow logs + BT gates all green, Prince flips `shadow_mode=false` for authoritative mode. See `docs/planning/m3s_plan_v1.md` § 11 Rollout Phases.
+**Last updated:** 2026-04-13 (Session 22 — M3S complete + accelerated 7-day shadow clock)
+**Current phase:** 3b part 2 — M3S construction ✅ 10 sub-phases complete, awaiting shadow-mode activation
+**Next action:** Run `./scripts/m3s_activate_shadow.sh` to flip `settings.toml [m3s] enabled=true`, install the 6h shadow-check launchd agent, and fire the first audit. Clock is **7 days** of consecutive clean shadow runs (was 4 weeks — shortened because `scripts/m3s_shadow_check.py` actively audits invariants every 6h instead of passive monitoring). After 7 clean days, flip `shadow_mode=false` for authoritative mode.
 
 > **Authority note:** This file is the **only** authoritative source for phase status. If any other file contradicts this, that other file is wrong — fix it to link here. See `CLAUDE.md` § Autonomous Workflow Protocol.
 

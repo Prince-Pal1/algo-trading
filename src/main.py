@@ -149,6 +149,33 @@ class TradingEngine:
         if self.paper_executor:
             self.paper_executor.on_trade_close_hook = self.m3s.on_trade_close
 
+        # Seed state on boot so the shadow checker has something to audit
+        # before the first scheduled tick. Safe — rebalance() on a fresh
+        # tracker produces a cold-start equal-weight allocation and records
+        # the compound base from initial equity.
+        try:
+            decision = self.m3s.rebalance()
+            save_state(self.m3s, self.m3s_store)
+            # Append a startup event so the shadow checker sees activity
+            # immediately (avoids a 48h "no events" warning on fresh boot).
+            self.m3s_store.append_event(
+                "allocation",
+                {
+                    "ts_ms": decision.ts_ms,
+                    "method": decision.method,
+                    "weights": decision.weights,
+                    "inputs_hash": decision.inputs_hash,
+                    "reasoning": f"boot-seed: {decision.reasoning}",
+                },
+                ts_ms=decision.ts_ms,
+                inputs_hash=decision.inputs_hash,
+            )
+            log.info("m3s_seeded_on_boot",
+                     base_equity=self.m3s._compounder.state.base_equity,
+                     method=decision.method)
+        except Exception as e:
+            log.warning("m3s_seed_failed", error=str(e))
+
         self.m3s_scheduler = M3SScheduler(
             self.m3s, self.m3s_store, cadence_seconds=cadence_hours * 3600.0,
         )

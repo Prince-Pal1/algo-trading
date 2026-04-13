@@ -242,7 +242,14 @@ class M3S:
         Returns the new AllocationDecision for logging/audit purposes. The
         decision is cached internally for `on_signal` to read from on the
         next tick.
+
+        When `now_ms` is None and the tracker has no activity yet, fall back
+        to the current wall-clock time so downstream audit events get a
+        meaningful timestamp instead of 0.
         """
+        import time
+        if now_ms is None:
+            now_ms = self._tracker._last_equity_ts_ms or int(time.time() * 1000)
         snap = self._tracker.snapshot(now_ms=now_ms)
         decision = self._allocator.compute(snap)
         self._last_alloc = decision

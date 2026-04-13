@@ -122,6 +122,10 @@ Phase 3b-2. Canonical plan: `docs/planning/m3s_plan_v1.md` § v1.1 ADDENDUM. Sub
 | Regime Detector (Tier 1 #1) | `src/m3s/regime.py` | stdlib | Scheduler, Mode Manager | ✅ sub-phase 0.9 (RegimeClassifier + AutoModeSwitcher) |
 | Evaluation Layer (Purged CV + Bayesian Kelly, Tier 1 #6-7) | `src/m3s/evaluation.py` | `numpy` | Allocator, Strategy Admission | ✅ sub-phase 0.10 |
 | M3S CLI | `scripts/m3s_cli.py` | Hooks, State | Manual ops (freeze/thaw/status) | 📋 not built yet — add on demand |
+| Shadow Checker | `scripts/m3s_shadow_check.py` | `sqlite3` (raw, no M3S import) | launchd 6h schedule | ✅ Session 22 post-commit (7-day clock, 7 invariant checks, writes report/status/alerts/clock files) |
+| Shadow launchd agent | `scripts/launchd/com.algo-trading.m3s-shadow-check.plist` | -- | launchctl | ✅ Session 22 (StartInterval=21600s) |
+| Shadow activate helper | `scripts/m3s_activate_shadow.sh` | plist, launchctl | Manual trigger | ✅ Session 22 |
+| Shadow deactivate helper | `scripts/m3s_deactivate_shadow.sh` | launchctl | Manual trigger | ✅ Session 22 |
 | AI Advisor (deferred) | `src/m3s/advisor.py` | `anthropic`, State | Scheduler (read-only shadow) | 📋 Phase 3c |
 | Meta-Labeling filter (deferred) | `src/m3s/signal_filter/meta_label.py` | `lightgbm`, Evaluation | Hooks | 📋 Phase 3c |
 

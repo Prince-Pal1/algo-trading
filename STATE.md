@@ -1,15 +1,15 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-04-13 (Session 22 — M3S Phase 3b-2 code complete, all 10 sub-phases)
+**Last updated:** 2026-04-13 (Session 22 — M3S complete + shadow checker + 7-day accelerated clock)
 
 ---
 
 ## Current Position
 
-**Active phase:** 3b part 2 — M3S code complete (sub-phases 0.1-0.10 ✅). M3S is wired into `src/main.py` DISABLED by default. Awaiting Prince review + commit + shadow-mode activation.
-**Next session target:** Prince reviews M3S plan + diffs, flips `config/settings.toml [m3s] enabled=true` (shadow_mode=true still) to start shadow-mode logging alongside live paper trading. Monitor dashboard for ≥4 weeks. After that, BT gates review + authoritative mode flip (`shadow_mode=false`). See `docs/planning/m3s_plan_v1.md` § 11 Rollout Phases.
+**Active phase:** 3b part 2 — M3S code complete + shadow checker built. Committed `d8d146f`. Ready for activation.
+**Next session target:** Run `./scripts/m3s_activate_shadow.sh` — flips `[m3s] enabled=true`, installs the `com.algo-trading.m3s-shadow-check` launchd agent (fires every 6h), seeds the first report to `data/m3s_shadow_report.md`. Prince can `cat` the report or `python3 scripts/m3s_shadow_check.py --verbose` any time to see status. Clock is **7 days** (accelerated from 4 weeks) — any ERROR exit resets to day 0. After 7 clean days, flip `shadow_mode=false` for authoritative mode.
 **Engine status:** Paper trading running via launchd (risk-server + engine + watchdog), HEALTHY. 9 symbols × 1h, $10,000 equity, 0 open positions as of last check. M3S is wired but currently disabled.
-**Test suite:** 516 passing, 0 skipped (289 baseline + 227 new M3S tests across all 10 sub-phases).
+**Test suite:** 525 passing, 0 skipped (289 baseline + 227 M3S sub-phases 0.1–0.10 + 9 shadow-checker tests).
 **Portfolio:** bb_rsi_mr_opt 40% / donchian_ensemble_adx 30% / vol_momentum 30% — Sharpe 2.318 (backtest, 2yr walk-forward).
 
 > See `ROADMAP.md` for phase table. See `SESSIONS_ARCHIVE.md` for Sessions 8-17.
@@ -77,7 +77,30 @@ Verification: **316 tests pass** (289 → 316, +27). Sub-phase 0.1 ships disconn
 **Sub-phase 0.10 — Purged CV + Bayesian fractional Kelly (COMPLETE, +23 tests, BT #5 green).**
 `src/m3s/evaluation.py` — `purged_kfold_splits` generator with purging (removes training samples whose labels overlap test window) + embargoing (gap after test to kill serial-correlation leak). Per-fold Sharpe annualized to √365, deflated Sharpe (Bailey & Lopez de Prado 2014 simplified), `bayesian_fractional_kelly` (Baker-McHale 2013): `f* = μ̂ / (σ² + σ_μ²)`, clamped [0.20, 0.50]. New strategies with high σ_μ² land near ⅕-Kelly automatically; mature strategies approach ½-Kelly. `evaluate_strategy` ties everything together into a `StrategyEvaluation` record. Tier 1 #6 + #7.
 
-**M3S totals:** 10 sub-phases, ~3,400 LOC across `src/m3s/` (13 modules + `__init__.py`), 227 new M3S tests, 5 backtest gates all green, wired into `src/main.py` with `enabled=false` default. Nothing in `src/risk/` was modified. M3S ships ready for shadow-mode activation.
+**M3S totals:** 10 sub-phases, ~3,400 LOC across `src/m3s/` (13 modules + `__init__.py`), 227 new M3S tests, 5 backtest gates all green, wired into `src/main.py` with `enabled=false` default. Nothing in `src/risk/` was modified. Committed as `d8d146f feat(m3s): Phase 3b-2 complete — 10 sub-phases, 7 Tier 1 additions`, pushed to `origin/main`.
+
+**Shadow checker + 7-day accelerated clock (post-commit Session 22 addendum).**
+
+Prince rejected the 4-week passive clock as too slow; replaced with an active checker that runs every 6h via launchd.
+
+New files:
+- `scripts/m3s_shadow_check.py` — 6h validator that reads `data/m3s.sqlite` (m3s_events + m3s_state) and `data/trades.db` (paper_equity), runs 7 checks: `state_loadable`, `scheduler_health`, `hwm_monotonic`, `no_dd_frozen_compound`, `cluster_caps`, `allocation_churn`, `shadow_vs_actual` (M3S base vs paper equity divergence). Writes human-readable `data/m3s_shadow_report.md`, machine-readable `data/m3s_shadow_status.json`, append-only `data/m3s_shadow_alerts.log`, and a `data/m3s_shadow_clock.json` day counter. Exit codes 0/1/2 for healthy/warning/error.
+- `scripts/launchd/com.algo-trading.m3s-shadow-check.plist` — launchd StartInterval=21600 (6h), RunAtLoad=true, logs to `data/logs/m3s_shadow_check{,_err}.log`. Cron-style periodic (no KeepAlive).
+- `scripts/m3s_activate_shadow.sh` — 5-step activation helper: flips `enabled=true`, kickstarts the engine via launchd, copies the plist to `~/Library/LaunchAgents/`, loads it, fires the first check, prints report paths.
+- `scripts/m3s_deactivate_shadow.sh` — reverse of activate: flips `enabled=false`, unloads + removes the plist, restarts engine. Leaves report files intact for audit.
+- `tests/test_m3s/test_shadow_check.py` — 9 tests covering disabled state, healthy path, each invariant violation, divergence detection, promotion clock increment + reset.
+
+Rollout change:
+- **4 weeks → 7 days.** The clock increments by 1 per calendar day when the checker exits 0 (HEALTHY) or 1 (WARNING). Any exit 2 (ERROR — hard invariant violation) resets the clock to 0. After 7 consecutive clean days, Prince can flip `shadow_mode=false` for authoritative mode. Philosophy: trust an active checker that runs 28 times across 7 days instead of passive wall-clock time.
+- **Promotion criteria:** zero hard violations, divergence < 1%, scheduler ticks within 20% of expected cadence, 7 consecutive clean days.
+
+Verification: 516 → **525 tests passing** (+9 shadow-checker tests). Shadow checker runs cleanly in DISABLED state (expected, since M3S hasn't been activated yet). Ready to fire.
+
+Usage:
+- Activate: `./scripts/m3s_activate_shadow.sh`
+- Check status any time: `cat data/m3s_shadow_report.md` or `python3 scripts/m3s_shadow_check.py --verbose`
+- Deactivate: `./scripts/m3s_deactivate_shadow.sh`
+- Rollback from ERROR: run `m3s_deactivate_shadow.sh` or just flip `[m3s] enabled = false` and restart
 
 ---
 
