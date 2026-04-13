@@ -1,8 +1,8 @@
 # Algo Trading — Roadmap & Phase Status
 
-**Last updated:** 2026-04-13 (Session 22 — Phase 3b-3 strategy expansion: A shipped, B killed at B.3)
-**Current phase:** 3b part 3 — strategy expansion COMPLETE. Strategy A (funding_carry) shipped 5/5 sub-phases with Sharpe 2.584. Strategy B (clenow_momentum) killed at B.3 with avg Sharpe -0.124; obituary filed. M3S shadow clock continues running in parallel.
-**Next action:** Monitor M3S shadow report (`cat data/m3s_shadow_report.md`). When 7/7 days hit, flip `shadow_mode=false` for authoritative mode. Optionally: download historical BTC funding-rate Parquet via `BinanceFundingDownloader` and flip `[funding_carry] enabled = true` in `config/strategies.toml` for paper trading.
+**Last updated:** 2026-04-13 (Session 22 — funding_carry live + Phase 3c Phase 0 audit plumbing shipped)
+**Current phase:** 3b part 3 ✅ + Phase 3c Phase 0 audit plumbing ✅. funding_carry is live (real data, Sharpe 0.533 on 4.3yr backtest, FundingSyntheticFeed polling Binance Futures every 5min). M3S shadow clock day 1/7. signal_audit table + feature/label builders + backtest engine integration shipped.
+**Next action:** Wait for M3S shadow clock to hit 7/7 (wall-clock gated). Passive data collection for Phase 3c Phase 1 is automatic — backtest runs with `audit_db_path` now populate `signal_audit`, live path wiring is Phase 0.5 (next session). Flip `shadow_mode=false` for M3S authoritative when clock hits 7/7. Begin Phase 3c Phase 1 (collect ≥500 live events per strategy) after live audit wiring lands.
 
 > **Authority note:** This file is the **only** authoritative source for phase status. If any other file contradicts this, that other file is wrong — fix it to link here. See `CLAUDE.md` § Autonomous Workflow Protocol.
 

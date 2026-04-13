@@ -61,14 +61,29 @@ class BacktestResult:
 class BacktestEngine:
     """Event-driven backtest engine that reuses the live strategy code."""
 
-    def __init__(self, config: BacktestConfig | None = None, risk_manager=None):
+    def __init__(
+        self,
+        config: BacktestConfig | None = None,
+        risk_manager=None,
+        audit_db_path: str | None = None,
+        audit_run_id: str | None = None,
+    ):
         """Args:
             config: Backtest configuration.
             risk_manager: Optional RiskManager instance. When provided, all
                 signals are gated through it (same checks as live trading).
+            audit_db_path: Optional path to the `data/trades.db` SQLite. When
+                set, every signal emission writes a `signal_audit` row with
+                the feature vector + realized outcome on close. Phase 0 audit
+                plumbing for meta-labeling (see docs/planning/phase3c_*).
+            audit_run_id: Identifier written into signal_audit.run_id (e.g.,
+                the backtest UUID).
         """
         self.config = config or BacktestConfig()
         self._risk_manager = risk_manager
+        self._audit_db_path = audit_db_path
+        self._audit_run_id = audit_run_id or "backtest"
+        self._audit_conn = None
 
     def run(
         self,
@@ -120,6 +135,10 @@ class BacktestEngine:
         position_entry_idx: int = 0
         position_stop_loss: float | None = None
         position_take_profit: float | None = None
+        position_audit_id: int | None = None  # Phase 0 signal_audit row id
+
+        # Open an audit connection once if enabled. Lazy — no-op if disabled.
+        audit_conn = self._get_audit_conn()
 
         for i in range(n):
             row = df.iloc[i]
@@ -144,6 +163,15 @@ class BacktestEngine:
                         if self._risk_manager is not None:
                             self._risk_manager.update_trade_close(
                                 strategy.name, trade.pnl, symbol)
+                        # Phase 0 audit close
+                        if audit_conn is not None and position_audit_id is not None:
+                            self._audit_close_trade(
+                                audit_conn, position_audit_id, position_side,
+                                position_entry_price, exit_price, trade.pnl,
+                                "sl", int(row["timestamp"]) if "timestamp" in df.columns else 0,
+                                len(trades),
+                            )
+                            position_audit_id = None
                         position_side = None
                         strategy._position = "FLAT"
 
@@ -162,6 +190,15 @@ class BacktestEngine:
                         if self._risk_manager is not None:
                             self._risk_manager.update_trade_close(
                                 strategy.name, trade.pnl, symbol)
+                        # Phase 0 audit close
+                        if audit_conn is not None and position_audit_id is not None:
+                            self._audit_close_trade(
+                                audit_conn, position_audit_id, position_side,
+                                position_entry_price, exit_price, trade.pnl,
+                                "pt", int(row["timestamp"]) if "timestamp" in df.columns else 0,
+                                len(trades),
+                            )
+                            position_audit_id = None
                         position_side = None
                         strategy._position = "FLAT"
 
@@ -170,6 +207,14 @@ class BacktestEngine:
 
             if signal is not None:
                 action = signal.action
+
+                # Phase 0 audit: write the raw signal + features BEFORE any
+                # downstream transformation. Always for LONG/SHORT entries.
+                new_audit_id: int | None = None
+                if audit_conn is not None and action in (SignalAction.LONG, SignalAction.SHORT):
+                    new_audit_id = self._audit_write_signal(
+                        audit_conn, signal, row, strategy.name,
+                    )
 
                 # CLOSE existing position
                 if action == SignalAction.CLOSE and position_side is not None:
@@ -189,6 +234,15 @@ class BacktestEngine:
                     if self._risk_manager is not None:
                         self._risk_manager.update_trade_close(
                             signal.strategy_name, trade.pnl, symbol)
+                    # Phase 0 audit close (strategy-driven signal exit)
+                    if audit_conn is not None and position_audit_id is not None:
+                        self._audit_close_trade(
+                            audit_conn, position_audit_id, position_side,
+                            position_entry_price, exit_price, trade.pnl,
+                            "signal", int(row["timestamp"]) if "timestamp" in df.columns else 0,
+                            len(trades),
+                        )
+                        position_audit_id = None
                     position_side = None
 
                 # OPEN new position
@@ -253,6 +307,8 @@ class BacktestEngine:
                         position_entry_idx = i
                         position_stop_loss = signal.stop_loss
                         position_take_profit = signal.take_profit
+                        # Phase 0: link the pending audit row to this position
+                        position_audit_id = new_audit_id
 
             equity_history.append(equity)
 
@@ -268,6 +324,15 @@ class BacktestEngine:
             if self._risk_manager is not None:
                 self._risk_manager.update_trade_close(
                     strategy.name, trade.pnl, symbol)
+            if audit_conn is not None and position_audit_id is not None:
+                self._audit_close_trade(
+                    audit_conn, position_audit_id, position_side,
+                    position_entry_price, exit_price, trade.pnl,
+                    "time",
+                    int(df.iloc[-1]["timestamp"]) if "timestamp" in df.columns else 0,
+                    len(trades),
+                )
+                position_audit_id = None
             equity_history[-1] = equity
 
         equity_curve = pd.Series(equity_history, index=df["timestamp"].values)
@@ -285,6 +350,59 @@ class BacktestEngine:
             risk_rejections=risk_rejections,
             risk_rejection_reasons=rejection_reasons,
         )
+
+    # ── Phase 0 audit helpers ────────────────────────────────────
+
+    def _get_audit_conn(self):
+        """Lazy open of the audit sqlite connection. None if disabled."""
+        if self._audit_db_path is None:
+            return None
+        if self._audit_conn is None:
+            import sqlite3
+            try:
+                self._audit_conn = sqlite3.connect(self._audit_db_path, check_same_thread=False)
+                # Ensure schema exists
+                from src.backtest.result_store import _BACKTEST_SCHEMA
+                self._audit_conn.executescript(_BACKTEST_SCHEMA)
+                self._audit_conn.commit()
+            except Exception as e:
+                log.warning("audit_conn_open_failed", error=str(e))
+                self._audit_conn = None
+        return self._audit_conn
+
+    def _audit_write_signal(self, conn, signal, row, strategy_name: str):
+        """Write a signal_audit row, returns the new id or None."""
+        try:
+            from src.m3s.signal_filter.audit import audit_signal
+            from src.m3s.signal_filter.features import build_meta_features
+            features_dict = build_meta_features(signal, row, snapshot=None)
+            return audit_signal(
+                conn, run_id=self._audit_run_id, signal=signal,
+                features_dict=features_dict, primary_model_ver=strategy_name,
+            )
+        except Exception as e:
+            log.warning("audit_signal_write_failed", error=str(e))
+            return None
+
+    def _audit_close_trade(self, conn, audit_id: int, side: str,
+                           entry_price: float, exit_price: float,
+                           pnl: float, barrier_hit: str, exit_ts_ms: int,
+                           trade_id: int) -> None:
+        """UPDATE the audit row with realized outcome + labels."""
+        try:
+            from src.m3s.signal_filter.audit import CloseInfo, audit_close
+            direction = 1 if side == "LONG" else -1
+            audit_close(
+                conn, audit_id,
+                CloseInfo(
+                    trade_id=trade_id, exit_ts_ms=exit_ts_ms,
+                    exit_price=exit_price, realized_pnl=pnl,
+                    barrier_hit=barrier_hit,
+                    entry_price=entry_price, direction=direction,
+                ),
+            )
+        except Exception as e:
+            log.warning("audit_close_write_failed", audit_id=audit_id, error=str(e))
 
     @staticmethod
     def _close_position(

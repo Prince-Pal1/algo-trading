@@ -85,6 +85,51 @@ CREATE TABLE IF NOT EXISTS protocol_results (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vs_strategy ON validation_sessions(strategy_id);
+
+-- Phase 3c signal audit table. Every signal emission writes one row with
+-- the feature vector as seen at signal time. Trade-close path UPDATEs the
+-- row with the realized outcome + triple-barrier label. Read by the
+-- meta-labeling training pipeline (src/m3s/signal_filter/train.py).
+CREATE TABLE IF NOT EXISTS signal_audit (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id              TEXT NOT NULL,              -- backtest run UUID or 'live'
+    strategy            TEXT NOT NULL,
+    symbol              TEXT NOT NULL,
+    timeframe           TEXT NOT NULL,
+    signal_ts_ms        INTEGER NOT NULL,
+    signal_action       TEXT NOT NULL,              -- LONG / SHORT / CLOSE
+    signal_confidence   REAL,
+    entry_price         REAL,
+    stop_loss           REAL,
+    take_profit         REAL,
+    risk_pct_original   REAL,
+    features_json       TEXT NOT NULL,              -- dict of features at signal time
+    primary_model_ver   TEXT,                        -- strategy params hash
+
+    -- UPDATEd at trade close
+    trade_id            INTEGER,
+    exit_ts_ms          INTEGER,
+    exit_price          REAL,
+    realized_pnl        REAL,
+    realized_pnl_pct    REAL,
+    barrier_hit         TEXT,                        -- 'pt' / 'sl' / 'time' / 'signal'
+    triple_barrier_label INTEGER,                    -- +1 / -1 / 0
+    meta_label          INTEGER,                     -- 1 if tb_label == signal_action else 0
+    label_t1_ms         INTEGER,                     -- time label was resolved
+
+    -- meta-classifier audit (populated if filter is active in Phase 3+)
+    meta_proba          REAL,
+    meta_decision       TEXT,                        -- 'pass' / 'veto' / 'scale'
+    meta_size_mult      REAL,
+    meta_model_ver      TEXT,
+
+    created_at          TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_signal_audit_strategy_ts ON signal_audit(strategy, signal_ts_ms);
+CREATE INDEX IF NOT EXISTS idx_signal_audit_label_t1    ON signal_audit(label_t1_ms);
+CREATE INDEX IF NOT EXISTS idx_signal_audit_run         ON signal_audit(run_id);
+CREATE INDEX IF NOT EXISTS idx_signal_audit_trade_id    ON signal_audit(trade_id);
 """
 
 
