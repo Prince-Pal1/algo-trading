@@ -120,6 +120,22 @@ def _compute_indicators(df: pd.DataFrame, indicator_list: list[str]) -> pd.DataF
             df[col] = stoch.stoch()
             df[f"STOCHd_{length}"] = stoch.stoch_signal()
 
+    # Auto-compute rolling z-scores for meta-labeling features. These are
+    # backward-compatible additions — no strategy is required to read them,
+    # but they populate the meta-label features.py feature builder when
+    # present. Gated on sufficient history so strategies running on short
+    # buffers don't get NaN values in the latest row.
+    if n >= 22 and "volume" in df.columns:
+        vol_mean = volume.rolling(20).mean()
+        vol_std = volume.rolling(20).std()
+        df["VOL_ZSCORE_20"] = ((volume - vol_mean) / vol_std).fillna(0.0)
+
+    if n >= 52 and "MACD_hist" in df.columns:
+        mh = df["MACD_hist"]
+        mh_mean = mh.rolling(50).mean()
+        mh_std = mh.rolling(50).std()
+        df["MACD_HIST_ZSCORE_50"] = ((mh - mh_mean) / mh_std).fillna(0.0)
+
     return df
 
 

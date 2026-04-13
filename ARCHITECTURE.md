@@ -134,12 +134,26 @@ Phase 3b-2. Canonical plan: `docs/planning/m3s_plan_v1.md` § v1.1 ADDENDUM. Sub
 | Regime Detector (Tier 1 #1) | `src/m3s/regime.py` | stdlib | Scheduler, Mode Manager | ✅ sub-phase 0.9 (RegimeClassifier + AutoModeSwitcher) |
 | Evaluation Layer (Purged CV + Bayesian Kelly, Tier 1 #6-7) | `src/m3s/evaluation.py` | `numpy` | Allocator, Strategy Admission | ✅ sub-phase 0.10 |
 | M3S CLI | `scripts/m3s_cli.py` | Hooks, State | Manual ops (freeze/thaw/status) | 📋 not built yet — add on demand |
-| Shadow Checker | `scripts/m3s_shadow_check.py` | `sqlite3` (raw, no M3S import) | launchd 6h schedule | ✅ Session 22 post-commit (7-day clock, 7 invariant checks, writes report/status/alerts/clock files) |
+| Shadow Checker | `scripts/m3s_shadow_check.py` | `sqlite3` (raw, no M3S import) | launchd 6h schedule | ✅ Session 22 post-commit (4-day compressed clock, 7 invariant checks, writes report/status/alerts/clock files) |
 | Shadow launchd agent | `scripts/launchd/com.algo-trading.m3s-shadow-check.plist` | -- | launchctl | ✅ Session 22 (StartInterval=21600s) |
 | Shadow activate helper | `scripts/m3s_activate_shadow.sh` | plist, launchctl | Manual trigger | ✅ Session 22 |
 | Shadow deactivate helper | `scripts/m3s_deactivate_shadow.sh` | launchctl | Manual trigger | ✅ Session 22 |
+| M3S promote (authoritative) | `scripts/promote_m3s_authoritative.sh` | shadow check + clock + meta + DSR | Manual/cron | ✅ Session 22 Day 0.5 (4-gate promotion with --dry-run/--force/--no-commit) |
 | AI Advisor (deferred) | `src/m3s/advisor.py` | `anthropic`, State | Scheduler (read-only shadow) | 📋 Phase 3c |
-| Meta-Labeling filter (deferred) | `src/m3s/signal_filter/meta_label.py` | `lightgbm`, Evaluation | Hooks | 📋 Phase 3c |
+| Meta-Label Audit Store | `src/m3s/signal_filter/audit.py` | `sqlite3` | Backtest engine, main.py | ✅ Phase 3c Phase 0 (signal_audit table + label writers) |
+| Meta-Label Feature Builder | `src/m3s/signal_filter/features.py` | Types, Snapshot | Audit, Filter | ✅ Phase 3c (24 feature keys, 15 populated + 9 deferred) |
+| Meta-Label Training Labels | `src/m3s/signal_filter/labels.py` | audit rows | Train | ✅ Phase 3c Phase 0 (triple-barrier method) |
+| Meta-Label Purged CV | `src/m3s/signal_filter/cv.py` | numpy | Train | ✅ Phase 3c Phase 2 (AFML ch.7 purged K-fold t1) |
+| Meta-Label Training Pipeline | `src/m3s/signal_filter/train.py` | LR, LightGBM (optional), Audit, CV | CLI `train_meta_classifier.py` | ✅ Phase 3c Phase 2 (LightGBM A/B sanity check, LR fallback, sample uniqueness) |
+| Meta-Label Live Filter | `src/m3s/signal_filter/filter.py` | joblib, features | src/main.py | ✅ Phase 3c Phase 3 (shadow + advisory + live modes, mtime hot-reload) |
+| Meta-Label Training CLI | `scripts/train_meta_classifier.py` | train.py | Weekly retrain launchd | ✅ Phase 3c Phase 2 |
+| Meta-Label Harvest | `scripts/harvest_audit_from_backtest.py` | Backtest engine, audit | Bootstrap training | ✅ Session 22 sprint (2,819 rows harvested from 4 strategies) |
+| Meta-Label Shadow Checker | `scripts/meta_label_shadow_check.py` | sqlite3, joblib | Promotion scripts | ✅ Session 22 Day 0.5 (rolling AUC/Brier, gate helpers passes_phase4/5) |
+| Meta-Label Promote | `scripts/promote_meta_label.sh` | shadow check helpers | Manual/cron | ✅ Session 22 Day 0.5 (--to shadow\|advisory\|live) |
+| Meta-Label Retrain Agent | `scripts/launchd/com.algo-trading.m3s-retrain.plist` | train_meta_classifier.py | launchctl weekly | ✅ Session 22 (Sunday 00:03 UTC) |
+| Deflated Sharpe Monitor | `scripts/deflated_sharpe_from_audit.py` | evaluation.py `_deflated_sharpe`, audit | Promotion Gate 4 | ✅ Session 22 Day 0.5 |
+| Project Status Aggregator | `scripts/project_status.py` | heartbeat/shadow/DSR JSON + TOML | launchd 30min | ✅ Session 22 Day 0.5 (data/project_status.md) |
+| Project Status Agent | `scripts/launchd/com.algo-trading.project-status.plist` | project_status.py | launchctl 1800s | ✅ Session 22 Day 0.5 (not yet loaded) |
 
 ### AI Agents (Python -- src/agents/)
 
@@ -445,3 +459,11 @@ Trade Fill Event
 | 2026-04-12 | `pd.concat([df, new_row])` copies entire 500-row buffer on every candle append. Replaced with `df.loc[len(df)] = row_dict` for in-place append. Eliminates FutureWarning and GC pressure. |
 | 2026-04-12 | FeatureEngine recomputed ALL 500 rows of indicators on every candle. Now uses `COMPUTE_WINDOW=250` tail slice — 2x less work, identical results (recursive indicators converge within 250 rows for all windows up to 120). |
 | 2026-04-12 | `msgspec.json.Encoder()` has no numpy support by default (unlike orjson). RiskClient serialization would crash on numpy.float64 signal fields. Added `enc_hook=_numpy_enc_hook` to convert via `.item()`. |
+| 2026-04-13 | `src/m3s/signal_filter/train.py` `ScaledLR` wrapper must be **module-level** (not nested inside `_fit_logistic`) for joblib pickling to work. Nested classes fail with `Can't pickle ... it's not found as ... .<locals>.ScaledLR`. Also, LightGBM import must be `except (ImportError, OSError)` not just `ImportError` because macOS libomp.dylib missing raises `OSError: dlopen` not `ImportError`. |
+| 2026-04-13 | Scripts that load meta-label joblib artifacts (e.g., `meta_label_shadow_check.py`) must prepend the repo root to `sys.path` before `joblib.load()` — joblib deserializes `src.m3s.signal_filter.train.ScaledLR` via fully-qualified module name, and scripts run with different CWD/PYTHONPATH hit `ModuleNotFoundError: No module named 'src'`. |
+| 2026-04-13 | LightGBM with default params on 1000-2000 audit rows can produce a **null predictor**: all-zero feature importance, AUC exactly 0.500. `train.py` A/B sanity check rejects it via `LGBM_MIN_AUC_UPLIFT=0.03` rule — LightGBM only wins if it beats LR by ≥0.03 AUC. After rejection, delete stale `*_lightgbm_*.joblib` artifacts that aren't symlinked as latest. |
+| 2026-04-13 | `FundingSyntheticFeed` Binance endpoint gotcha: `/fapi/v1/premiumIndex` returns `nextFundingTime` not `lastFundingTime`. Switched to `/fapi/v1/fundingRate?limit=1` which returns `fundingTime` + `fundingRate` directly. |
+| 2026-04-13 | Warmup must skip synthetic symbols (e.g., `BTCUSDT-CARRY`). `_get_needed_pairs_from_config` in `main.py` filters out `-CARRY`/`-SYNTH` suffixes to avoid WS subscription errors. `src/data/warmup.py` has a `warmup_skip_synthetic` branch. |
+| 2026-04-13 | M3S `m3s_shadow_check.py` promotion clock was compressed 7 → 4 days for Session 22 sprint. 16 audits at 6h cadence give dense validation in a short window. `promote_m3s_authoritative.sh` hard-codes the 4-day threshold. |
+| 2026-04-13 | `FEATURE_KEYS` in `src/m3s/signal_filter/features.py` is **append-only**. Order matters for reproducibility. New features go at END of the list. Old harvested rows in `signal_audit.features_json` are forward-compatible: missing keys fill with `None` → `0.0` in training pipeline (equivalent to ignoring the feature). Current size: 24 keys (15 Phase 0 + 9 Session 22 enrichment). |
+| 2026-04-13 | `FeatureEngine._compute_indicators()` auto-computes `VOL_ZSCORE_20` (always, when n≥22) and `MACD_HIST_ZSCORE_50` (when `MACD_hist` column exists and n≥52) as backward-compatible additions for meta-label features. Strategies don't need to read them; they populate the feature builder's `volume_zscore_20` / `macd_hist_zscore_50` keys automatically. |

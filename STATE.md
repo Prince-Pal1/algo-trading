@@ -1,18 +1,49 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-04-13 (Session 22 — Phase 3b-3 strategy expansion: A shipped, B killed)
+**Last updated:** 2026-04-13 (Session 22 compressed sprint Day 0.5 — validation + promotion layer shipped)
 
 ---
 
 ## Current Position
 
-**Active phase:** 3b part 3 — strategy expansion. Strategy A (funding_carry) SHIPPED all 5 sub-phases. Strategy B (clenow_momentum) KILLED at B.3 gate. M3S shadow clock continues running in parallel.
-**Next session target:** Monitor M3S shadow clock (`cat data/m3s_shadow_report.md`). When 7/7 days hit, flip `shadow_mode=false`. Optionally: download real BTCUSDT historical funding rate Parquet via `BinanceFundingDownloader` and flip `[funding_carry] enabled = true` for paper trading.
-**Engine status:** Paper trading running via launchd (risk-server + engine + watchdog), HEALTHY. M3S active in shadow mode (day 1/7 clock running).
-**Test suite:** 607 passing, 0 skipped (525 prior + 82 Strategy A/B tests).
-**Portfolio:** bb_rsi_mr_opt 40% / donchian_ensemble_adx 30% / vol_momentum 30% — Sharpe 2.318 (backtest, 2yr walk-forward).
+**Active phase:** Phase 3b-2 M3S shadow + Phase 3c meta-labeling shadow running in parallel. Validation layer, promotion scripts, feature enrichment, and project status aggregator all shipped. All code is in place for the 2026-04-16/17 automated cron promotions — wall-clock is the only remaining blocker (4-day shadow clock).
+**Next session target:** Nothing manual needed before the 2026-04-16 09:07 CronCreate wake-up. If interrupted earlier, `cat data/project_status.md` gives single-pane status; `./scripts/promote_m3s_authoritative.sh --dry-run` re-runs all 4 gates.
+**Engine status:** Paper trading running via launchd (risk-server + engine + watchdog), HEALTHY. M3S active in shadow mode (day 1/4 compressed clock). Meta-label filter active in shadow mode (4 LR models loaded, AUC 0.486-0.571).
+**Test suite:** 658 passing, 0 skipped.
+**Portfolio:** bb_rsi_mr_opt 40% / donchian_ensemble_adx 30% / vol_momentum 30% + funding_carry live. Sharpe 2.318 baseline (backtest, 2yr walk-forward).
+**Meta-label training:** 2,819 harvested audit rows from backtests; 4 LR models trained with 24-key feature schema (15 populated + 9 placeholders for future enrichment); LightGBM rejected by A/B sanity check (uplift < 0.03 AUC threshold).
 
 > See `ROADMAP.md` for phase table. See `SESSIONS_ARCHIVE.md` for Sessions 8-17.
+
+---
+
+## Session 22 Compressed Sprint Day 0.5 — Validation + Promotion Layer (2026-04-13 evening)
+
+**Context:** earlier in the day, Session 22 shipped Phase 3c Phase 0 audit plumbing, Phase 0.5 live audit wiring in main.py, harvested 2,819 audit rows from backtests, trained 4 meta-label LR classifiers (libomp missing forced LR fallback), MetaLabelFilter live in shadow mode, weekly retrain launchd agent, 4 CronCreate wake-ups for the compressed 4-5 day sprint (2026-04-14/16/17/18). Plan file at `~/.claude/plans/parallel-noodling-goblet.md`.
+
+**Lane A — validation/promotion critical path.**
+
+- `scripts/meta_label_shadow_check.py` (A.1, ~550 LOC): rolling AUC/Brier/calibration drift check analog to `m3s_shadow_check.py`. Pure-stdlib math (no numpy dep) for speed. Reports `data/meta_label_shadow_report.md` + `data/meta_label_shadow_status.json` + `data/meta_label_shadow_alerts.log`. Exit codes 0/1/2 for HEALTHY/WARNING/ERROR with `passes_phase4_advisory_gate` and `passes_phase5_live_gate` helpers called directly by promotion scripts.
+- `scripts/deflated_sharpe_from_audit.py` (A.2): per-strategy + total book deflated Sharpe (Bailey & Lopez de Prado 2014) from `signal_audit` rows, reusing `src/m3s/evaluation.py:_deflated_sharpe`. Emits `data/deflated_sharpe_live.json` with baseline-counterfactual comparison. Harvest baseline: bb_rsi_mr +0.999, donchian +0.933, funding_carry -2.387, vol_momentum -0.024, total book +0.262.
+- `scripts/promote_m3s_authoritative.sh` (A.3): 4-gate promotion script with `--dry-run`/`--force`/`--no-commit` flags. Gates: (1) m3s_shadow_check exit 0, (2) shadow clock ≥ 4/4, (3) meta_label_shadow_check exit ≤ 1, (4) deflated_sharpe non-regression (Δ ≥ -0.25 OR n < 20). Section-aware TOML edit (tomllib parse-check), launchctl kickstart, log verification, auto-commit.
+- `scripts/promote_meta_label.sh` (A.4): `--to shadow|advisory|live` with gate helper integration. Advisory = shadow_mode=false, veto_threshold=0.30. Live = shadow_mode=false, veto_threshold=0.50. Shadow rollback is always allowed.
+
+**Lane B — quality improvements.**
+
+- **B.1 — libomp + LightGBM.** `brew install libomp` succeeded (libomp 22.1.3, keg-only). LightGBM 4.6.0 loads cleanly. Retrain ran LightGBM for donchian (1345 rows) + vol_momentum (2720 rows), but both produced all-zero feature importance and AUC=0.500 — model is effectively a null predictor with current hyperparameters. Added A/B sanity check to `src/m3s/signal_filter/train.py`: always train LR baseline, optionally train LightGBM, pick LightGBM only if `(lgbm_auc - lr_auc) >= LGBM_MIN_AUC_UPLIFT=0.03`. All 4 strategies now on LR (per research memo's "LightGBM must beat LR by 0.03 AUC or use LR" rule).
+- **B.2 — feature enrichment 15 → 24 keys.** Added `volume_zscore_20`, `macd_hist_zscore_50`, `vol_regime_idx`, `funding_rate_abs`, `strategy_win_rate_last_20`, `strategy_pnl_z_last_20`, `hours_since_last_signal`, `bars_since_last_trade_close`, `m3s_alloc_weight_now`. `FeatureEngine` now auto-computes `VOL_ZSCORE_20` (always) and `MACD_HIST_ZSCORE_50` (when MACD_hist present) as backward-compatible added columns. `features.py` populates `volume_zscore_20`, `macd_hist_zscore_50`, and `funding_rate_abs` where available; the 6 history-dependent keys stay None until a future phase wires strategy-history / regime / allocator lookups at signal time. Backward compat verified by retraining all 4 models on harvested data with `n_features=24` — old rows fill new keys with None → 0, AUCs unchanged.
+
+**Lane C — quality-of-life.**
+
+- **C.1 — `scripts/project_status.py`.** Single-pane-of-glass aggregator reading `data/heartbeat.json` + `m3s_shadow_status.json` + `m3s_shadow_clock.json` + `meta_label_shadow_status.json` + `deflated_sharpe_live.json` + `config/settings.toml`. Writes `data/project_status.md` (68 lines) with engine health, operational modes, M3S + meta-label state, DSR table, the 4 Day-3 promotion gates at-a-glance, and file-freshness table. `scripts/launchd/com.algo-trading.project-status.plist` runs every 30min; not yet loaded into LaunchAgents.
+
+**Test suite:** 658 passing, 0 skipped (1 test updated for new 24-key schema).
+
+**Dry-run state (2026-04-13 evening):** promote_m3s_authoritative --dry-run: 3/4 gates pass, clock=1/4 blocks (expected). promote_meta_label --to advisory --dry-run: PASS. promote_meta_label --to live --dry-run: FAIL (0 live rows, need ≥20). project_status.md shows HEALTHY engine, HEALTHY M3S, HEALTHY meta-label, harvested DSR +0.262 total book, 3/4 gates passing.
+
+**Known gotcha added (ARCHITECTURE.md):** LightGBM may train with default params on 1000-2000 sample audit data and produce a null predictor (all-zero feature importance, AUC=0.500). Sanity check in train.py rejects it via the 0.03 AUC uplift rule; stale LightGBM artifacts should be cleaned up after A/B rejection.
+
+**Wall-clock handoff:** 2026-04-14 09:03 Day-1 status check, 2026-04-16 09:07 Day-3 auto-runs `promote_m3s_authoritative.sh` + `promote_meta_label.sh --to advisory`, 2026-04-17 09:13 Day-4 `promote_meta_label.sh --to live`, 2026-04-18 09:17 Day-5 sprint wrap.
 
 ---
 

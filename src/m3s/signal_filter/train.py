@@ -54,7 +54,8 @@ from src.utils.logger import get_logger
 log = get_logger("meta_train")
 
 
-LGBM_MIN_SAMPLES = 500          # below this, fall back to LR
+LGBM_MIN_SAMPLES = 500          # below this, don't even try LightGBM
+LGBM_MIN_AUC_UPLIFT = 0.03      # LightGBM must beat LR by this to be picked
 MODEL_ARTIFACT_DIR = Path("data/models/meta_label")
 
 
@@ -295,28 +296,51 @@ def fit_meta_classifier(
     y_train, y_test = y[train_idx], y[test_idx]
     w_train = weights[train_idx]
 
-    # Classifier choice
-    use_lgbm = HAVE_LIGHTGBM and n_samples >= LGBM_MIN_SAMPLES
-    if use_lgbm:
-        model = _fit_lightgbm(X_train, y_train, w_train)
-        model_type = "lightgbm"
-    else:
-        model = _fit_logistic(X_train, y_train, w_train)
-        model_type = "logistic_regression" if not HAVE_LIGHTGBM or n_samples < LGBM_MIN_SAMPLES \
-            else "logistic_regression"
+    # Classifier choice — A/B sanity check per research memo:
+    # Always train LR. If eligible, also train LightGBM and keep whichever
+    # beats the other by ≥ LGBM_MIN_AUC_UPLIFT. Otherwise keep LR.
+    notes_lines: list[str] = []
 
-    # Evaluate on held-out test set
+    # Train LR baseline
+    lr_model = _fit_logistic(X_train, y_train, w_train)
     try:
-        y_proba = model.predict_proba(X_test)[:, 1]
-    except Exception as e:
-        log.warning("predict_proba_failed", strategy=strategy, error=str(e))
-        return TrainResult(
-            strategy=strategy, model_path=None, model_type=model_type,
-            n_samples=n_samples, n_features=n_features,
-            n_train=len(train_idx), n_test=len(test_idx),
-            mean_y=mean_y, auc=0.0, brier=0.0, calibration_slope=0.0,
-            notes=f"predict_proba failed: {e}",
-        )
+        lr_proba = lr_model.predict_proba(X_test)[:, 1]
+        lr_auc = roc_auc_score(y_test, lr_proba) if len(np.unique(y_test)) > 1 else 0.5
+    except Exception:
+        lr_auc = 0.5
+        lr_proba = np.full(len(y_test), 0.5)
+
+    # Optionally train LightGBM
+    lgbm_auc = None
+    lgbm_proba = None
+    lgbm_model = None
+    if HAVE_LIGHTGBM and n_samples >= LGBM_MIN_SAMPLES:
+        try:
+            lgbm_model = _fit_lightgbm(X_train, y_train, w_train)
+            lgbm_proba = lgbm_model.predict_proba(X_test)[:, 1]
+            lgbm_auc = (
+                roc_auc_score(y_test, lgbm_proba)
+                if len(np.unique(y_test)) > 1 else 0.5
+            )
+            notes_lines.append(f"AB lgbm_auc={lgbm_auc:.3f} lr_auc={lr_auc:.3f}")
+        except Exception as e:
+            notes_lines.append(f"lightgbm training failed: {e}")
+            lgbm_auc = None
+
+    # Pick winner: LightGBM only if it beats LR by ≥ LGBM_MIN_AUC_UPLIFT
+    if lgbm_auc is not None and (lgbm_auc - lr_auc) >= LGBM_MIN_AUC_UPLIFT:
+        model = lgbm_model
+        model_type = "lightgbm"
+        y_proba = lgbm_proba
+        notes_lines.append(f"LightGBM wins by {lgbm_auc - lr_auc:+.3f}")
+    else:
+        model = lr_model
+        model_type = "logistic_regression"
+        y_proba = lr_proba
+        if lgbm_auc is not None:
+            notes_lines.append(
+                f"LightGBM rejected (uplift {lgbm_auc - lr_auc:+.3f} < {LGBM_MIN_AUC_UPLIFT})"
+            )
 
     try:
         auc = roc_auc_score(y_test, y_proba) if len(np.unique(y_test)) > 1 else 0.5

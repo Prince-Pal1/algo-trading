@@ -36,7 +36,9 @@ from src.utils.types import Signal, SignalAction
 
 
 # Stable feature key list. Order matters for reproducibility; new
-# features go at the END of the list.
+# features go at the END of the list. Old harvested rows are
+# backward-compatible: they'll have `None` for new features, which the
+# training pipeline fills with 0 (equivalent to ignoring the feature).
 FEATURE_KEYS: list[str] = [
     # Signal-derived (2)
     "signal_direction",         # +1 LONG / -1 SHORT / 0 CLOSE
@@ -65,6 +67,29 @@ FEATURE_KEYS: list[str] = [
     # Price reference (1) — not a feature for training but useful for
     # reconstruction and debugging
     "entry_price_ref",
+
+    # ── Session 22 sprint Day 0.5 enrichment (9 keys → 24 total) ──
+    # These are populated where computation is cheap and deferred to None
+    # where data is not yet available. Backward-compatible: old rows = None.
+
+    # Market microstructure extended (2) — from FeatureEngine auto-cols
+    "volume_zscore_20",          # (volume - v20_mean) / v20_std
+    "macd_hist_zscore_50",       # (MACD_hist - mh50_mean) / mh50_std
+
+    # Regime extended (1) — from M3S RegimeClassifier (None until wired)
+    "vol_regime_idx",            # 0=low, 1=mid, 2=high volatility regime
+
+    # Funding (1) — from features Series if strategy has funding feed
+    "funding_rate_abs",          # |funding_rate| at signal time
+
+    # Strategy history (4) — from audit lookup at signal time (None until wired)
+    "strategy_win_rate_last_20", # [0, 1]
+    "strategy_pnl_z_last_20",    # z-score of last 20 PnLs
+    "hours_since_last_signal",   # gap between signals
+    "bars_since_last_trade_close", # gap between trade closes
+
+    # M3S allocator (1) — current weight for this strategy (None until wired)
+    "m3s_alloc_weight_now",      # [0, 1] alloc weight assigned now
 ]
 
 
@@ -141,6 +166,23 @@ def build_meta_features(
         close = _getf(features, "close")
         if close is not None:
             out["entry_price_ref"] = close
+
+    # ── Session 22 enrichment (populate what we can) ───────────────
+    if features is not None:
+        # Rolling z-scores from FeatureEngine auto-computed columns
+        out["volume_zscore_20"] = _getf(features, "VOL_ZSCORE_20")
+        out["macd_hist_zscore_50"] = _getf(features, "MACD_HIST_ZSCORE_50")
+
+        # Funding rate — present on strategies consuming the funding feed
+        funding = _getf(features, "funding_rate")
+        if funding is not None:
+            out["funding_rate_abs"] = abs(funding)
+
+    # vol_regime_idx, strategy_win_rate_last_20, strategy_pnl_z_last_20,
+    # hours_since_last_signal, bars_since_last_trade_close, m3s_alloc_weight_now:
+    # intentionally left as None — wire these in a follow-up phase once we
+    # have (a) a RegimeClassifier service, (b) a strategy-history cache
+    # accessible at signal time, and (c) a live AllocationDecision reference.
 
     return out
 

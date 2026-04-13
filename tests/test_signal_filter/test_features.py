@@ -68,8 +68,9 @@ def _snap(equity: float = 10_000.0, drawdown: float = 0.0) -> PortfolioSnapshot:
 
 class TestFeatureKeys:
     def test_keys_are_stable_list(self):
-        """FEATURE_KEYS must contain all expected keys in Phase 0 v1."""
+        """FEATURE_KEYS must contain all expected keys (Phase 0 v1 + Session 22 enrichment)."""
         expected = {
+            # Phase 0 v1 (15 keys)
             "signal_direction", "signal_confidence",
             "atr_14_pct", "bb_width_pct", "rsi_14", "close_over_ema_21",
             "adx_14",
@@ -77,6 +78,12 @@ class TestFeatureKeys:
             "portfolio_equity", "portfolio_drawdown_pct",
             "portfolio_hwm", "n_strategies_tracked",
             "entry_price_ref",
+            # Session 22 sprint enrichment (9 keys → 24 total)
+            "volume_zscore_20", "macd_hist_zscore_50",
+            "vol_regime_idx", "funding_rate_abs",
+            "strategy_win_rate_last_20", "strategy_pnl_z_last_20",
+            "hours_since_last_signal", "bars_since_last_trade_close",
+            "m3s_alloc_weight_now",
         }
         assert set(FEATURE_KEYS) == expected
         # No duplicates

@@ -1,8 +1,8 @@
 # Algo Trading — Roadmap & Phase Status
 
-**Last updated:** 2026-04-13 (Session 22 — funding_carry live + Phase 3c Phase 0 audit plumbing shipped)
-**Current phase:** 3b part 3 ✅ + Phase 3c Phase 0 audit plumbing ✅. funding_carry is live (real data, Sharpe 0.533 on 4.3yr backtest, FundingSyntheticFeed polling Binance Futures every 5min). M3S shadow clock day 1/7. signal_audit table + feature/label builders + backtest engine integration shipped.
-**Next action:** Wait for M3S shadow clock to hit 7/7 (wall-clock gated). Passive data collection for Phase 3c Phase 1 is automatic — backtest runs with `audit_db_path` now populate `signal_audit`, live path wiring is Phase 0.5 (next session). Flip `shadow_mode=false` for M3S authoritative when clock hits 7/7. Begin Phase 3c Phase 1 (collect ≥500 live events per strategy) after live audit wiring lands.
+**Last updated:** 2026-04-13 (Session 22 compressed sprint Day 0.5 — validation + promotion layer shipped)
+**Current phase:** 3b-2 (M3S) shadow mode ACTIVE + Phase 3c meta-labeling shadow mode ACTIVE. Validation layer (meta_label_shadow_check + deflated_sharpe_from_audit), promotion scripts (promote_m3s_authoritative.sh + promote_meta_label.sh), libomp+LightGBM available (LR still winning A/B), feature enrichment 15→24 keys, project_status.py aggregator shipped. 4 meta-label LR models trained on 2,819 harvested + retrained with 24-key schema. All 658 tests pass. M3S shadow clock day 1/4 (compressed from 7).
+**Next action:** Wall-clock gated: 4-day shadow clock → 2026-04-16 cron auto-runs promote_m3s_authoritative.sh + promote_meta_label.sh --to advisory. Manual interim: `cat data/project_status.md` at any time for single-pane status. Dry-run promotions validate end-to-end: `./scripts/promote_m3s_authoritative.sh --dry-run` shows 3/4 gates passing (clock blocks).
 
 > **Authority note:** This file is the **only** authoritative source for phase status. If any other file contradicts this, that other file is wrong — fix it to link here. See `CLAUDE.md` § Autonomous Workflow Protocol.
 
