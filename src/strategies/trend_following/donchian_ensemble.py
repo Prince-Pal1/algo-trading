@@ -40,6 +40,7 @@ class DonchianEnsembleStrategy(BaseStrategy):
         risk_profile: RiskProfile = RiskProfile.SAFE,
         max_risk_per_trade: float = 0.01,
         *,
+        leverage_range: tuple[float, float] = (1.0, 1.0),
         # Channel periods
         dc_short: int = 20,
         dc_medium: int = 55,
@@ -56,7 +57,10 @@ class DonchianEnsembleStrategy(BaseStrategy):
         adx_trend_threshold: float | None = None,
         vpin_filter: VPINRegimeFilter | None = None,
     ):
-        super().__init__(name, markets, timeframe, risk_profile, max_risk_per_trade)
+        super().__init__(
+            name, markets, timeframe, risk_profile, max_risk_per_trade,
+            leverage_range=leverage_range,
+        )
 
         self.dc_short = dc_short
         self.dc_medium = dc_medium
