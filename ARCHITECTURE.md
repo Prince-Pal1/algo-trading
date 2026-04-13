@@ -30,6 +30,7 @@
 | Alpaca WebSocket Feed | `src/data/feeds/alpaca_ws.py` | `alpaca-trade-api`, `asyncio` | Candle Builder | 📋 planned |
 | IBKR Data Feed | `src/data/feeds/ibkr_feed.py` | `ib_insync` | Candle Builder | 📋 planned |
 | IC Markets Feed | `src/data/feeds/icmarkets_feed.py` | `ctrader-open-api`, Twisted, Types | TradingEngine (gold) | ✅ Phase 4 skeleton (unit tests with mocks; live smoke test pending credentials) |
+| Parquet Replay Feed | `src/data/feeds/parquet_replay_feed.py` | pandas, Types | Shadow orchestrator, future tests | ✅ G.2h.2 (async `on_candle` contract matches BinanceWebSocketFeed; realtime + fast-forward modes) |
 | Deribit WebSocket Feed | `src/data/feeds/deribit_ws.py` | `asyncio`, `websockets` | Candle Builder | 📋 planned |
 | Candle Builder | `src/data/candle_builder.py` | Data Feeds | Feature Engine, Strategies | ✅ working |
 | Feature Engine | `src/data/feature_engine.py` | `ta`, `pandas` | Strategies | ✅ working |
@@ -200,6 +201,7 @@ Phase 3b-2. Canonical plan: `docs/planning/m3s_plan_v1.md` § v1.1 ADDENDUM. Sub
 | Cost Models | `src/backtest/costs.py` | stdlib, csv | LeveragedBacktestEngine, Tier 5 strategies | ✅ G.2a.2 (ICMarketsMetalFeeModel: spread 0.13 pip + commission $3/lot/side + news windows) |
 | Intrabar Path | `src/backtest/path.py` | random, math | LeveragedBacktestEngine | ✅ G.2a.3 (BrownianBridgeModel + PessimisticPathModel + check_sl_tp_hits, deterministic via run_id+bar_idx) |
 | Leveraged Backtest Engine | `src/backtest/leveraged_engine.py` | Book, costs, path, FeatureEngine, BaseStrategy, M3S (optional) | Gold research, sweep scripts | ✅ G.2a.4 (fresh engine, separate from crypto BacktestEngine, integrates M3S.request_leverage when wired) |
+| Shadow Orchestrator | `src/shadow_orchestrator.py` | Book, costs, path, ParquetReplayFeed/ICMarketsFeed, strategies | G.3 paper clock driver | ✅ G.2h.2 (async feed-driven, reuses leveraged engine components, matches batch engine results bit-exact on 2yr XAUUSD 1h: +38% / 12% DD / 69 trades) |
 | Structure Levels | `src/backtest/structure_levels.py` | `pandas` | hedged_structure_play, future structure-aware strategies | ✅ G.2e (prior day H/L, session open ranges, round numbers, swing H/L, Fibonacci retraces) |
 
 ### Research Tooling (Python -- src/research/)
