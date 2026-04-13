@@ -28,7 +28,7 @@ import pandas as pd
 
 from src.strategies.base import BaseStrategy
 from src.utils.config import get_config
-from src.utils.types import RiskProfile, Signal, SignalAction
+from src.utils.types import RiskProfile, Signal, SignalAction, Tier
 
 
 class VolMomentumStrategy(BaseStrategy):
@@ -42,6 +42,8 @@ class VolMomentumStrategy(BaseStrategy):
         risk_profile: RiskProfile = RiskProfile.SAFE,
         max_risk_per_trade: float = 0.01,
         *,
+        leverage_range: tuple[float, float] = (1.0, 1.0),
+        tier: Tier = Tier.UNCLASSIFIED,
         momentum_window: int = 168,    # 7 days at 1h
         vol_lookback: int = 168,       # Realized vol window
         vol_target: float = 0.15,      # 15% annualized vol target
@@ -53,7 +55,10 @@ class VolMomentumStrategy(BaseStrategy):
         rebalance_interval: int = 24,  # Re-evaluate every 24 bars (1 day at 1h)
         momentum_threshold: float = 0.0,  # Min abs(momentum) to enter (skip weak signals)
     ):
-        super().__init__(name, markets, timeframe, risk_profile, max_risk_per_trade)
+        super().__init__(
+            name, markets, timeframe, risk_profile, max_risk_per_trade,
+            leverage_range=leverage_range, tier=tier,
+        )
 
         self.momentum_window = momentum_window
         self.vol_lookback = vol_lookback

@@ -40,6 +40,15 @@ class RiskProfile(str, enum.Enum):
     AGGRESSIVE = "AGGRESSIVE"
 
 
+class Tier(str, enum.Enum):
+    UNCLASSIFIED = "UNCLASSIFIED"
+    INSTITUTIONAL_TREND = "INSTITUTIONAL_TREND"
+    INSTITUTIONAL_MR = "INSTITUTIONAL_MR"
+    DAY = "DAY"
+    ULTRA_SCALP = "ULTRA_SCALP"
+    AGGRESSIVE_RETAIL = "AGGRESSIVE_RETAIL"
+
+
 class Timeframe(str, enum.Enum):
     TICK = "tick"
     S5 = "5s"

@@ -53,7 +53,8 @@
 | Cointegration Pairs | `src/strategies/stat_arb/pairs_trading.py` | `statsmodels`, Johansen test | Pairs Backtester | ✅ implemented (no usable cointegration found in 2024-2026 crypto — code ready for future use) |
 | BTC-Neutral MR | `src/strategies/stat_arb/btc_neutral_mr.py` | numpy (rolling OLS), BaseStrategy | Backtest CLI | ❌ dead (Sharpe negative on all params — z-score reverts but price doesn't profit) |
 | Donchian Ensemble | `src/strategies/trend_following/donchian_ensemble.py` | Feature Engine (donchian_N), BaseStrategy | Router, Backtest CLI | ✅ working (Sharpe 1.389 NEAR, 1.376 AVAX, 1.253 DOT; trend-following complement to bb_rsi_mr) |
-| Donchian Gold (leveraged) | `src/strategies/trend_following/donchian_gold.py` | DonchianEnsembleStrategy, stdlib | LeveragedBacktestEngine | ✅ G.2d (session-filtered XAUUSD, leverage_range=(10,50), London/NY only) |
+| Donchian Gold (leveraged) | `src/strategies/trend_following/donchian_gold.py` | DonchianEnsembleStrategy, stdlib | LeveragedBacktestEngine | ✅ G.2d (session-filtered XAUUSD, leverage_range=(10,50), London/NY only, tier=INSTITUTIONAL_TREND) |
+| Vol Momentum Gold (leveraged) | `src/strategies/momentum/vol_momentum_gold.py` | VolMomentumStrategy, stdlib | LeveragedBacktestEngine | ✅ G.2h.1 (tuned: mw=240, vt=0.20, long_only=True, session=True → +20% / Calmar 1.365 / corr<0.23 with donchian_gold, tier=INSTITUTIONAL_MR) |
 | Candle Burst Hunter | `src/strategies/aggressive/candle_burst_hunter.py` | BaseStrategy, Feature Engine (ATR) | Tier 5 sub-book | ✅ G.2f (mid-candle momentum entry, trailing stop, 0.3% hard SL, leverage_range=(500,1000)) |
 | News Spike Fade | `src/strategies/aggressive/news_spike_fade.py` | BaseStrategy, NewsWindow, news_calendar.csv | Tier 5 sub-book | ✅ G.2f (fade NFP/FOMC spikes > 30 pips, 50% spike-distance target, 40-pip SL) |
 | Hedged Structure Play | `src/strategies/aggressive/hedged_structure_play.py` | BaseStrategy, structure_levels | Tier 5 sub-book | ✅ G.2f (state machine FLAT→PRIMARY→HEDGED→UNHEDGED, structure-level decision) |
@@ -166,6 +167,7 @@ Phase 3b-2. Canonical plan: `docs/planning/m3s_plan_v1.md` § v1.1 ADDENDUM. Sub
 | Leverage Grant Store | `src/m3s/leverage_grants.py` | `sqlite3` | M3S.request_leverage | ✅ G.2b (data/trades.db :: leverage_grants table, append-only) |
 | Aggressive Retail Compounder | `src/m3s/aggressive_compounder.py` | stdlib | LeveragedBacktestEngine Tier 5 | ✅ G.2e (fixed-% sizing, daily/total DD kill switches, weekly refund from main) |
 | Versioned Portfolio View (RCU) | `src/m3s/portfolio_view.py` | stdlib | Inline leverage gates, future fast-path risk | ✅ G.2c (lock-free versioned snapshot for cross-layer state reads) |
+| Leverage Budget Allocator | `src/m3s/leverage_budget.py` | PortfolioSnapshot, Tier | Future: M3S.allocate_leverage_budget | ✅ G.2h.4 (tier-based floor + dynamic Sharpe-weighted pool, per-strategy grants never exceed requests) |
 
 ### AI Agents (Python -- src/agents/)
 

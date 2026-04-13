@@ -148,7 +148,7 @@ The top 6 configurations all share `sl_atr_mult ∈ {2.5, 3.0}` + `adx_threshold
 
 **Tier 5 strategies flagged not-alpha-ready.** Each of `candle_burst_hunter`, `news_spike_fade`, and `hedged_structure_play` now carries a status docstring warning: infrastructure is correct but entry triggers need dedicated alpha research (not just param tuning). On 1h the candle_burst over-fires on noise; on M5 donchian_gold itself needs different channel periods AND the Tier 5 strategies still wipe. These strategies are ready for the backtest harness but must not be paper-traded until a dedicated research pass lands actual edge.
 
-**Next:** Phase 4 un-deferral — wire IC Markets cTrader Open API (`spotware/OpenApiPy`) as `src/data/feeds/icmarkets_feed.py` + execution path. Needed before G.3 paper clock.
+**Next:** G.2h sprint — parallel KYC-wait work. See plan file `~/.claude/plans/parallel-noodling-goblet.md § Phase G.2h`.
 
 ---
 
@@ -170,6 +170,36 @@ Shipped the skeleton + unit tests without waiting for Spotware's KYC approval. A
 **Starting strategy:** use the read-only token NOW to drive G.3 Week 1 (Days 1-7 shadow mode, log-only, no orders placed). When KYC flips the app to Active, mint a new token with trading scope and advance to G.3 Day 8+ with real paper order placement on the IC Markets demo.
 
 **Current test count:** 935 passing on feat/gold-refactor (920 + 15 new from Phase 4 skeleton).
+
+---
+
+## Phase G.2h — Parallel KYC-wait sprint (2026-04-14)
+
+Sprint plan written to `~/.claude/plans/parallel-noodling-goblet.md § Phase G.2h` after a Plan-agent critique of the original 5-item proposal. Seven sub-items + one preflight smoke test. Goal: ship all non-KYC-blocked work so the moment Spotware approves, G.3 Day 1 starts with zero additional code. Also: what to do with the client_id + client_secret in the meantime (password manager, NOT .env yet).
+
+**G.2h.2 — Shadow orchestrator + ParquetReplayFeed (`cf23979`).** `src/data/feeds/parquet_replay_feed.py` emits Candle events from a parquet file chronologically with async `on_candle` callback (matches `BinanceWebSocketFeed`'s public surface). `src/shadow_orchestrator.py` wires the replay feed → intrabar SL/TP → broker stop-out → strategy.process() → Book open/close → equity curves → periodic parquet state dump. Reuses `Book`, `ICMarketsMetalFeeModel`, `BrownianBridgeModel` from the leveraged engine. Smoke test: donchian_gold through the shadow orchestrator on 2yr XAUUSD 1h produces **EXACTLY** `+38.16% / 12.07% DD / 69 trades / 0 stop-outs` — bit-exact match with LeveragedBacktestEngine. Step 0 feed-surface verification: `BinanceWebSocketFeed` and `ICMarketsFeed` both expose `on_tick`/`on_candle` attribute-set, but Binance uses async start/stop while ICMarkets is sync (Twisted reactor). `ParquetReplayFeed` is async-native to match Binance; the ICMarkets async wrapper is a post-KYC concern. Fixed one bug during testing: the `realtime_mode=True` loop slept for a full bar duration BEFORE checking `_running`, so calling `stop()` inside the callback hung the test for 3600s. Fix: check `_running` immediately after callback.
+
+**G.2h.5a — XAUUSD M1 download (`cf23979`).** Ran `python3 scripts/download_xauusd.py --timeframes 1m --years 2` as a background task. Dukascopy returned **706,212 M1 bars** covering 2024-04-14 → 2026-04-13 (16.5 MB parquet at `data/historical/XAUUSD_1m.parquet`). Needed for G.2h.3 Tier 5 infra validation and the optional G.5 tick reconstruction side quest.
+
+**G.2h.1 — vol_momentum_gold (second institutional strategy).** Added the `Tier` enum to `src/utils/types.py` (UNCLASSIFIED / INSTITUTIONAL_TREND / INSTITUTIONAL_MR / DAY / ULTRA_SCALP / AGGRESSIVE_RETAIL). Added a `tier: Tier = Tier.UNCLASSIFIED` kwarg to `BaseStrategy.__init__`. Extended `VolMomentumStrategy` and `DonchianEnsembleStrategy` to forward `leverage_range` + `tier` through super(). Set `donchian_gold.tier = Tier.INSTITUTIONAL_TREND`. Shipped `src/strategies/momentum/vol_momentum_gold.py` as a thin subclass of `VolMomentumStrategy` with `leverage_range=(10, 50)`, `tier=Tier.INSTITUTIONAL_MR`, session filter gate, and a London/NY helper (`_is_in_session`). Tuned via `scripts/tune_vol_momentum_gold.py` (216 configs across momentum_window × vol_lookback × vol_target × sl_atr_mult × long_only × session_filter):
+
+    Best: mw=240 vl=240 vt=0.20 sl=3.0 long_only=True session_filter=True
+    → return=+20.27%  max_dd=7.86%  Calmar=1.365  Sharpe=1.103  trades=120
+
+Locked as defaults. **Correlation gate**: rolling bar-to-bar return correlation with donchian_gold = **+0.2263** (well under the 0.5 gate). Both gates pass. 6 unit tests cover construction, tier, session helper.
+
+**G.2h.4 — LeverageBudgetAllocator.** `src/m3s/leverage_budget.py` with `LeverageBudgetAllocator(aggregate_cap, tier_floors)`. Method `allocate_leverage(snapshot, strategy_requests, strategy_tiers) -> LeverageBudgetDecision`. Algorithm:
+1. Each tier has a static floor fraction of `aggregate_cap`. Sum must be in [0, 1].
+2. Dynamic pool = `aggregate_cap × (1 - sum(floor_fractions))`.
+3. Pool split across tiers by sum of rolling_sharpe_30d (≥0 only) per tier.
+4. Cold start: if no Sharpe data, dynamic pool splits equally.
+5. Per-strategy grant = `min(requested, tier_budget / strategies_in_tier)`.
+
+Grants are NEVER larger than the original request (never up-sizes). Decision record includes per-tier budgets, dynamic pool size, reasoning string. 11 unit tests across empty-floors, all-floors (zero dynamic), mixed, cold-start, multi-strategy-per-tier, empty-requests.
+
+**Current test count:** 962 passing on feat/gold-refactor (935 + 10 shadow + 6 vol_momentum_gold + 11 leverage_budget = +27 net from the sprint so far).
+
+**G.2h.6 — Walk-forward donchian_gold retune** is running in the background. 6 folds (3mo train × 1mo test each) on 2yr XAUUSD 1h. Gate: mean OOS Calmar ≥ 0.3 before donchian_gold is safe for the G.3 paper clock baseline.
 
 ---
 

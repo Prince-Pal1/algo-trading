@@ -21,7 +21,7 @@ import pandas as pd
 
 from src.utils.config import get_config
 from src.utils.logger import get_logger
-from src.utils.types import RiskProfile, Signal
+from src.utils.types import RiskProfile, Signal, Tier
 
 log = get_logger("strategy")
 
@@ -43,19 +43,8 @@ class BaseStrategy(ABC):
         risk_profile: RiskProfile = RiskProfile.SAFE,
         max_risk_per_trade: float = 0.01,
         leverage_range: tuple[float, float] = (1.0, 1.0),
+        tier: Tier = Tier.UNCLASSIFIED,
     ):
-        """Construct a strategy.
-
-        Args:
-            leverage_range: (min, max) effective leverage this strategy is
-                designed to operate at. Default (1.0, 1.0) preserves the
-                pre-G.0c behavior (no leverage, crypto spot). Forex/metals
-                strategies should declare explicit ranges, e.g.:
-                    (10.0, 200.0) for a gold scalper
-                    (10.0, 50.0)  for a gold day trader
-                M3S reads this range and picks the actual level per regime
-                via Compounder.leverage_scalar (added in G.0c).
-        """
         self.name = name
         self.markets = [m.upper() for m in markets]
         self.timeframe = timeframe
@@ -67,6 +56,7 @@ class BaseStrategy(ABC):
                 f"and max must be >= min"
             )
         self.leverage_range = (float(leverage_range[0]), float(leverage_range[1]))
+        self.tier = tier
 
         # State — auto-managed by process()
         self._prev_features: pd.Series | None = None

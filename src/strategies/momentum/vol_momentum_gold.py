@@ -1,4 +1,4 @@
-"""Session-filtered Donchian ensemble for XAUUSD with a declared leverage range."""
+"""Vol-scaled momentum for XAUUSD with leverage_range + session filter."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from src.strategies.trend_following.donchian_ensemble import DonchianEnsembleStrategy
+from src.strategies.momentum.vol_momentum import VolMomentumStrategy
 from src.utils.config import get_config
 from src.utils.types import RiskProfile, Signal, SignalAction, Tier
 
@@ -18,11 +18,8 @@ NY_END_UTC = (16, 30)
 
 
 def _in_window(hm: tuple[int, int], start: tuple[int, int], end: tuple[int, int]) -> bool:
-    h, m = hm
-    sh, sm = start
-    eh, em = end
-    now = h * 60 + m
-    return (sh * 60 + sm) <= now <= (eh * 60 + em)
+    now = hm[0] * 60 + hm[1]
+    return (start[0] * 60 + start[1]) <= now <= (end[0] * 60 + end[1])
 
 
 def _is_in_session(ts_ms: int) -> bool:
@@ -35,27 +32,27 @@ def _is_in_session(ts_ms: int) -> bool:
     )
 
 
-class DonchianGoldStrategy(DonchianEnsembleStrategy):
+class VolMomentumGoldStrategy(VolMomentumStrategy):
     def __init__(
         self,
-        name: str = "donchian_gold",
+        name: str = "vol_momentum_gold",
         markets: list[str] | None = None,
         timeframe: str = "1h",
         risk_profile: RiskProfile = RiskProfile.MODERATE,
-        max_risk_per_trade: float = 0.02,  # tuned: +38% / 12% DD / Calmar 1.675
+        max_risk_per_trade: float = 0.01,
         *,
         leverage_range: tuple[float, float] = (10.0, 50.0),
-        session_filter: bool = True,
-        dc_short: int = 20,
-        dc_medium: int = 55,
-        dc_long: int = 120,
+        session_filter: bool = True,  # tuned: +20.27% / Calmar 1.365
+        momentum_window: int = 240,   # tuned
+        vol_lookback: int = 240,      # tuned
+        vol_target: float = 0.20,     # tuned
         atr_period: int = 14,
-        sl_atr_mult: float = 3.0,  # tuned
-        max_hold_bars: int = 120,
+        sl_atr_mult: float = 3.0,     # tuned
+        max_hold_bars: int = 168,
         cooldown_bars: int = 5,
-        min_channels: int = 2,
-        long_only: bool = False,
-        adx_trend_threshold: float | None = 25.0,  # tuned
+        long_only: bool = True,       # tuned: long-only gave better Calmar on gold uptrend
+        rebalance_interval: int = 24,
+        momentum_threshold: float = 0.0,
     ):
         super().__init__(
             name=name,
@@ -64,17 +61,17 @@ class DonchianGoldStrategy(DonchianEnsembleStrategy):
             risk_profile=risk_profile,
             max_risk_per_trade=max_risk_per_trade,
             leverage_range=leverage_range,
-            tier=Tier.INSTITUTIONAL_TREND,
-            dc_short=dc_short,
-            dc_medium=dc_medium,
-            dc_long=dc_long,
+            tier=Tier.INSTITUTIONAL_MR,
+            momentum_window=momentum_window,
+            vol_lookback=vol_lookback,
+            vol_target=vol_target,
             atr_period=atr_period,
             sl_atr_mult=sl_atr_mult,
             max_hold_bars=max_hold_bars,
             cooldown_bars=cooldown_bars,
-            min_channels=min_channels,
             long_only=long_only,
-            adx_trend_threshold=adx_trend_threshold,
+            rebalance_interval=rebalance_interval,
+            momentum_threshold=momentum_threshold,
         )
         self.session_filter = session_filter
 
@@ -88,18 +85,16 @@ class DonchianGoldStrategy(DonchianEnsembleStrategy):
         if signal is None:
             return None
 
-        # Always allow exits (CLOSE) regardless of session; only gate entries.
+        # Always allow exits; only gate entries on session
         if signal.action in (SignalAction.LONG, SignalAction.SHORT) and self.session_filter:
             ts_ms = int(features.get("timestamp", 0) or 0)
             if not _is_in_session(ts_ms):
-                # Roll back the position-bookkeeping that the parent did.
-                self._bars_in_position = 0
                 return None
 
         return signal
 
     @classmethod
-    def from_config(cls, name: str = "donchian_gold") -> "DonchianGoldStrategy":
+    def from_config(cls, name: str = "vol_momentum_gold") -> "VolMomentumGoldStrategy":
         cfg = get_config()
         strat_cfg = cfg.get_strategy(name)
         lr = strat_cfg.get("leverage_range", [10.0, 50.0])
@@ -110,15 +105,15 @@ class DonchianGoldStrategy(DonchianEnsembleStrategy):
             risk_profile=RiskProfile(strat_cfg.get("risk_profile", "MODERATE")),
             max_risk_per_trade=strat_cfg.get("max_risk_per_trade", 0.01),
             leverage_range=(float(lr[0]), float(lr[1])),
-            session_filter=strat_cfg.get("session_filter", True),
-            dc_short=strat_cfg.get("dc_short", 20),
-            dc_medium=strat_cfg.get("dc_medium", 55),
-            dc_long=strat_cfg.get("dc_long", 120),
+            session_filter=strat_cfg.get("session_filter", False),
+            momentum_window=strat_cfg.get("momentum_window", 168),
+            vol_lookback=strat_cfg.get("vol_lookback", 168),
+            vol_target=strat_cfg.get("vol_target", 0.15),
             atr_period=strat_cfg.get("atr_period", 14),
-            sl_atr_mult=strat_cfg.get("sl_atr_mult", 2.5),
-            max_hold_bars=strat_cfg.get("max_hold_bars", 120),
+            sl_atr_mult=strat_cfg.get("sl_atr_mult", 3.0),
+            max_hold_bars=strat_cfg.get("max_hold_bars", 168),
             cooldown_bars=strat_cfg.get("cooldown_bars", 5),
-            min_channels=strat_cfg.get("min_channels", 2),
             long_only=strat_cfg.get("long_only", False),
-            adx_trend_threshold=strat_cfg.get("adx_trend_threshold", 20.0),
+            rebalance_interval=strat_cfg.get("rebalance_interval", 24),
+            momentum_threshold=strat_cfg.get("momentum_threshold", 0.0),
         )
