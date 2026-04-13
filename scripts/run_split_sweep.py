@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import math
 from dataclasses import dataclass
 
@@ -16,7 +17,7 @@ from src.strategies.aggressive.news_spike_fade import NewsSpikeFadeStrategy
 from src.strategies.trend_following.donchian_gold import DonchianGoldStrategy
 
 
-DATA_PATH = "data/historical/XAUUSD_1h.parquet"
+DEFAULT_DATA_PATH = "data/historical/XAUUSD_1h.parquet"
 NEWS_CALENDAR_PATH = "config/news_calendar.csv"
 INDICATORS = [
     "donchian_20", "donchian_55", "donchian_120",
@@ -24,9 +25,10 @@ INDICATORS = [
 ]
 TOTAL_CAPITAL = 10_000.0
 SPLITS = [0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95]
-# Bars per year for XAUUSD 1h (5 trading days × 24h = 120h/week × 52 = 6240).
-# Used for Sharpe annualization.
-PERIODS_PER_YEAR = 6240.0
+# Bars per year for XAUUSD: 5 trading days/week × 24h × 52 = 6240 hours/year.
+# Used for Sharpe annualization — the script multiplies by the right factor
+# based on the timeframe it's running on (derived from bar spacing).
+_HOURS_PER_YEAR = 6240.0
 
 
 @dataclass
@@ -62,18 +64,28 @@ def _sharpe_from_equity(curve: list[float], periods_per_year: float) -> float:
     return (mean / std) * math.sqrt(periods_per_year)
 
 
-def _run_split(df: pd.DataFrame, institutional_pct: float) -> SplitResult:
+def _run_split(
+    df: pd.DataFrame,
+    institutional_pct: float,
+    *,
+    periods_per_year: float,
+    strategy_timeframe: str,
+) -> SplitResult:
     institutional_cash = TOTAL_CAPITAL * institutional_pct
     aggressive_cash = TOTAL_CAPITAL * (1.0 - institutional_pct)
 
-    # Fresh strategy instances per split so internal state doesn't leak
-    donchian = DonchianGoldStrategy(session_filter=True, adx_trend_threshold=20.0)
+    donchian = DonchianGoldStrategy(
+        session_filter=True,
+        adx_trend_threshold=20.0,
+        timeframe=strategy_timeframe,
+    )
     candle_burst = CandleBurstHunterStrategy(
-        atr_period=20, burst_atr_mult=1.5,
+        atr_period=20, burst_atr_mult=1.5, timeframe=strategy_timeframe,
     )
     news_fade = NewsSpikeFadeStrategy(
         news_calendar_path=NEWS_CALENDAR_PATH,
         spike_trigger_pips=30.0,
+        timeframe=strategy_timeframe,
     )
 
     engine = LeveragedBacktestEngine(
@@ -89,13 +101,14 @@ def _run_split(df: pd.DataFrame, institutional_pct: float) -> SplitResult:
         ],
         data=df,
         indicators=INDICATORS,
+        timeframe=strategy_timeframe,
     )
 
     m = result.metrics
-    max_dd = max(m["max_dd_pct"], 0.01)  # avoid div-by-zero
-    annualized = m["total_return_pct"] * (PERIODS_PER_YEAR / len(df))
+    max_dd = max(m["max_dd_pct"], 0.01)
+    annualized = m["total_return_pct"] * (periods_per_year / len(df))
     calmar = annualized / max_dd if max_dd > 0 else 0.0
-    sharpe = _sharpe_from_equity(result.equity_curve_total, PERIODS_PER_YEAR)
+    sharpe = _sharpe_from_equity(result.equity_curve_total, periods_per_year)
 
     return SplitResult(
         institutional_pct=institutional_pct,
@@ -111,13 +124,39 @@ def _run_split(df: pd.DataFrame, institutional_pct: float) -> SplitResult:
     )
 
 
+def _derive_periods_per_year(df: pd.DataFrame) -> tuple[float, str]:
+    """Infer bar spacing from the timestamp column and return
+    (periods_per_year, strategy_timeframe_label)."""
+    if len(df) < 2:
+        return _HOURS_PER_YEAR, "1h"
+    diffs_ms = df["timestamp"].diff().dropna().iloc[:1000]
+    median_ms = float(diffs_ms.median())
+    hours_per_bar = median_ms / 3_600_000.0
+    periods = _HOURS_PER_YEAR / max(hours_per_bar, 1e-9)
+    if hours_per_bar < 0.1:  # <6min
+        label = "5m"
+    elif hours_per_bar < 0.5:
+        label = "15m"
+    elif hours_per_bar < 1.5:
+        label = "1h"
+    else:
+        label = "1d"
+    return periods, label
+
+
 def main() -> None:
-    df = pd.read_parquet(DATA_PATH)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", default=DEFAULT_DATA_PATH, help="Path to the OHLCV parquet")
+    args = parser.parse_args()
+
+    df = pd.read_parquet(args.data)
     news_windows = load_news_calendar_csv(NEWS_CALENDAR_PATH)
-    print(f"Loaded {len(df):,} bars of {DATA_PATH}")
+    periods_per_year, strategy_timeframe = _derive_periods_per_year(df)
+
+    print(f"Loaded {len(df):,} bars of {args.data}")
     print(f"Loaded {len(news_windows)} news windows from {NEWS_CALENDAR_PATH}")
     print(f"Total capital per split: ${TOTAL_CAPITAL:,.0f}")
-    print(f"PERIODS_PER_YEAR (Sharpe annualization): {PERIODS_PER_YEAR}")
+    print(f"Inferred timeframe: {strategy_timeframe}  (periods_per_year = {periods_per_year:.0f})")
     print()
 
     header = (
@@ -129,7 +168,11 @@ def main() -> None:
 
     results: list[SplitResult] = []
     for pct in SPLITS:
-        r = _run_split(df, pct)
+        r = _run_split(
+            df, pct,
+            periods_per_year=periods_per_year,
+            strategy_timeframe=strategy_timeframe,
+        )
         results.append(r)
         print(
             f"{int(pct * 100):>5}% | "

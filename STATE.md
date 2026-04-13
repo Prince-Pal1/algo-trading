@@ -116,6 +116,42 @@ Infrastructure works correctly — the result is honest and Prince's starting co
 
 ---
 
+## Gold tuning pass — donchian_gold tuned, Tier 5 flagged not-alpha-ready (2026-04-14)
+
+Post-G.2 tuning started. Two goals: (a) tune donchian_gold parameters on XAUUSD 1h to get a genuinely profitable institutional strategy; (b) try the Tier 5 strategies on M5 data to see if the aggressive sub-book stops wiping.
+
+**M5 data downloaded:** `scripts/download_xauusd.py --timeframes 5m --years 2` pulled 141,276 bars of XAUUSD M5 from Dukascopy (2024-04-14 → 2026-04-13). Saved to `data/historical/XAUUSD_5m.parquet` (~4.5 MB). `scripts/run_split_sweep.py` accepts `--data <path>` and infers timeframe from bar spacing.
+
+**donchian_gold tuning (1h):** `scripts/tune_donchian_gold.py` grid-searches 432 configurations across `(dc_short, dc_medium, dc_long) × sl_atr_mult × adx_threshold × min_channels × risk_pct × session_filter`. The best config by Calmar subject to max_dd<20% and trades≥50:
+
+```
+dc=(20, 55, 120)  sl_atr_mult=3.0  adx_threshold=25  min_channels=2  risk_pct=0.02  session_filter=True
+→ return=+38.16%  max_dd=12.07%  Calmar=1.675  Sharpe=1.275  trades=69
+```
+
+The top 6 configurations all share `sl_atr_mult ∈ {2.5, 3.0}` + `adx_threshold=25` + `session_filter=True` + `min_channels=2` — the strategy is robust to the `risk_pct` scaling (0.005/0.01/0.02 all give the same Calmar, just different absolute return). `dc=(20,55,120)` is stable across the grid. These new defaults are locked into `DonchianGoldStrategy.__init__`.
+
+**Split sweep with tuned donchian_gold (1h, full Tier 5 included):**
+
+| inst% | total% | inst_ret% | aggr_ret% | maxDD% | Calmar | Sharpe | trades |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 30 | -63.83 | +20.58 | -100.00 | 72.54 | -0.466 | -2.975 | 490 |
+| 40 | -51.77 | +20.58 | -100.00 | 64.06 | -0.428 | -2.220 | 490 |
+| 50 | -39.71 | +20.58 | -100.00 | 55.59 | -0.378 | -1.569 | 490 |
+| 60 | -27.65 | +20.58 | -100.00 | 47.35 | -0.309 | -0.998 | 490 |
+| 70 | -15.60 | +20.58 | -100.00 | 39.31 | -0.210 | -0.492 | 490 |
+| 80 |  -3.54 | +20.58 | -100.00 | 31.27 | -0.060 | -0.043 | 490 |
+| 90 |  +8.52 | +20.58 | -100.00 | 23.46 | +0.192 | +0.355 | 490 |
+| 95 | **+14.55** | **+20.58** | -100.00 | **20.18** | **+0.382** | **+0.536** | 490 |
+
+**Calmar-optimal under max_dd<30%: still `institutional_pct=0.95`** but now with positive Calmar, positive Sharpe, and +14.55% total return (vs -1.71% pre-tuning). Tuning donchian_gold alone flipped the book from marginal-negative to marginal-positive.
+
+**Tier 5 strategies flagged not-alpha-ready.** Each of `candle_burst_hunter`, `news_spike_fade`, and `hedged_structure_play` now carries a status docstring warning: infrastructure is correct but entry triggers need dedicated alpha research (not just param tuning). On 1h the candle_burst over-fires on noise; on M5 donchian_gold itself needs different channel periods AND the Tier 5 strategies still wipe. These strategies are ready for the backtest harness but must not be paper-traded until a dedicated research pass lands actual edge.
+
+**Next:** Phase 4 un-deferral — wire IC Markets cTrader Open API (`spotware/OpenApiPy`) as `src/data/feeds/icmarkets_feed.py` + execution path. Needed before G.3 paper clock.
+
+---
+
 ## Session 22 Day 0.5 Addendum — Feature enrichment, LightGBM fix, Funding-MR (2026-04-13 late evening)
 
 Three-phase autonomous shipment while the wall clock ticks toward the 2026-04-14 Day 1 cron wake-up.

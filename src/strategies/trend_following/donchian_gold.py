@@ -42,7 +42,7 @@ class DonchianGoldStrategy(DonchianEnsembleStrategy):
         markets: list[str] | None = None,
         timeframe: str = "1h",
         risk_profile: RiskProfile = RiskProfile.MODERATE,
-        max_risk_per_trade: float = 0.01,
+        max_risk_per_trade: float = 0.02,  # tuned: +38% / 12% DD / Calmar 1.675
         *,
         leverage_range: tuple[float, float] = (10.0, 50.0),
         session_filter: bool = True,
@@ -50,12 +50,12 @@ class DonchianGoldStrategy(DonchianEnsembleStrategy):
         dc_medium: int = 55,
         dc_long: int = 120,
         atr_period: int = 14,
-        sl_atr_mult: float = 2.5,
+        sl_atr_mult: float = 3.0,  # tuned
         max_hold_bars: int = 120,
         cooldown_bars: int = 5,
         min_channels: int = 2,
         long_only: bool = False,
-        adx_trend_threshold: float | None = 20.0,
+        adx_trend_threshold: float | None = 25.0,  # tuned
     ):
         super().__init__(
             name=name,

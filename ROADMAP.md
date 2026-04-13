@@ -54,7 +54,7 @@ Master plan: `~/.claude/plans/parallel-noodling-goblet.md`. Branch: `feat/gold-r
 | G.2c | Inline leverage gates + RCU portfolio view + AGGRESSIVE_RETAIL profile | ✅ COMPLETE | `f891e57` | 14 | InlineLeverageGates + VersionedPortfolioView + profiles.aggressive_retail |
 | G.2g | Split sweep: Calmar-optimal institutional_pct | ✅ COMPLETE | `05494c8` | 1 | run_multi engine path + run_split_sweep.py; optimal = 0.95 (1h data, untuned aggressive) |
 | Merge | feat/gold-refactor → main | 📋 SCHEDULED | — | — | 2026-04-17 ~09:30 after Day 4 sprint cron |
-| Tuning | donchian_gold tuning + XAUUSD M5 download + Tier 5 re-tune on M5 | ❌ NOT STARTED | — | — | Post-merge. Required before G.3 shadow has meaningful data |
+| Tuning | donchian_gold tuning + XAUUSD M5 download + Tier 5 flagged not-alpha-ready | 🟡 PARTIAL | `<pending>` | — | donchian_gold tuned: +38.16% / 12% DD / Calmar 1.675 / Sharpe 1.275 on 1h. Tier 5 strategies need dedicated alpha research (infrastructure correct, entry triggers unviable). Split sweep post-tuning: institutional_pct=0.95 → +14.55% / 20% DD / Calmar +0.382 |
 | **G.3** | **30-day paper clock — IC Markets cTrader demo, 5-step ramp** | ❌ NOT STARTED | — | — | Needs Phase 4 (IC Markets connection) un-deferred + tuning pass |
 | G.3 Day 1-7 | Shadow mode, L=1 institutional only, aggressive disabled | ❌ NOT STARTED | — | — | — |
 | G.3 Day 8-14 | Institutional L=5, aggressive 1% sizing | ❌ NOT STARTED | — | — | — |

@@ -31,11 +31,8 @@ def main() -> None:
     print("-" * len(header))
 
     for L in LEVERAGE_LEVELS:
-        strat = DonchianGoldStrategy(
-            session_filter=True,
-            adx_trend_threshold=20.0,
-            max_risk_per_trade=0.01,
-        )
+        # Use tuned defaults (sl_atr_mult=3.0, adx=25, risk_pct=0.02)
+        strat = DonchianGoldStrategy()
         engine = LeveragedBacktestEngine(
             initial_institutional_cash=10_000.0,
             initial_aggressive_cash=0.0,

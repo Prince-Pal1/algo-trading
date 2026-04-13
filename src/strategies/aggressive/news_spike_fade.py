@@ -1,4 +1,12 @@
-"""NFP/FOMC spike-fade strategy for the aggressive retail sub-book."""
+"""NFP/FOMC spike-fade for the aggressive retail sub-book.
+
+STATUS: NOT ALPHA-READY. Infrastructure is correct (news window
+check, spike trigger, target/SL) but on 1h data the 20-minute news
+windows are smaller than the bar and the trigger rarely fires; on
+M5 it still loses. Needs alpha research + ideally tick-level data
+to fade spikes within the first 30s of the release. Do not paper
+trade until fixed.
+"""
 
 from __future__ import annotations
 

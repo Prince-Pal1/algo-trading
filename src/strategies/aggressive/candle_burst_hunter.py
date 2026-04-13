@@ -1,4 +1,13 @@
-"""Mid-candle momentum entry for the aggressive retail sub-book."""
+"""Mid-candle momentum entry for the aggressive retail sub-book.
+
+STATUS: NOT ALPHA-READY. This strategy has the right infrastructure
+(BaseStrategy contract, trailing stop, time stop, hard SL) but the
+entry trigger (`|close - open| > burst_atr_mult × ATR`) over-fires
+on bar-level data at any timeframe tested so far. On 2 years of
+XAUUSD 1h + M5 the aggressive sub-book wipes to -100%. Dedicated
+alpha research + param tuning required before paper trading.
+See STATE.md § Gold Phase G.2 tuning pass for details.
+"""
 
 from __future__ import annotations
 

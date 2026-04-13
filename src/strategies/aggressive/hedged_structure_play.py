@@ -1,22 +1,20 @@
 """Hedged structure-play state-machine strategy for the aggressive sub-book.
 
+STATUS: NOT ALPHA-READY. The state machine and structure-level
+helpers are correct but the primary entry seed is trivial (follows
+current bar direction) so the strategy opens a position on every
+reset and relies on the hedge mechanism to save bad entries —
+which fails because the structure-level resolver uses "nearest level
+above vs below" heuristically rather than a real break/hold signal.
+Needs dedicated alpha research before paper trading.
+
 State:
     INITIAL → primary open
     LONG/SHORT → primary running; if primary adverse by > hedge_trigger_pct,
-        open opposite hedge → enter HEDGED state
+        open opposite hedge → HEDGED
     HEDGED → wait for structure level; on trigger, close the leg going
-        against the structure direction → enter UNHEDGED state
+        against structure direction → UNHEDGED
     UNHEDGED → trail the remaining leg → exit
-
-This strategy needs the structure_levels helpers + the backtest engine's
-ability to manage multiple positions per strategy. For MVP we run the state
-machine inside on_features and emit signals as LONG/SHORT/CLOSE — the engine
-tracks positions but doesn't know about "primary vs hedge" semantics. We
-fake it by having the strategy track both legs internally and synthesize
-the right CLOSE events.
-
-Deferred refinement: when the engine supports multi-position-per-strategy
-cleanly (G.2c+), this strategy will emit explicit HEDGE signals.
 """
 
 from __future__ import annotations
