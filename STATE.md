@@ -1,19 +1,19 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-04-13 (Session 22 compressed sprint Day 0.5 — validation + promotion layer shipped)
+**Last updated:** 2026-04-14 (Gold Phase G.2a→G.2f shipped on feat/gold-refactor worktree)
 
 ---
 
 ## Current Position
 
-**Active phase:** Phase 3b-2 M3S shadow + Phase 3c meta-labeling shadow running in parallel. Validation layer, promotion scripts, feature enrichment, and project status aggregator all shipped. All code is in place for the 2026-04-16/17 automated cron promotions — wall-clock is the only remaining blocker (4-day shadow clock).
-**Next session target:** Nothing manual needed before the 2026-04-16 09:07 CronCreate wake-up. If interrupted earlier, `cat data/project_status.md` gives single-pane status; `./scripts/promote_m3s_authoritative.sh --dry-run` re-runs all 4 gates.
-**Engine status:** Paper trading running via launchd (risk-server + engine + watchdog), HEALTHY. M3S active in shadow mode (day 1/4 compressed clock). Meta-label filter active in shadow mode (4 LR models loaded, AUC 0.486-0.571).
-**Test suite:** 658 passing, 0 skipped.
-**Portfolio:** bb_rsi_mr_opt 40% / donchian_ensemble_adx 30% / vol_momentum 30% + funding_carry live. Sharpe 2.318 baseline (backtest, 2yr walk-forward).
-**Meta-label training:** 2,819 harvested audit rows from backtests; 4 LR models trained with 24-key feature schema (15 populated + 9 placeholders for future enrichment); LightGBM rejected by A/B sanity check (uplift < 0.03 AUC threshold).
+**Active branch:** `feat/gold-refactor` at `/Users/prince/algo-trading-gold` (git worktree). Main dir at `/Users/prince/algo-trading` is untouched, still running the 3b-2 M3S shadow + 3c meta-label shadow clocks toward the 2026-04-16/17 automated cron promotions.
+**Active phase (gold worktree):** Phase G.2 Gold Leveraged Stack. G.0 / G.0b / G.0c / G.1 / G.2a / G.2a.2 / G.2a.3 / G.2a.4 / G.2b / G.2d / G.2e / G.2f all shipped. G.2c (inline leverage gates + RCU portfolio view + AGGRESSIVE_RETAIL profile) currently in progress — inline_leverage.py and portfolio_view.py written, tests next. After G.2c, G.2g runs the split sweep to pick the Calmar-optimal institutional_pct from [0.30, 0.95].
+**Next session target:** Finish G.2c (tests + commit) then G.2g (split sweep script + 2yr backtest per split + pick optimal + commit). After G.2 is complete, schedule the merge of feat/gold-refactor → main for 2026-04-17 ~09:30 after Day 4 sprint cron completes.
+**Engine status (main branch, unchanged):** Paper trading running via launchd, HEALTHY. M3S active in shadow mode. Meta-label filter active in shadow mode.
+**Test suite:** 905 passing as of commit `19592de` on feat/gold-refactor (734 baseline + G.0/G.1/G.2a-G.2f additions).
+**Gold portfolio plan:** Two-book — institutional (Tiers 1-4, donchian_gold + future additions, aggregate leverage cap 80×, weekly HWM-gated compounding) + aggressive (Tier 5, candle_burst_hunter + news_spike_fade + hedged_structure_play, 1000× position scalping at 5% sub-book sizing with daily/weekly kill switches). Split is configurable; G.2g picks the Calmar-optimal value.
 
-> See `ROADMAP.md` for phase table. See `SESSIONS_ARCHIVE.md` for Sessions 8-17.
+> See `ROADMAP.md` § Phase G for the G.2 sub-phase table. See `SESSIONS_ARCHIVE.md` for Sessions 8-17.
 
 ---
 
@@ -39,6 +39,51 @@ Working in git worktree at `/Users/prince/algo-trading-gold` on branch `feat/gol
 The vol_momentum failure is mostly the hardcoded `sqrt(8760)` annualization (Blocker 1) producing wrong vol targets for 24/5 forex. G.0 refactor will partially fix this. The bb_rsi_mr failure is structural (gold trends persistently; mean reversion doesn't fit) — that strategy stays crypto-only.
 
 Next: G.0 M3S forex-readiness refactor (thread `periods_per_year` through tracker/evaluation/meta_backtest), then G.0b instrument metadata, then G.0c leverage refactor.
+
+---
+
+## Gold Phase G.2 — Leveraged backtest engine + two-book architecture (feat/gold-refactor, 2026-04-14)
+
+All of G.0, G.0b, G.0c, G.1 landed earlier. G.2 is the substantive engineering phase — bringing up a fresh leveraged engine alongside the existing crypto engine, wiring M3S leverage policy, porting the first gold strategy, and building the Tier 5 aggressive sub-book. Worktree stays isolated; main branch unchanged throughout.
+
+**G.2a — Leveraged Book + CFD margin model (`f514862`).** `src/backtest/book.py`. `LeveragedPosition` with immutable `entry_margin = notional / leverage`, `SubBookState` with cash/used_margin/floating_pnl/equity/margin_level on-demand (CFD convention: cash doesn't move on open, only on realized P&L at close), `Book` top-level with institutional + aggressive sub-books independent. Broker stop-out at 50% margin level (XM / IC Markets norm), cascade-close worst-first by pnl/margin ratio. The load-bearing test encodes the plan's worked example: $1000 account, 5% position at 1000× on XAUUSD at $2400 → 20.833 oz → 0.1% adverse: margin level 1900% (open), 1.0% adverse: 1000% (open), ~1.95% adverse: 50% (stop-out). 32 tests.
+
+**G.2a.2 — Broker-accurate costs (`a803529`).** `src/backtest/costs.py`. `SpreadSlippageConfig` (base_spread_pips=0.13 for IC Markets Raw, ATR-scaled slippage, news_spread_mult=10× / news_slip_mult=8×), `CommissionSchedule` ($3/side per 100oz lot), `NewsWindow` (closed [start_ms, end_ms]), `ICMarketsMetalFeeModel` convenience wrapper, `load_news_calendar_csv`. 20 tests.
+
+**G.2a.3 — Brownian bridge intrabar path (`4b6edd0`).** `src/backtest/path.py`. `BrownianBridgeModel` with seeded random from `(run_id, bar_idx)` for reproducibility. For a touched level: linear interpolation between open and close when monotonic path crosses; deterministic spike fraction in [0.15, 0.50] when off the path. `check_sl_tp_hits(bar, side, sl, tp, path_model, bar_idx) → (label, price)`. Also a `PessimisticPathModel` (worst-case adverse first) for conservative lower bounds. 27 tests.
+
+**G.2a.4 — LeveragedBacktestEngine (`90fc6c7`).** `src/backtest/leveraged_engine.py`. Fresh engine (not a refactor of the crypto one) that glues Book + costs + path together. Bar loop: (1) intrabar SL/TP check via path model → close positions; (2) broker stop-out on worst-case intrabar marks per sub-book; (3) strategy.process() → signal; (4) open/close positions; (5) update equity curves + peak trackers. Final flat close of still-open positions at last bar. 10 smoke tests plus 2 M3S integration tests (added in G.2b).
+
+**G.2b — M3S.request_leverage + geometric-mean blend + leverage_grants store (`ae6213e`).** `src/m3s/leverage_grants.py` (SQLite append store on `data/trades.db :: leverage_grants`), `src/utils/types.py::LeverageGrant` + `LeverageReasonCode` msgspec types, `M3S.request_leverage(strategy, conviction, declared_range, current_aggregate)` with 5 reason codes (FULL, CAPPED_BY_AGGREGATE, CAPPED_BY_REGIME, CAPPED_BY_CONVICTION, CAPPED_BY_CAP). `Compounder.risk_scalar(snapshot, leverage=1.0)`: at L≤1 takes the legacy multiplicative product (bit-exact with pre-G.2b — crypto unchanged); at L>1 uses geometric-mean blend of (vol × pace × cvar) + explicit `leverage_damping = exp(-stress × log1p(L) × 0.1)`. Prevents factors from fighting at high leverage: three 0.7s no longer → 0.343. `LeveragedBacktestEngine` now accepts optional `m3s:M3S` kwarg and routes every open through `request_leverage`. 30 tests (18 request_leverage + 12 risk_scalar leverage paths), 250 existing M3S tests unchanged.
+
+**G.2d — donchian_gold (`4907e7c`).** `src/strategies/trend_following/donchian_gold.py`. Thin wrapper over `DonchianEnsembleStrategy` with `leverage_range=(10.0, 50.0)`, default XAUUSD market, and session filter for London (07:00-11:00 UTC) and NY (13:30-16:30 UTC). Exits (CLOSE signals) are NOT session-gated so positions can close any time. `DonchianEnsembleStrategy.__init__` now forwards `leverage_range` through to `BaseStrategy` (default (1,1) preserves existing crypto callers). 10 tests. Initial leverage sweep `scripts/run_donchian_gold_sweep.py` on 2 years of XAUUSD 1h with crypto defaults:
+
+| L | return% | inst% | maxDD% | trades | stopouts |
+|---:|---:|---:|---:|---:|---:|
+| 1  | -2.65 | -2.65 | 8.50  | 41 | 0 |
+| 5  | +3.46 | +3.46 | 12.26 | 91 | 0 |
+| 10 | +3.46 | +3.46 | 12.26 | 91 | 0 |
+| 25 | +3.46 | +3.46 | 12.26 | 91 | 0 |
+| 50 | +3.46 | +3.46 | 12.26 | 91 | 0 |
+
+L=1 rejects 50 trades due to insufficient free margin (risk-based quantity on wide XAUUSD stops means notional > $10k at L=1). L≥5 captures the full trade set but P&L is identical across levels because risk-based sizing + one-position-per-strategy caps per-trade P&L independently of L. To get leverage-driven return amplification we need margin-based sizing (Tier 5 path). Parameter tuning for donchian_gold is deferred to a dedicated tuning pass.
+
+**G.2e — Tier 5 infrastructure (`d847e4c`).** Three components.
+- `src/backtest/structure_levels.py` — `prior_day_high_low`, `session_open_range`, `round_number_levels`, `swing_high_low`, `fib_retracements`, `collect_levels`, `nearest_level_above/below`. 14 tests.
+- `src/m3s/aggressive_compounder.py` — `AggressiveRetailCompounder` with fixed-% sizing (default 5%), high-conviction override to 10% cap, daily loss kill (30%), total DD kill (50%) + 7-day cooldown, weekly Monday refund from main account. No vol targeting, no HWM gate — aggressive strategies NEED to trade through drawdowns and high-vol periods; institutional discipline would neutralize the edge. 13 tests.
+- `config/news_calendar.csv` — 49 windows for NFP / FOMC / CPI / ECB covering 2025-01 through 2026-04, loaded via existing `load_news_calendar_csv`.
+- `config/settings.toml [m3s_gold]` — aggregate_leverage_cap=80.0, `[m3s_gold.allocation]` institutional_pct=0.70 default (configurable, G.2g sweep will pick optimum), `[m3s_gold.aggressive_sub_book]` rails.
+
+**G.2f — Three Tier 5 aggressive strategies (`19592de`).**
+- `src/strategies/aggressive/candle_burst_hunter.py` — enters on any bar whose `|close - open| > burst_atr_mult × ATR`. Trailing stop activates at +5 pips, trails at 2 pips from best price. Hard SL at 0.3% of entry. 18-bar max hold. `leverage_range=(500, 1000)`.
+- `src/strategies/aggressive/news_spike_fade.py` — loads news calendar, waits for a bar inside any window with `|close - open| > 30 pips`, fades direction. Exits at 50% of spike distance, 40-pip hard SL, 3-bar timeout. `leverage_range=(500, 1000)`.
+- `src/strategies/aggressive/hedged_structure_play.py` — state machine (FLAT → PRIMARY_{LONG,SHORT} → HEDGED_FROM_{LONG,SHORT} → UNHEDGED_{LONG,SHORT}). Primary enters on bar direction, hedge fires when adverse > 1%, closes the against-structure leg when price touches any structure level from G.2e's helpers, force-closes both after max_bars_in_hedge. For MVP the strategy runs the state machine inside `on_features` and synthesizes CLOSE events — multi-position-per-strategy in the engine itself is a follow-up when needed. `leverage_range=(500, 1000)`.
+
+All three strategies emit signals through `BaseStrategy.process()`, so they drop into the existing engine without changes. 13 tests covering entry triggers, SL/trail/timeout exits, state machine transitions.
+
+**G.2c — Inline leverage gates + RCU portfolio view + AGGRESSIVE_RETAIL profile (IN PROGRESS).** `src/risk/inline_leverage.py` written with `InlineLeverageGates` class (3 gates: per-position, aggregate, liquidation buffer), `INSTITUTIONAL_PROFILE` and `AGGRESSIVE_RETAIL_PROFILE` presets (the aggressive one has gates globally off). `src/m3s/portfolio_view.py` written with `VersionedPortfolioView` (lock-free RCU snapshot via tuple-assign, atomic read under GIL). `config/risk.toml` has a new `[profiles.aggressive_retail]` section. Tests next (test_inline_leverage.py pending, test_portfolio_view.py pending), then commit. After G.2c, G.2g runs the split sweep to pick the Calmar-optimal `institutional_pct` across [0.30, 0.95].
+
+**Current test count:** 905 passing on feat/gold-refactor (baseline 734 + G.0/G.1/G.2a/G.2a.2/G.2a.3/G.2a.4/G.2b/G.2d/G.2e/G.2f = +171). Zero regressions on the crypto path throughout.
 
 ---
 

@@ -52,6 +52,10 @@
 | Cointegration Pairs | `src/strategies/stat_arb/pairs_trading.py` | `statsmodels`, Johansen test | Pairs Backtester | ✅ implemented (no usable cointegration found in 2024-2026 crypto — code ready for future use) |
 | BTC-Neutral MR | `src/strategies/stat_arb/btc_neutral_mr.py` | numpy (rolling OLS), BaseStrategy | Backtest CLI | ❌ dead (Sharpe negative on all params — z-score reverts but price doesn't profit) |
 | Donchian Ensemble | `src/strategies/trend_following/donchian_ensemble.py` | Feature Engine (donchian_N), BaseStrategy | Router, Backtest CLI | ✅ working (Sharpe 1.389 NEAR, 1.376 AVAX, 1.253 DOT; trend-following complement to bb_rsi_mr) |
+| Donchian Gold (leveraged) | `src/strategies/trend_following/donchian_gold.py` | DonchianEnsembleStrategy, stdlib | LeveragedBacktestEngine | ✅ G.2d (session-filtered XAUUSD, leverage_range=(10,50), London/NY only) |
+| Candle Burst Hunter | `src/strategies/aggressive/candle_burst_hunter.py` | BaseStrategy, Feature Engine (ATR) | Tier 5 sub-book | ✅ G.2f (mid-candle momentum entry, trailing stop, 0.3% hard SL, leverage_range=(500,1000)) |
+| News Spike Fade | `src/strategies/aggressive/news_spike_fade.py` | BaseStrategy, NewsWindow, news_calendar.csv | Tier 5 sub-book | ✅ G.2f (fade NFP/FOMC spikes > 30 pips, 50% spike-distance target, 40-pip SL) |
+| Hedged Structure Play | `src/strategies/aggressive/hedged_structure_play.py` | BaseStrategy, structure_levels | Tier 5 sub-book | ✅ G.2f (state machine FLAT→PRIMARY→HEDGED→UNHEDGED, structure-level decision) |
 | Vol-Scaled Momentum | `src/strategies/momentum/vol_momentum.py` | numpy (momentum + vol), BaseStrategy | Router, Backtest CLI | ✅ working (Sharpe 0.919 XRP, 0.659 DOT; momentum with inverse-vol sizing) |
 | VPIN Calculator | `src/data/vpin.py` | `scipy.stats`, numpy | Regime Filter | ✅ implemented (BVC-based VPIN from OHLCV candles) |
 | VPIN Regime Filter | `src/strategies/filters/regime_filter.py` | VPIN Calculator | All Strategies | ✅ implemented (kill switch at VPIN > 0.7) |
@@ -101,6 +105,7 @@
 | Inline Risk Client | `src/risk/client.py` | RiskManager | BacktestEngine | ✅ working (+ set_mode()) |
 | Correlation Limits | `src/risk/correlation.py` | `pandas`, `numpy` | Risk Server | 📋 Phase 3b |
 | Greeks Risk | `src/risk/greeks_risk.py` | `py_vollib` | Risk Server | 📋 Phase 6 |
+| Inline Leverage Gates | `src/risk/inline_leverage.py` | Types (Signal) | LeveragedBacktestEngine, future inline fast path | ✅ G.2c (in-process 3 gates: per-position / aggregate / liquidation buffer; INSTITUTIONAL + AGGRESSIVE_RETAIL profiles) |
 
 ### Strategies — Phase 3b-3 Additions (Python -- src/strategies/)
 
@@ -157,6 +162,9 @@ Phase 3b-2. Canonical plan: `docs/planning/m3s_plan_v1.md` § v1.1 ADDENDUM. Sub
 | Deflated Sharpe Monitor | `scripts/deflated_sharpe_from_audit.py` | evaluation.py `_deflated_sharpe`, audit | Promotion Gate 4 | ✅ Session 22 Day 0.5 |
 | Project Status Aggregator | `scripts/project_status.py` | heartbeat/shadow/DSR JSON + TOML | launchd 30min | ✅ Session 22 Day 0.5 (data/project_status.md) |
 | Project Status Agent | `scripts/launchd/com.algo-trading.project-status.plist` | project_status.py | launchctl 1800s | ✅ Session 22 Day 0.5 (not yet loaded) |
+| Leverage Grant Store | `src/m3s/leverage_grants.py` | `sqlite3` | M3S.request_leverage | ✅ G.2b (data/trades.db :: leverage_grants table, append-only) |
+| Aggressive Retail Compounder | `src/m3s/aggressive_compounder.py` | stdlib | LeveragedBacktestEngine Tier 5 | ✅ G.2e (fixed-% sizing, daily/total DD kill switches, weekly refund from main) |
+| Versioned Portfolio View (RCU) | `src/m3s/portfolio_view.py` | stdlib | Inline leverage gates, future fast-path risk | ✅ G.2c (lock-free versioned snapshot for cross-layer state reads) |
 
 ### AI Agents (Python -- src/agents/)
 
@@ -188,6 +196,11 @@ Phase 3b-2. Canonical plan: `docs/planning/m3s_plan_v1.md` § v1.1 ADDENDUM. Sub
 | Test Protocols | `src/backtest/protocols.py` | Engine, Metrics, Downloader | Validator, CLI | ✅ working (smoke, spot_check, monte_carlo, crash_stress, sensitivity, psr, dsr) |
 | Crash Events DB | `config/crash_events.toml` | -- | Protocols (crash_stress) | ✅ working (6 events) |
 | Walk-Forward Validator | `src/backtest/walk_forward.py` | Backtest Engine | Research | ✅ working |
+| Leveraged Book | `src/backtest/book.py` | stdlib | LeveragedBacktestEngine | ✅ G.2a (LeveragedPosition, SubBookState, Book, CFD 50% stop-out, institutional+aggressive sub-books) |
+| Cost Models | `src/backtest/costs.py` | stdlib, csv | LeveragedBacktestEngine, Tier 5 strategies | ✅ G.2a.2 (ICMarketsMetalFeeModel: spread 0.13 pip + commission $3/lot/side + news windows) |
+| Intrabar Path | `src/backtest/path.py` | random, math | LeveragedBacktestEngine | ✅ G.2a.3 (BrownianBridgeModel + PessimisticPathModel + check_sl_tp_hits, deterministic via run_id+bar_idx) |
+| Leveraged Backtest Engine | `src/backtest/leveraged_engine.py` | Book, costs, path, FeatureEngine, BaseStrategy, M3S (optional) | Gold research, sweep scripts | ✅ G.2a.4 (fresh engine, separate from crypto BacktestEngine, integrates M3S.request_leverage when wired) |
+| Structure Levels | `src/backtest/structure_levels.py` | `pandas` | hedged_structure_play, future structure-aware strategies | ✅ G.2e (prior day H/L, session open ranges, round numbers, swing H/L, Fibonacci retraces) |
 
 ### Research Tooling (Python -- src/research/)
 

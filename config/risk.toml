@@ -57,3 +57,15 @@ drawdown_sensitivity = 0.5      # 50% of normal drawdown scaling
 drawdown_floor = 0.3            # Never reduce below 30% size
 use_risk_based_limits = true
 max_risk_pct_per_position = 0.04
+
+[profiles.aggressive_retail]
+# G.2c Tier 5 aggressive sub-book profile.
+# Leverage gates are DISABLED so 1000× retail scalping can run, but
+# fat_finger stays ACTIVE to prevent mis-keyed disasters.
+leverage_gate_per_position_enabled = false
+leverage_gate_aggregate_enabled = false
+liquidation_buffer_check_enabled = false
+fat_finger_max_value_usd_override = 100.0
+duplicate_filter_enabled = true
+daily_loss_limit_sub_book_pct = 0.30
+max_concurrent_aggressive_positions = 3

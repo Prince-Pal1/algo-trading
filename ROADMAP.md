@@ -1,8 +1,8 @@
 # Algo Trading — Roadmap & Phase Status
 
-**Last updated:** 2026-04-13 (Session 22 compressed sprint Day 0.5 — validation + promotion layer shipped)
-**Current phase:** 3b-2 (M3S) shadow mode ACTIVE + Phase 3c meta-labeling shadow mode ACTIVE. Validation layer (meta_label_shadow_check + deflated_sharpe_from_audit), promotion scripts (promote_m3s_authoritative.sh + promote_meta_label.sh), libomp+LightGBM available (LR still winning A/B), feature enrichment 15→24 keys, project_status.py aggregator shipped. 4 meta-label LR models trained on 2,819 harvested + retrained with 24-key schema. All 658 tests pass. M3S shadow clock day 1/4 (compressed from 7).
-**Next action:** Wall-clock gated: 4-day shadow clock → 2026-04-16 cron auto-runs promote_m3s_authoritative.sh + promote_meta_label.sh --to advisory. Manual interim: `cat data/project_status.md` at any time for single-pane status. Dry-run promotions validate end-to-end: `./scripts/promote_m3s_authoritative.sh --dry-run` shows 3/4 gates passing (clock blocks).
+**Last updated:** 2026-04-14 (Gold Phase G.2a→G.2f shipped on feat/gold-refactor worktree; G.2c in progress)
+**Current phase:** Phase G (Gold Leveraged Stack) on branch `feat/gold-refactor` @ `/Users/prince/algo-trading-gold`. Main branch (3b-2 M3S shadow + 3c meta-labeling shadow) is untouched and still running the 4-day clock toward 2026-04-16 cron promotion. G.2a-G.2f landed: LeveragedBacktestEngine + Book + costs + path + BrownianBridge + M3S.request_leverage + geometric-mean blend + leverage_grants store + donchian_gold + structure_levels + AggressiveRetailCompounder + news_calendar + 3 Tier 5 strategies (candle_burst_hunter, news_spike_fade, hedged_structure_play). 905 tests passing. G.2c (inline leverage gates + RCU portfolio view + AGGRESSIVE_RETAIL profile) in progress.
+**Next action:** Finish G.2c inline-gates + portfolio_view tests, then G.2g (split sweep: Calmar-optimal institutional_pct across [0.30, 0.95]). After G.2 completes, schedule merge of feat/gold-refactor → main for 2026-04-17 ~09:30 (after Day 4 sprint cron completes).
 
 > **Authority note:** This file is the **only** authoritative source for phase status. If any other file contradicts this, that other file is wrong — fix it to link here. See `CLAUDE.md` § Autonomous Workflow Protocol.
 
@@ -23,8 +23,39 @@
 | 6 | Options Module | Iron condor SPX positive 1-year | ❌ NOT STARTED | — | — |
 | 7 | Production Deployment | 7 days unattended on VPS | ❌ NOT STARTED | — | Phase 3-milestone + M3S |
 | 8 | Scale | 3+ strategies portfolio Sharpe >1.5 | 🟡 PARTIAL — 3 strategies live, Sharpe 2.318 in backtest only | Session 10-11, 14-16 | OOS portfolio validation on live paper data |
+| **G** | **Gold Leveraged Stack** | Two-book (institutional + aggressive) engine + donchian_gold + 3 Tier 5 strategies + split sweep | 🟡 **IN PROGRESS on `feat/gold-refactor`** | G.0-G.2f shipped (commits 54c0b62 → 19592de) | G.2c (inline gates) + G.2g (split sweep) before merge 2026-04-17 |
 
 **Legend:** ✅ complete · ❌ not started · 🟡 in progress/partial
+
+---
+
+## Phase G — Gold Leveraged Stack (feat/gold-refactor branch)
+
+Master plan: `~/.claude/plans/parallel-noodling-goblet.md`. Branch: `feat/gold-refactor` in worktree `/Users/prince/algo-trading-gold`. Main dir untouched through the in-flight sprint wakeups.
+
+### Sub-phase Table
+
+| # | Name | Status | Commit | Tests | Notes |
+|---|---|---|---|---|---|
+| G.0 | M3S forex-readiness refactor (`periods_per_year`) | ✅ COMPLETE | `9a78fd7` | — | Unblocks gold Sharpe math |
+| G.0b | Instrument metadata registry + market hours | ✅ COMPLETE | `20707f2` | — | XAUUSD registered, is_market_open |
+| G.0c.1 | Signal.leverage + BaseStrategy.leverage_range | ✅ COMPLETE | `374cab9` | — | Leverage first-class schema |
+| G.0c.2 | config/risk.toml [leverage] + RiskManager hard gates | ✅ COMPLETE | `5bef185` | — | 3 gates (per-position, aggregate, liquidation buffer) |
+| G.0c.3 | Compounder.target_leverage regime picker | ✅ COMPLETE | `3793dd8` | — | Mode-aware range interpolation |
+| G.1 | Dukascopy XAUUSD 1h download + existing strategies | ✅ COMPLETE | `54c0b62` | — | donchian_ensemble_adx: +35.65% / Sharpe 1.357 / 147 trades (2yr) |
+| G.2a | Leveraged Book + LeveragedPosition + 50% stop-out | ✅ COMPLETE | `f514862` | 32 | CFD-accurate margin accounting, institutional + aggressive sub-books |
+| G.2a.2 | ICMarketsMetalFeeModel (spread + commission + news) | ✅ COMPLETE | `a803529` | 20 | 0.13 pip spread + $3/lot/side commission |
+| G.2a.3 | Brownian bridge intrabar path reconstruction | ✅ COMPLETE | `4b6edd0` | 27 | Deterministic via (run_id, bar_idx) |
+| G.2a.4 | LeveragedBacktestEngine (fresh file) | ✅ COMPLETE | `90fc6c7` | 10 | New engine, zero risk to existing crypto engine |
+| G.2b | M3S.request_leverage + geometric-mean blend + grants store | ✅ COMPLETE | `ae6213e` | 30 | 5 reason codes, leverage damping, data/trades.db::leverage_grants |
+| G.2d | donchian_gold (session-filtered, leverage_range=(10,50)) | ✅ COMPLETE | `4907e7c` | 10 | London/NY session gate; L∈{1,5,10,25,50} sweep script |
+| G.2e | Tier 5 infra (structure_levels, aggressive compounder, news calendar) | ✅ COMPLETE | `d847e4c` | 27 | 49 news windows 2025-01→2026-04 + sub-book config |
+| G.2f | Tier 5 strategies (candle_burst, news_fade, hedged_structure) | ✅ COMPLETE | `19592de` | 13 | All 3 aggressive strategies + state machine |
+| G.2c | Inline leverage gates + RCU portfolio view + AGGRESSIVE_RETAIL profile | 🟡 **IN PROGRESS** | — | — | Extract gates from ZMQ RiskManager; lock-free snapshots |
+| G.2g | Split sweep: Calmar-optimal institutional_pct | ❌ NEXT | — | — | Sweep [0.30, 0.95] on 2yr XAUUSD 1h |
+| Merge | feat/gold-refactor → main | 📋 SCHEDULED | — | — | 2026-04-17 ~09:30 after Day 4 sprint cron |
+
+**Test counts:** 905 passing as of commit `19592de` (734 baseline + G.0/G.0c/G.1/G.2a-G.2f additions).
 
 ---
 
