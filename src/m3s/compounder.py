@@ -234,34 +234,33 @@ class Compounder:
 
     # ── Scalar composition (called on every signal) ─────────────────
 
-    def risk_scalar(self, snapshot: PortfolioSnapshot) -> float:
-        """Return the scalar to multiply into Signal.risk_pct.
-
-        Composition (all in [0, cap]):
-          - vol_target_scalar  — vol targeting vs realized portfolio vol
-          - mode_pace_scalar   — rolling-Sharpe pace dial (mode-clamped)
-          - cvar_scalar        — tail-risk protection (Tier 1 #5)
-          - dd_scalar          — DD freeze / halt
-        Final is clamped to [_SCALAR_HARD_FLOOR, _SCALAR_HARD_CEILING].
+    def risk_scalar(
+        self,
+        snapshot: PortfolioSnapshot,
+        leverage: float = 1.0,
+    ) -> float:
+        """Composition scalar for Signal.risk_pct. At leverage==1.0 uses the
+        legacy product (bit-exact with pre-G.2b); at leverage>1 uses geometric
+        mean + explicit leverage damping so factors don't fight at high L.
         """
-        # (1) DD halt — short-circuit before doing any other work.
         dd_scalar = self._dd_scalar(snapshot.drawdown_pct)
         if dd_scalar == 0.0:
             return 0.0
 
-        # (2) Vol targeting.
         vol_scalar = self._vol_target_scalar(snapshot)
-
-        # (3) Mode pace dial — dynamic compounding, rolling Sharpe based.
         pace_scalar = self._mode_pace_scalar(snapshot)
-
-        # (4) CVaR tail-risk scaling.
         cvar_scalar = self._cvar_scalar(snapshot) if self._cvar_enabled else 1.0
 
-        combined = vol_scalar * pace_scalar * cvar_scalar * dd_scalar
-        final = max(_SCALAR_HARD_FLOOR, min(_SCALAR_HARD_CEILING, combined))
+        if leverage <= 1.0:
+            combined = vol_scalar * pace_scalar * cvar_scalar * dd_scalar
+        else:
+            product = vol_scalar * pace_scalar * cvar_scalar
+            risk_geomean = product ** (1.0 / 3.0) if product > 0 else 0.0
+            stress = 1.0 - min(vol_scalar, pace_scalar, cvar_scalar)
+            leverage_damping = math.exp(-stress * math.log1p(leverage) * 0.1)
+            combined = risk_geomean * leverage_damping * dd_scalar
 
-        return final
+        return max(_SCALAR_HARD_FLOOR, min(_SCALAR_HARD_CEILING, combined))
 
     # ── Base advancement (called on scheduled tick or trade close) ──
 

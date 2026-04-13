@@ -115,6 +115,34 @@ class Signal(msgspec.Struct):
     margin_used_pct: float | None = None  # % of account margin this position would consume
 
 
+# ── M3S Leverage grants ──────────────────────────────────────────────
+
+
+class LeverageReasonCode(str, enum.Enum):
+    FULL = "full"
+    CAPPED_BY_AGGREGATE = "capped_by_aggregate"
+    CAPPED_BY_REGIME = "capped_by_regime"
+    CAPPED_BY_CONVICTION = "capped_by_conviction"
+    CAPPED_BY_CAP = "capped_by_cap"
+
+
+class LeverageGrant(msgspec.Struct, frozen=True):
+    strategy_name: str
+    ts_ms: int
+    requested: float
+    granted: float
+    reason: LeverageReasonCode
+    conviction: float
+    declared_range_min: float
+    declared_range_max: float
+    regime_target: float
+    conviction_target: float
+    aggregate_before: float
+    aggregate_cap: float
+    m3s_regime: str
+    user_reason: str = ""
+
+
 # ── Orders & Fills ─────────────────────────────────────────────────────────
 
 

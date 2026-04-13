@@ -74,10 +74,11 @@ from src.backtest.book import (
 from src.backtest.costs import ICMarketsMetalFeeModel
 from src.backtest.path import Bar, BrownianBridgeModel, check_sl_tp_hits
 from src.data.feature_engine import _compute_indicators
+from src.m3s.hooks import M3S
 from src.strategies.base import BaseStrategy
 from src.utils.instruments import get_instrument
 from src.utils.logger import get_logger
-from src.utils.types import SignalAction
+from src.utils.types import LeverageReasonCode, SignalAction
 
 log = get_logger("leveraged_backtest")
 
@@ -150,6 +151,7 @@ class LeveragedBacktestEngine:
         initial_aggressive_cash: float = 3_000.0,
         fee_model: ICMarketsMetalFeeModel | None = None,
         path_model: BrownianBridgeModel | None = None,
+        m3s: M3S | None = None,
         run_id: str = "leveraged_default",
     ) -> None:
         """Construct the leveraged engine.
@@ -163,12 +165,17 @@ class LeveragedBacktestEngine:
             fee_model: IC Markets cost model. Default IC Markets Raw cTrader.
             path_model: intrabar path reconstruction model. Default
                 Brownian bridge seeded by run_id.
+            m3s: optional M3S facade. When provided, every LONG/SHORT signal
+                calls `m3s.request_leverage(strategy, conviction, range)`
+                and uses the granted leverage. Without an M3S instance, the
+                engine falls back to the `leverage` kwarg of `run()`.
             run_id: deterministic seed tag for reproducibility
         """
         self._initial_institutional_cash = float(initial_institutional_cash)
         self._initial_aggressive_cash = float(initial_aggressive_cash)
         self._fee_model = fee_model or ICMarketsMetalFeeModel()
         self._path_model = path_model or BrownianBridgeModel(run_id=run_id)
+        self._m3s = m3s
         self._run_id = run_id
 
     def run(
@@ -552,8 +559,16 @@ class LeveragedBacktestEngine:
         if quantity <= 0:
             return
 
-        # Strategy can override the engine's default leverage via signal.leverage
-        effective_leverage = signal.leverage if signal.leverage else leverage
+        effective_leverage = self._resolve_leverage(
+            signal=signal,
+            default_leverage=leverage,
+            book=book,
+            strategy_name=strategy_name,
+            bar_idx=bar_idx,
+        )
+        if effective_leverage is None or effective_leverage <= 0:
+            # M3S declined the grant (zero headroom) — skip the open
+            return
 
         try:
             pos = book.open_position(
@@ -572,6 +587,57 @@ class LeveragedBacktestEngine:
             log.warning("leveraged_open_rejected", reason=str(e),
                         strategy=strategy_name, bar_idx=bar_idx)
             return
+
+    def _resolve_leverage(
+        self,
+        *,
+        signal,
+        default_leverage: float,
+        book: Book,
+        strategy_name: str,
+        bar_idx: int,
+    ) -> float | None:
+        if self._m3s is None:
+            if signal.leverage is not None and signal.leverage > 0:
+                return float(signal.leverage)
+            return float(default_leverage)
+
+        declared_range = self._declared_range_for(signal, default_leverage)
+        conviction = float(signal.confidence or 0.5)
+        current_aggregate = self._compute_aggregate_leverage(book)
+
+        grant = self._m3s.request_leverage(
+            strategy_name=strategy_name,
+            conviction=conviction,
+            declared_range=declared_range,
+            current_aggregate_leverage=current_aggregate,
+            reason=f"signal_bar_{bar_idx}",
+            ts_ms=int(signal.timestamp or 0) or None,
+        )
+        if grant.granted <= 0:
+            log.info(
+                "leveraged_signal_declined_by_m3s",
+                strategy=strategy_name,
+                reason=grant.reason.value,
+                requested=grant.requested,
+                aggregate_before=grant.aggregate_before,
+            )
+            return None
+        return float(grant.granted)
+
+    def _declared_range_for(self, signal, default_leverage: float) -> tuple[float, float]:
+        if signal.leverage is not None and signal.leverage > 0:
+            L = float(signal.leverage)
+            return (L, L)
+        return (1.0, max(1.0, float(default_leverage)))
+
+    def _compute_aggregate_leverage(self, book: Book) -> float:
+        marks = {pos.id: pos.entry_price for pos in book.all_positions()}
+        equity = book.total_equity(marks)
+        if equity <= 0:
+            return float("inf")
+        total_notional = sum(pos.notional() for pos in book.all_positions())
+        return total_notional / equity
 
     def _to_trade(
         self,

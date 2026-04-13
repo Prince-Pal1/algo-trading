@@ -41,11 +41,17 @@ from src.m3s.allocator import Allocator
 from src.m3s.compounder import Compounder, TradeCloseEvent
 from src.m3s.conviction import ConvictionScorer
 from src.m3s.edge_decay import EdgeDecayMonitor
+from src.m3s.leverage_grants import LeverageGrantStore
 from src.m3s.modes import ModeConfig
 from src.m3s.portfolio import PortfolioTracker
 from src.m3s.types import AllocationDecision, PortfolioSnapshot
 from src.utils.logger import get_logger
-from src.utils.types import Signal, SignalAction
+from src.utils.types import (
+    LeverageGrant,
+    LeverageReasonCode,
+    Signal,
+    SignalAction,
+)
 
 log = get_logger("m3s.hooks")
 
@@ -87,6 +93,8 @@ class M3S:
         edge_decay: EdgeDecayMonitor | None = None,
         conviction_scorer: ConvictionScorer | None = None,
         shadow_mode: bool = True,
+        aggregate_leverage_cap: float = 100.0,
+        leverage_grant_store: LeverageGrantStore | None = None,
     ) -> None:
         self._mode = mode
         self._tracker = tracker
@@ -95,6 +103,11 @@ class M3S:
         self._edge_decay = edge_decay
         self._conviction = conviction_scorer or ConvictionScorer()
         self._shadow_mode = bool(shadow_mode)
+
+        # G.2b — leverage policy state
+        self._aggregate_leverage_cap = float(aggregate_leverage_cap)
+        self._leverage_grant_store = leverage_grant_store
+        self._last_grants: list[LeverageGrant] = []
 
         self._last_alloc: AllocationDecision | None = None
         self._last_decisions: list[SignalDecision] = []
@@ -123,6 +136,138 @@ class M3S:
 
     def last_decisions(self) -> list[SignalDecision]:
         return list(self._last_decisions)
+
+    def last_grants(self) -> list[LeverageGrant]:
+        return list(self._last_grants)
+
+    # ── Leverage policy entrypoint (G.2b) ───────────────────────────
+
+    def request_leverage(
+        self,
+        *,
+        strategy_name: str,
+        conviction: float,
+        declared_range: tuple[float, float],
+        current_aggregate_leverage: float = 0.0,
+        reason: str = "",
+        ts_ms: int | None = None,
+    ) -> LeverageGrant:
+        import time
+
+        lo, hi = float(declared_range[0]), float(declared_range[1])
+        if lo < 1.0:
+            lo = 1.0
+        if hi < lo:
+            hi = lo
+
+        conviction_clamped = max(0.0, min(1.0, float(conviction)))
+
+        if ts_ms is None:
+            ts_ms = self._tracker._last_equity_ts_ms or int(time.time() * 1000)
+
+        snapshot = self._tracker.snapshot(now_ms=ts_ms)
+
+        regime_target = self._compounder.target_leverage((lo, hi), snapshot)
+        conviction_target = lo + (hi - lo) * conviction_clamped
+        requested_raw = min(regime_target, conviction_target)
+
+        headroom = max(0.0, self._aggregate_leverage_cap - current_aggregate_leverage)
+
+        granted = min(requested_raw, headroom, hi)
+        if granted < lo:
+            granted = 0.0
+
+        reason_code = self._classify_grant_reason(
+            requested=requested_raw,
+            granted=granted,
+            regime_target=regime_target,
+            conviction_target=conviction_target,
+            headroom=headroom,
+            declared_max=hi,
+            declared_min=lo,
+        )
+
+        grant = LeverageGrant(
+            strategy_name=strategy_name,
+            ts_ms=int(snapshot.ts_ms),
+            requested=float(requested_raw),
+            granted=float(granted),
+            reason=reason_code,
+            conviction=conviction_clamped,
+            declared_range_min=lo,
+            declared_range_max=hi,
+            regime_target=float(regime_target),
+            conviction_target=float(conviction_target),
+            aggregate_before=float(current_aggregate_leverage),
+            aggregate_cap=float(self._aggregate_leverage_cap),
+            m3s_regime=self._mode.name.value,
+            user_reason=reason,
+        )
+
+        # Keep an in-memory ring of recent grants for dashboard / tests.
+        self._last_grants.append(grant)
+        if len(self._last_grants) > 500:
+            self._last_grants = self._last_grants[-500:]
+
+        # Persist to SQLite when a store is configured.
+        if self._leverage_grant_store is not None:
+            try:
+                self._leverage_grant_store.append(grant)
+            except Exception as e:
+                log.warning(
+                    "m3s.leverage_grant_store_failed",
+                    strategy=strategy_name,
+                    error=str(e),
+                )
+
+        log.info(
+            "m3s.leverage_grant",
+            strategy=strategy_name,
+            requested=float(requested_raw),
+            granted=float(granted),
+            reason=reason_code.value,
+            regime_target=float(regime_target),
+            conviction_target=float(conviction_target),
+            aggregate_before=float(current_aggregate_leverage),
+            aggregate_cap=float(self._aggregate_leverage_cap),
+            mode=self._mode.name.value,
+        )
+
+        return grant
+
+    @staticmethod
+    def _classify_grant_reason(
+        *,
+        requested: float,
+        granted: float,
+        regime_target: float,
+        conviction_target: float,
+        headroom: float,
+        declared_max: float,
+        declared_min: float,
+    ) -> LeverageReasonCode:
+        eps = 1e-9
+
+        if granted + eps < requested:
+            # Something reduced the requested value further.
+            if abs(granted - headroom) < eps or headroom < requested:
+                return LeverageReasonCode.CAPPED_BY_AGGREGATE
+            if granted >= declared_max - eps:
+                return LeverageReasonCode.CAPPED_BY_CAP
+            return LeverageReasonCode.CAPPED_BY_AGGREGATE
+
+        # granted ~= requested. Now see what made requested what it is.
+        # If regime_target and conviction_target are equal within eps, we
+        # consider it FULL regardless.
+        if abs(regime_target - conviction_target) < eps:
+            return LeverageReasonCode.FULL
+
+        if regime_target < conviction_target and regime_target < declared_max - eps:
+            return LeverageReasonCode.CAPPED_BY_REGIME
+        if conviction_target < regime_target and conviction_target < declared_max - eps:
+            return LeverageReasonCode.CAPPED_BY_CONVICTION
+
+        return LeverageReasonCode.FULL
 
     # ── Primary entrypoint: on_signal ───────────────────────────────
 

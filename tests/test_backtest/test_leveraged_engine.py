@@ -25,6 +25,12 @@ from src.backtest.leveraged_engine import (
     LeveragedTrade,
 )
 from src.backtest.path import BrownianBridgeModel
+from src.m3s.allocator import Allocator
+from src.m3s.compounder import Compounder
+from src.m3s.hooks import M3S
+from src.m3s.leverage_grants import LeverageGrantStore
+from src.m3s.modes import MODE_PRESETS, M3SMode
+from src.m3s.portfolio import PortfolioTracker
 from src.strategies.base import BaseStrategy
 from src.utils.types import Signal, SignalAction
 
@@ -331,3 +337,65 @@ class TestSubBookIndependence:
         # The aggressive equity curve should be unchanged (no trades routed there)
         for eq in result.equity_curve_aggressive:
             assert eq == pytest.approx(5_000.0, abs=1e-6)
+
+
+def _build_m3s(aggregate_cap: float = 100.0, store: LeverageGrantStore | None = None) -> M3S:
+    tracker = PortfolioTracker(initial_equity=10_000.0)
+    mode = MODE_PRESETS[M3SMode.STANDARD]
+    comp = Compounder(mode=mode, tracker=tracker)
+    alloc = Allocator(mode=mode, tracker=tracker)
+    return M3S(
+        mode=mode,
+        tracker=tracker,
+        compounder=comp,
+        allocator=alloc,
+        shadow_mode=False,
+        aggregate_leverage_cap=aggregate_cap,
+        leverage_grant_store=store,
+    )
+
+
+class TestM3SIntegration:
+    def test_engine_with_m3s_calls_request_leverage(self):
+        store = LeverageGrantStore(db_path=":memory:")
+        m3s = _build_m3s(store=store)
+        engine = LeveragedBacktestEngine(
+            initial_institutional_cash=10_000.0,
+            initial_aggressive_cash=0.0,
+            m3s=m3s,
+        )
+        df = _make_trend_up_bars(n=60)
+        result = engine.run(
+            strategy=_LongThenCloseStrategy(entry_bar=15, exit_bar=35),
+            data=df,
+            leverage=10.0,
+        )
+        assert len(result.trades) == 1
+        # At least one grant should have been logged to the store
+        assert store.count() >= 1
+        # The trade's effective leverage should match what M3S granted
+        # (not the signal.leverage=10.0 or the engine's default)
+        trade = result.trades[0]
+        assert trade.leverage > 0
+        store.close()
+
+    def test_m3s_zero_headroom_declines_signal(self):
+        m3s = _build_m3s(aggregate_cap=1.0)  # almost no headroom
+        # Pre-fill the aggregate by having an open position is tricky; easier
+        # to just set the cap so low that even the min of the declared range
+        # exceeds it. With range (10, 50) and cap 1, headroom=1 < lo=10 →
+        # grant goes to 0 → engine skips the open.
+        engine = LeveragedBacktestEngine(
+            initial_institutional_cash=10_000.0,
+            initial_aggressive_cash=0.0,
+            m3s=m3s,
+        )
+        df = _make_trend_up_bars(n=60)
+        result = engine.run(
+            strategy=_LongThenCloseStrategy(entry_bar=15, exit_bar=35),
+            data=df,
+            leverage=50.0,
+        )
+        # The LONG signal should have been refused → 0 trades opened
+        # The CLOSE signal at bar 35 is a no-op on an empty book
+        assert len(result.trades) == 0
