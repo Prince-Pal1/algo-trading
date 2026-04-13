@@ -16,7 +16,10 @@ State model:
   correlation — see m3s_plan_v1.md §1 D).
 
 Rolling-stat conventions:
-- Crypto is 24/7, so annualization uses sqrt(365) not sqrt(252).
+- Annualization factor is now parameterized via `periods_per_year` on the
+  tracker (default 365 = crypto 24/7; pass 252 for forex 24/5). This is
+  the G.0 refactor from the gold plan. Existing call sites using the default
+  see identical behavior.
 - Sparse-signal strategies produce degenerate per-trade Sharpe (bb_rsi_mr_opt
   often fires 1 trade/month). We daily-resample trade PnLs over the window,
   zero-fill empty days, then compute mean/std of daily returns. This matches
@@ -72,7 +75,9 @@ class _PerStrategyState:
 
 
 _MS_PER_DAY = 86_400_000
-_CRYPTO_ANNUALIZATION = math.sqrt(365.0)
+_CRYPTO_ANNUALIZATION = math.sqrt(365.0)  # Legacy — use self._annualization instead
+_DEFAULT_PERIODS_PER_YEAR = 365.0         # Crypto 24/7 default (G.0 backward-compat)
+_FOREX_PERIODS_PER_YEAR = 252.0           # Forex 24/5 (for XAUUSD, FX majors)
 _DEFAULT_ROLLING_DAYS = 30
 _SIGNAL_CORR_WINDOW_BARS = 720  # 30d × 1h — matches m3s_plan_v1 §10
 
@@ -96,7 +101,16 @@ class PortfolioTracker:
         initial_equity: float = 10_000.0,
         rolling_window_days: int = _DEFAULT_ROLLING_DAYS,
         signal_corr_window_bars: int = _SIGNAL_CORR_WINDOW_BARS,
+        periods_per_year: float = _DEFAULT_PERIODS_PER_YEAR,
     ) -> None:
+        """Construct a portfolio tracker.
+
+        Args:
+            periods_per_year: annualization denominator. Default 365 for
+                crypto 24/7. Pass 252 for forex 24/5 (gold, FX majors).
+                This is the G.0 gold-plan parameterization — backward
+                compatible, existing call sites see identical behavior.
+        """
         self._equity: float = float(initial_equity)
         self._hwm: float = float(initial_equity)
         self._last_equity_ts_ms: int = 0
@@ -104,6 +118,8 @@ class PortfolioTracker:
         self._strategies: dict[str, _PerStrategyState] = {}
         self._rolling_window_days: int = int(rolling_window_days)
         self._signal_corr_window_bars: int = int(signal_corr_window_bars)
+        self._periods_per_year: float = float(periods_per_year)
+        self._annualization: float = math.sqrt(self._periods_per_year)
 
     # ── Mutators ─────────────────────────────────────────────────────
 
@@ -283,8 +299,8 @@ class PortfolioTracker:
         if std_r == 0.0:
             return 0.0, 0.0
 
-        sharpe = (mean_r / std_r) * _CRYPTO_ANNUALIZATION
-        vol_annualized = std_r * _CRYPTO_ANNUALIZATION
+        sharpe = (mean_r / std_r) * self._annualization
+        vol_annualized = std_r * self._annualization
         return sharpe, vol_annualized
 
     def _lifetime_stats(self, trades: list[_ClosedTrade]) -> tuple[float, float]:
@@ -306,10 +322,10 @@ class PortfolioTracker:
         if std_p == 0.0:
             return 0.0, winrate
 
-        # Per-trade Sharpe annualized by assumed 1 trade/day ≈ sqrt(365).
+        # Per-trade Sharpe annualized by assumed 1 trade/day ≈ sqrt(periods_per_year).
         # This is a rough lifetime benchmark — not what the allocator uses
         # for live sizing. For that, see rolling_sharpe_30d above.
-        lifetime_sharpe = (mean_p / std_p) * _CRYPTO_ANNUALIZATION
+        lifetime_sharpe = (mean_p / std_p) * self._annualization
         return lifetime_sharpe, winrate
 
     # ── Signal correlation ───────────────────────────────────────────

@@ -69,7 +69,8 @@ log = get_logger("m3s.meta_backtest")
 
 
 _MS_PER_DAY = 86_400_000
-_CRYPTO_ANNUALIZATION = math.sqrt(365.0)
+_CRYPTO_ANNUALIZATION = math.sqrt(365.0)  # Legacy default — G.0 parameterized callers
+_DEFAULT_PERIODS_PER_YEAR = 365.0          # Pass 252 at call time for forex
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -132,7 +133,16 @@ def _daily_returns_from_curve(curve: list[tuple[int, float]]) -> list[float]:
     return rets
 
 
-def _sharpe(returns: list[float]) -> float:
+def _sharpe(
+    returns: list[float],
+    periods_per_year: float = _DEFAULT_PERIODS_PER_YEAR,
+) -> float:
+    """Annualized Sharpe on a per-day returns series.
+
+    Args:
+        periods_per_year: annualization denominator. Default 365 for crypto
+            24/7 (backward compat). Pass 252 for forex 24/5 (XAUUSD).
+    """
     if len(returns) < 2:
         return 0.0
     mean = sum(returns) / len(returns)
@@ -140,7 +150,7 @@ def _sharpe(returns: list[float]) -> float:
     std = math.sqrt(var)
     if std == 0.0:
         return 0.0
-    return (mean / std) * _CRYPTO_ANNUALIZATION
+    return (mean / std) * math.sqrt(periods_per_year)
 
 
 def _max_drawdown(curve: list[tuple[int, float]]) -> float:
@@ -179,8 +189,14 @@ def run_fixed_weight_baseline(
     weights: dict[str, float],
     *,
     initial_equity: float = 10_000.0,
+    periods_per_year: float = _DEFAULT_PERIODS_PER_YEAR,
 ) -> MetaBacktestResult:
-    """Baseline: apply a static weight per strategy to every trade's PnL."""
+    """Baseline: apply a static weight per strategy to every trade's PnL.
+
+    Args:
+        periods_per_year: annualization for Sharpe. Default 365 (crypto 24/7),
+            pass 252 for forex (XAUUSD).
+    """
     equity = initial_equity
     curve: list[tuple[int, float]] = []
     peak = initial_equity
@@ -200,7 +216,7 @@ def run_fixed_weight_baseline(
         initial_equity=initial_equity,
         final_equity=equity,
         max_drawdown_pct=max_dd,
-        sharpe_annualized=_sharpe(rets),
+        sharpe_annualized=_sharpe(rets, periods_per_year=periods_per_year),
         calmar=_calmar(initial_equity, equity, max_dd, n_days),
         avg_turnover=0.0,  # fixed weight = zero turnover
         n_trades=len(trades),
@@ -215,10 +231,17 @@ def run_m3s_simulation(
     rebalance_cadence_days: int = 7,
     include_conviction: bool = True,
     include_edge_decay: bool = True,
+    periods_per_year: float = _DEFAULT_PERIODS_PER_YEAR,
 ) -> MetaBacktestResult:
-    """Replay trades through a live M3S instance in non-shadow mode."""
+    """Replay trades through a live M3S instance in non-shadow mode.
+
+    Args:
+        periods_per_year: annualization denominator. Default 365 for crypto
+            24/7 (backward compat). Pass 252 for forex (XAUUSD). Threaded
+            into both PortfolioTracker and the final Sharpe computation.
+    """
     mode_cfg = MODE_PRESETS[mode]
-    tracker = PortfolioTracker(initial_equity=initial_equity)
+    tracker = PortfolioTracker(initial_equity=initial_equity, periods_per_year=periods_per_year)
     compounder = Compounder(mode=mode_cfg, tracker=tracker)
     allocator = Allocator(mode=mode_cfg, tracker=tracker)
     edge_decay = EdgeDecayMonitor() if include_edge_decay else None
@@ -306,7 +329,7 @@ def run_m3s_simulation(
         initial_equity=initial_equity,
         final_equity=equity,
         max_drawdown_pct=max_dd,
-        sharpe_annualized=_sharpe(rets),
+        sharpe_annualized=_sharpe(rets, periods_per_year=periods_per_year),
         calmar=_calmar(initial_equity, equity, max_dd, n_days),
         avg_turnover=avg_turnover,
         turnover_series=turnovers,
