@@ -355,6 +355,66 @@ def _build_m3s(aggregate_cap: float = 100.0, store: LeverageGrantStore | None = 
     )
 
 
+class _LongOnInstStrategy(BaseStrategy):
+    def __init__(self):
+        super().__init__(name="inst_strat", markets=["XAUUSD"], timeframe="1h", leverage_range=(1.0, 10.0))
+        self._fired = False
+
+    def on_features(self, symbol, timeframe, features):
+        if not self._fired:
+            self._fired = True
+            price = float(features["close"])
+            return Signal(
+                symbol=symbol, action=SignalAction.LONG, confidence=0.8,
+                strategy_name=self.name, timeframe=timeframe,
+                entry_price=price, stop_loss=price * 0.99,
+                risk_pct=0.01, leverage=5.0,
+            )
+        return None
+
+
+class _LongOnAggrStrategy(BaseStrategy):
+    def __init__(self):
+        super().__init__(name="aggr_strat", markets=["XAUUSD"], timeframe="1h", leverage_range=(1.0, 500.0))
+        self._fired = False
+
+    def on_features(self, symbol, timeframe, features):
+        if not self._fired:
+            self._fired = True
+            price = float(features["close"])
+            return Signal(
+                symbol=symbol, action=SignalAction.LONG, confidence=0.9,
+                strategy_name=self.name, timeframe=timeframe,
+                entry_price=price, stop_loss=price * 0.995,
+                risk_pct=0.05, leverage=100.0,
+            )
+        return None
+
+
+class TestRunMulti:
+    def test_routes_signals_to_distinct_sub_books(self):
+        engine = LeveragedBacktestEngine(
+            initial_institutional_cash=7_000.0,
+            initial_aggressive_cash=3_000.0,
+        )
+        df = _make_trend_up_bars(n=60)
+        result = engine.run_multi(
+            strategy_routes=[
+                (_LongOnInstStrategy(), SUB_BOOK_INSTITUTIONAL, 5.0),
+                (_LongOnAggrStrategy(), SUB_BOOK_AGGRESSIVE, 100.0),
+            ],
+            data=df,
+        )
+        assert len(result.trades) == 2
+        sub_books = {t.sub_book for t in result.trades}
+        assert SUB_BOOK_INSTITUTIONAL in sub_books
+        assert SUB_BOOK_AGGRESSIVE in sub_books
+        # Strategy names on the trades are preserved
+        strategies = {t.strategy_name for t in result.trades}
+        assert "inst_strat" in strategies
+        assert "aggr_strat" in strategies
+
+
 class TestM3SIntegration:
     def test_engine_with_m3s_calls_request_leverage(self):
         store = LeverageGrantStore(db_path=":memory:")

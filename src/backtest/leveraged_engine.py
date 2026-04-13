@@ -189,22 +189,23 @@ class LeveragedBacktestEngine:
         sub_book: str = SUB_BOOK_INSTITUTIONAL,
         indicators: list[str] | None = None,
     ) -> LeveragedBacktestResult:
-        """Run a leveraged backtest on historical data.
+        return self.run_multi(
+            strategy_routes=[(strategy, sub_book, leverage)],
+            data=data,
+            symbol=symbol,
+            timeframe=timeframe,
+            indicators=indicators,
+        )
 
-        Args:
-            strategy: strategy instance (implements on_features / process)
-            data: DataFrame with columns timestamp, open, high, low, close, volume
-            symbol: instrument symbol (for Instrument registry lookup)
-            timeframe: bar timeframe for logging
-            leverage: effective leverage to apply at position open.
-                Strategy can override by setting signal.leverage.
-            sub_book: which sub-book positions from this strategy route to
-                ("institutional" | "aggressive")
-            indicators: list of indicators to compute (default: broad set)
-
-        Returns:
-            LeveragedBacktestResult with trades, equity curves, metrics
-        """
+    def run_multi(
+        self,
+        *,
+        strategy_routes: list[tuple[BaseStrategy, str, float]],
+        data: pd.DataFrame,
+        symbol: str = "XAUUSD",
+        timeframe: str = "1h",
+        indicators: list[str] | None = None,
+    ) -> LeveragedBacktestResult:
         if indicators is None:
             indicators = [
                 "ema_9", "ema_21", "sma_50", "rsi_14", "bbands_20",
@@ -216,7 +217,6 @@ class LeveragedBacktestEngine:
             log.warning("leveraged_insufficient_data", rows=n, min_required=50)
             return LeveragedBacktestResult(total_candles=n)
 
-        # Compute indicators upfront (same pattern as old engine)
         df = data.copy()
         df = _compute_indicators(df, indicators)
 
@@ -228,11 +228,9 @@ class LeveragedBacktestEngine:
             candles=n,
             institutional_cash=self._initial_institutional_cash,
             aggressive_cash=self._initial_aggressive_cash,
-            default_leverage=leverage,
-            sub_book=sub_book,
+            strategies=[s.name for s, _, _ in strategy_routes],
         )
 
-        # Initialize the book
         book = Book.new(
             institutional_cash=self._initial_institutional_cash,
             aggressive_cash=self._initial_aggressive_cash,
@@ -255,63 +253,43 @@ class LeveragedBacktestEngine:
                 ts_ms=int(row.get("timestamp", 0) or 0),
             )
             mark_price = bar.close
-            all_marks = {pos.id: mark_price for pos in book.all_positions()}
 
-            # ── Step 1: intrabar SL/TP check on existing positions ──
-            closed_ids_this_bar = self._apply_intrabar_sl_tp(
-                book, bar, i, trades, strategy.name
-            )
+            # Step 1: intrabar SL/TP on existing positions (strategy_name comes from the position)
+            self._apply_intrabar_sl_tp(book, bar, i, trades, strategy_name=None)
 
-            # Refresh marks (closed positions removed)
-            all_marks = {pos.id: mark_price for pos in book.all_positions()}
-
-            # ── Step 2: broker stop-out check per sub-book ──
-            # Use WORST-CASE intrabar prices for the check — this is the
-            # critical correction from the v1 plan. A position at 500×
-            # might survive open→close but have an intrabar excursion
-            # that would have blown the account mid-bar.
+            # Step 2: broker stop-out per sub-book using worst-case intrabar marks
             worst_marks_inst = self._worst_case_marks(
                 book.institutional.positions, bar, self._path_model
             )
             worst_marks_aggr = self._worst_case_marks(
                 book.aggressive.positions, bar, self._path_model
             )
-            stop_out_trades = book.execute_stop_outs(
-                {**worst_marks_inst, **worst_marks_aggr},
-                SUB_BOOK_INSTITUTIONAL,
-            )
-            for t in stop_out_trades:
-                trades.append(self._to_trade(
-                    t, entry_idx=i, exit_idx=i,
-                    exit_reason="broker_stop_out", strategy_name=strategy.name,
-                ))
-            stop_out_trades_aggr = book.execute_stop_outs(
-                {**worst_marks_inst, **worst_marks_aggr},
-                SUB_BOOK_AGGRESSIVE,
-            )
-            for t in stop_out_trades_aggr:
-                trades.append(self._to_trade(
-                    t, entry_idx=i, exit_idx=i,
-                    exit_reason="broker_stop_out", strategy_name=strategy.name,
-                ))
+            merged_marks = {**worst_marks_inst, **worst_marks_aggr}
+            for sb_name in (SUB_BOOK_INSTITUTIONAL, SUB_BOOK_AGGRESSIVE):
+                for t in book.execute_stop_outs(merged_marks, sb_name):
+                    trades.append(self._to_trade(
+                        t, entry_idx=i, exit_idx=i,
+                        exit_reason="broker_stop_out",
+                        strategy_name=t.get("strategy_name", ""),
+                    ))
 
-            # ── Step 3: call strategy (same as live) ──
-            signal = strategy.process(symbol, timeframe, row)
+            # Step 3: call each strategy, route its signal to the declared sub-book
+            for strategy, sub_book, leverage in strategy_routes:
+                signal = strategy.process(symbol, timeframe, row)
+                if signal is not None:
+                    self._handle_signal(
+                        signal=signal,
+                        bar=bar,
+                        bar_idx=i,
+                        book=book,
+                        leverage=leverage,
+                        sub_book=sub_book,
+                        inst=inst,
+                        trades=trades,
+                        strategy_name=strategy.name,
+                    )
 
-            if signal is not None:
-                self._handle_signal(
-                    signal=signal,
-                    bar=bar,
-                    bar_idx=i,
-                    book=book,
-                    leverage=leverage,
-                    sub_book=sub_book,
-                    inst=inst,
-                    trades=trades,
-                    strategy_name=strategy.name,
-                )
-
-            # ── Step 4: update equity curves + peak trackers ──
+            # Step 4: equity curves + peak tracker update
             all_marks = {pos.id: mark_price for pos in book.all_positions()}
             book.update_peaks(all_marks)
             inst_eq = book.institutional.equity(all_marks)
@@ -320,12 +298,11 @@ class LeveragedBacktestEngine:
             equity_institutional.append(inst_eq)
             equity_aggressive.append(aggr_eq)
             equity_total.append(total_eq)
-            # Combined margin level across both sub-books
             total_used = book.total_used_margin()
             ml = (total_eq / total_used) if total_used > 0 else float("inf")
             margin_level_curve.append(ml if ml != float("inf") else 0.0)
 
-        # ── Final close of any still-open positions ──
+        # Final close of any still-open positions at last-bar close
         for pos in list(book.all_positions()):
             exit_price = float(df.iloc[-1]["close"])
             fee_side = "SELL" if pos.side == "LONG" else "BUY"
@@ -336,10 +313,11 @@ class LeveragedBacktestEngine:
                 ts_ms=int(df.iloc[-1].get("timestamp", 0) or 0),
             )
             commission = self._fee_model.commission_usd(quantity_units=pos.quantity)
+            pos_strategy = pos.strategy_name
             closed = book.close_position(pos.id, exit_price=fill, commission=commission)
             trades.append(self._to_trade(
                 closed, entry_idx=pos.entry_idx, exit_idx=n - 1,
-                exit_reason="signal", strategy_name=strategy.name,
+                exit_reason="signal", strategy_name=pos_strategy,
             ))
 
         # ── Compute metrics ──
@@ -406,15 +384,9 @@ class LeveragedBacktestEngine:
         bar: Bar,
         bar_idx: int,
         trades: list[LeveragedTrade],
-        strategy_name: str,
+        strategy_name: str | None = None,
     ) -> list[int]:
-        """Check every open position's SL/TP against this bar using the
-        Brownian bridge path model. Close positions whose SL or TP was hit.
-
-        Returns the list of closed position IDs.
-        """
         closed_ids: list[int] = []
-        # Snapshot positions since we'll be mutating the dict
         for pos in list(book.all_positions()):
             hit_label, hit_price = check_sl_tp_hits(
                 bar=bar,
@@ -427,22 +399,23 @@ class LeveragedBacktestEngine:
             if hit_label is None or hit_price is None:
                 continue
 
-            # Apply spread + slippage to the exit fill
             fee_side = "SELL" if pos.side == "LONG" else "BUY"
             fill_price = self._fee_model.fill_price(
                 side=fee_side,
                 reference_price=hit_price,
-                atr=0.0,  # SL/TP fills at exactly the level, no additional slip
+                atr=0.0,
                 ts_ms=bar.ts_ms,
             )
             commission = self._fee_model.commission_usd(quantity_units=pos.quantity)
+            pos_strategy = pos.strategy_name
+            pos_entry_idx = pos.entry_idx
             closed = book.close_position(
                 pos.id, exit_price=fill_price, commission=commission,
             )
             trades.append(self._to_trade(
-                closed, entry_idx=pos.entry_idx, exit_idx=bar_idx,
+                closed, entry_idx=pos_entry_idx, exit_idx=bar_idx,
                 exit_reason="stop_loss" if hit_label == "sl" else "take_profit",
-                strategy_name=strategy_name,
+                strategy_name=strategy_name or pos_strategy,
             ))
             closed_ids.append(pos.id)
         return closed_ids

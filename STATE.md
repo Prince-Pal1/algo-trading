@@ -1,17 +1,17 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-04-14 (Gold Phase G.2a→G.2f shipped on feat/gold-refactor worktree)
+**Last updated:** 2026-04-14 (Gold Phase G.2 COMPLETE on feat/gold-refactor worktree)
 
 ---
 
 ## Current Position
 
 **Active branch:** `feat/gold-refactor` at `/Users/prince/algo-trading-gold` (git worktree). Main dir at `/Users/prince/algo-trading` is untouched, still running the 3b-2 M3S shadow + 3c meta-label shadow clocks toward the 2026-04-16/17 automated cron promotions.
-**Active phase (gold worktree):** Phase G.2 Gold Leveraged Stack. G.0 / G.0b / G.0c / G.1 / G.2a / G.2a.2 / G.2a.3 / G.2a.4 / G.2b / G.2d / G.2e / G.2f all shipped. G.2c (inline leverage gates + RCU portfolio view + AGGRESSIVE_RETAIL profile) currently in progress — inline_leverage.py and portfolio_view.py written, tests next. After G.2c, G.2g runs the split sweep to pick the Calmar-optimal institutional_pct from [0.30, 0.95].
-**Next session target:** Finish G.2c (tests + commit) then G.2g (split sweep script + 2yr backtest per split + pick optimal + commit). After G.2 is complete, schedule the merge of feat/gold-refactor → main for 2026-04-17 ~09:30 after Day 4 sprint cron completes.
+**Active phase (gold worktree):** Phase G.2 Gold Leveraged Stack — **COMPLETE**. G.0, G.0b, G.0c, G.1, and all of G.2a through G.2g shipped. Engine supports multi-strategy routing across both sub-books. Split sweep ran across institutional_pct ∈ {0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95} on 2 years of XAUUSD 1h — Calmar-optimal under max_dd<30% is **0.95** (institutional-heavy). The aggressive sub-book wipes to -100% on every split because Tier 5 strategies were designed for M5 + mid-bar tick velocity and are running on 1h bars; candle_burst_hunter over-triggers, news_spike_fade barely has enough 30-pip 1h bars to fire. Institutional donchian_gold returns a consistent +3.46% regardless of allocation.
+**Next session target:** Wait for Day 4 sprint cron to complete 2026-04-17 ~09:30, then rebase feat/gold-refactor on main and merge. Post-merge tuning pass: (a) parameter tuning for donchian_gold (risk_pct, sl_atr_mult, ADX threshold, session windows), (b) download XAUUSD M5 data for Tier 5 strategies, (c) re-run the split sweep on M5 with tuned params.
 **Engine status (main branch, unchanged):** Paper trading running via launchd, HEALTHY. M3S active in shadow mode. Meta-label filter active in shadow mode.
-**Test suite:** 905 passing as of commit `19592de` on feat/gold-refactor (734 baseline + G.0/G.1/G.2a-G.2f additions).
-**Gold portfolio plan:** Two-book — institutional (Tiers 1-4, donchian_gold + future additions, aggregate leverage cap 80×, weekly HWM-gated compounding) + aggressive (Tier 5, candle_burst_hunter + news_spike_fade + hedged_structure_play, 1000× position scalping at 5% sub-book sizing with daily/weekly kill switches). Split is configurable; G.2g picks the Calmar-optimal value.
+**Test suite:** 920 passing on feat/gold-refactor (734 baseline + 186 new from G.0 / G.1 / G.2a-G.2g additions).
+**Gold portfolio plan:** Two-book — institutional (Tiers 1-4, donchian_gold + future additions, aggregate leverage cap 80×, weekly HWM-gated compounding) + aggressive (Tier 5, candle_burst_hunter + news_spike_fade + hedged_structure_play, 1000× position scalping at 5% sub-book sizing with daily/weekly kill switches). Starting split: **institutional_pct=0.95** (conservative until the tuning pass). Prince can override via `config/settings.toml [m3s_gold.allocation] institutional_pct`.
 
 > See `ROADMAP.md` § Phase G for the G.2 sub-phase table. See `SESSIONS_ARCHIVE.md` for Sessions 8-17.
 
@@ -81,9 +81,38 @@ L=1 rejects 50 trades due to insufficient free margin (risk-based quantity on wi
 
 All three strategies emit signals through `BaseStrategy.process()`, so they drop into the existing engine without changes. 13 tests covering entry triggers, SL/trail/timeout exits, state machine transitions.
 
-**G.2c — Inline leverage gates + RCU portfolio view + AGGRESSIVE_RETAIL profile (IN PROGRESS).** `src/risk/inline_leverage.py` written with `InlineLeverageGates` class (3 gates: per-position, aggregate, liquidation buffer), `INSTITUTIONAL_PROFILE` and `AGGRESSIVE_RETAIL_PROFILE` presets (the aggressive one has gates globally off). `src/m3s/portfolio_view.py` written with `VersionedPortfolioView` (lock-free RCU snapshot via tuple-assign, atomic read under GIL). `config/risk.toml` has a new `[profiles.aggressive_retail]` section. Tests next (test_inline_leverage.py pending, test_portfolio_view.py pending), then commit. After G.2c, G.2g runs the split sweep to pick the Calmar-optimal `institutional_pct` across [0.30, 0.95].
+**G.2c — Inline leverage gates + RCU portfolio view + AGGRESSIVE_RETAIL profile (`f891e57`).** `src/risk/inline_leverage.py` with `InlineLeverageGates` class (3 gates: per-position, aggregate, liquidation buffer), `INSTITUTIONAL_PROFILE` and `AGGRESSIVE_RETAIL_PROFILE` presets (the aggressive one has gates globally off, fat_finger still enforced via separate config). `src/m3s/portfolio_view.py` with `VersionedPortfolioView` (lock-free RCU snapshot via tuple-assign, atomic read under GIL). `config/risk.toml` got a new `[profiles.aggressive_retail]` section. 14 tests including a 1000-signal latency benchmark (<1s) and a 10-reader × 1-writer race test.
 
-**Current test count:** 905 passing on feat/gold-refactor (baseline 734 + G.0/G.1/G.2a/G.2a.2/G.2a.3/G.2a.4/G.2b/G.2d/G.2e/G.2f = +171). Zero regressions on the crypto path throughout.
+**G.2g — Split sweep + `run_multi` engine path (this commit).** `LeveragedBacktestEngine.run_multi(strategy_routes=[(strategy, sub_book, leverage), ...])` lets one engine instance drive multiple strategies against a single Book, routing each signal to its declared sub-book. The single-strategy `run()` becomes a thin wrapper over `run_multi([...])`. `_apply_intrabar_sl_tp` now pulls `strategy_name` from the owning position when the caller passes `None`, so multi-strategy runs report the correct attribution. 1 new test (`TestRunMulti.test_routes_signals_to_distinct_sub_books`).
+
+`scripts/run_split_sweep.py` runs the sweep on 2 years of XAUUSD 1h with:
+- Institutional: donchian_gold at L=25 (session-filtered)
+- Aggressive: candle_burst_hunter at L=500 + news_spike_fade at L=500 (news_calendar.csv loaded)
+
+Results across institutional_pct ∈ {0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95}:
+
+| inst% | total% | inst_ret% | aggr_ret% | maxDD% | Calmar | Sharpe | trades | stops |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 30 | -68.96 | +3.46 | -100.00 | 72.72 | -0.502 | -5.109 | 490 | 0 |
+| 40 | -58.61 | +3.46 | -100.00 | 63.63 | -0.488 | -4.344 | 490 | 0 |
+| 50 | -48.27 | +3.46 | -100.00 | 54.55 | -0.469 | -3.566 | 490 | 0 |
+| 60 | -37.92 | +3.46 | -100.00 | 45.46 | -0.442 | -2.767 | 490 | 0 |
+| 70 | -27.58 | +3.46 | -100.00 | 36.38 | -0.401 | -1.961 | 490 | 0 |
+| 80 | -17.23 | +3.46 | -100.00 | 27.29 | -0.334 | -1.170 | 490 | 0 |
+| 90 | -6.88 | +3.46 | -100.00 | 18.21 | -0.200 | -0.422 | 490 | 0 |
+| 95 | -1.71 | +3.46 | -100.00 | 13.96 | -0.065 | -0.071 | 490 | 0 |
+
+**Calmar-optimal under max_dd<30%: `institutional_pct=0.95`** (the conservative default).
+
+The aggressive sub-book wipes to -100% on every split because Tier 5 strategies were designed for M5 bars + mid-candle tick velocity. On 1h data:
+- `candle_burst_hunter` over-triggers (a 1h bar > 1.5×ATR is mostly noise, not a burst signal)
+- `news_spike_fade` rarely fires (a 30-pip 1h bar inside a 20-minute news window is uncommon because the window is smaller than the bar)
+- 490 trades / 2 years at 5% sizing each → quickly wipes the 30% sub-book allocation
+- Institutional donchian_gold returns +3.46% identically across splits (it runs on its own sub-book cash; the split only determines how much goes to institutional vs aggressive)
+
+Infrastructure works correctly — the result is honest and Prince's starting config is **institutional_pct=0.95** until a dedicated tuning pass with M5 data + parameter tuning for the aggressive strategies. The sweep script can be re-run any time the strategies improve.
+
+**Current test count:** 920 passing on feat/gold-refactor (baseline 734 + 186 new from G.0 / G.1 / G.2a-G.2g). Zero regressions on the crypto path throughout.
 
 ---
 

@@ -1,8 +1,8 @@
 # Algo Trading — Roadmap & Phase Status
 
-**Last updated:** 2026-04-14 (Gold Phase G.2a→G.2f shipped on feat/gold-refactor worktree; G.2c in progress)
-**Current phase:** Phase G (Gold Leveraged Stack) on branch `feat/gold-refactor` @ `/Users/prince/algo-trading-gold`. Main branch (3b-2 M3S shadow + 3c meta-labeling shadow) is untouched and still running the 4-day clock toward 2026-04-16 cron promotion. G.2a-G.2f landed: LeveragedBacktestEngine + Book + costs + path + BrownianBridge + M3S.request_leverage + geometric-mean blend + leverage_grants store + donchian_gold + structure_levels + AggressiveRetailCompounder + news_calendar + 3 Tier 5 strategies (candle_burst_hunter, news_spike_fade, hedged_structure_play). 905 tests passing. G.2c (inline leverage gates + RCU portfolio view + AGGRESSIVE_RETAIL profile) in progress.
-**Next action:** Finish G.2c inline-gates + portfolio_view tests, then G.2g (split sweep: Calmar-optimal institutional_pct across [0.30, 0.95]). After G.2 completes, schedule merge of feat/gold-refactor → main for 2026-04-17 ~09:30 (after Day 4 sprint cron completes).
+**Last updated:** 2026-04-14 (Gold Phase G.2 COMPLETE on feat/gold-refactor worktree; ready for merge to main 2026-04-17)
+**Current phase:** Phase G (Gold Leveraged Stack) on branch `feat/gold-refactor` @ `/Users/prince/algo-trading-gold`. All G.2 sub-phases shipped: G.2a (Book), G.2a.2 (costs), G.2a.3 (path), G.2a.4 (engine), G.2b (M3S request_leverage + geometric-mean blend + leverage_grants store), G.2c (inline gates + RCU portfolio view + AGGRESSIVE_RETAIL profile), G.2d (donchian_gold), G.2e (Tier 5 infra), G.2f (3 aggressive strategies), G.2g (split sweep + run_multi engine path). 920 tests passing. Main branch (3b-2 M3S shadow + 3c meta-labeling shadow) is untouched and still running the 4-day clock toward the 2026-04-16 cron promotion.
+**Next action:** Wait for Day 4 sprint cron to complete 2026-04-17 ~09:30, then rebase feat/gold-refactor on main, run the full test suite, merge. Post-merge: parameter tuning for donchian_gold + M5 data acquisition for Tier 5 strategies (they run on 1h in the sweep and the aggressive sub-book wipes to -100% because M5-designed logic like candle_burst_hunter over-triggers on 1h bars). The Calmar-optimal split from the sweep (institutional_pct=0.95) is the conservative default until that tuning pass.
 
 > **Authority note:** This file is the **only** authoritative source for phase status. If any other file contradicts this, that other file is wrong — fix it to link here. See `CLAUDE.md` § Autonomous Workflow Protocol.
 
@@ -23,7 +23,7 @@
 | 6 | Options Module | Iron condor SPX positive 1-year | ❌ NOT STARTED | — | — |
 | 7 | Production Deployment | 7 days unattended on VPS | ❌ NOT STARTED | — | Phase 3-milestone + M3S |
 | 8 | Scale | 3+ strategies portfolio Sharpe >1.5 | 🟡 PARTIAL — 3 strategies live, Sharpe 2.318 in backtest only | Session 10-11, 14-16 | OOS portfolio validation on live paper data |
-| **G** | **Gold Leveraged Stack** | Two-book (institutional + aggressive) engine + donchian_gold + 3 Tier 5 strategies + split sweep | 🟡 **IN PROGRESS on `feat/gold-refactor`** | G.0-G.2f shipped (commits 54c0b62 → 19592de) | G.2c (inline gates) + G.2g (split sweep) before merge 2026-04-17 |
+| **G** | **Gold Leveraged Stack** | Two-book (institutional + aggressive) engine + donchian_gold + 3 Tier 5 strategies + split sweep | ✅ **G.2 COMPLETE on `feat/gold-refactor`** (pending merge) | G.0-G.2g shipped (commits 54c0b62 → G.2g) | Merge to main 2026-04-17 ~09:30 after Day 4 sprint cron |
 
 **Legend:** ✅ complete · ❌ not started · 🟡 in progress/partial
 
@@ -51,8 +51,8 @@ Master plan: `~/.claude/plans/parallel-noodling-goblet.md`. Branch: `feat/gold-r
 | G.2d | donchian_gold (session-filtered, leverage_range=(10,50)) | ✅ COMPLETE | `4907e7c` | 10 | London/NY session gate; L∈{1,5,10,25,50} sweep script |
 | G.2e | Tier 5 infra (structure_levels, aggressive compounder, news calendar) | ✅ COMPLETE | `d847e4c` | 27 | 49 news windows 2025-01→2026-04 + sub-book config |
 | G.2f | Tier 5 strategies (candle_burst, news_fade, hedged_structure) | ✅ COMPLETE | `19592de` | 13 | All 3 aggressive strategies + state machine |
-| G.2c | Inline leverage gates + RCU portfolio view + AGGRESSIVE_RETAIL profile | 🟡 **IN PROGRESS** | — | — | Extract gates from ZMQ RiskManager; lock-free snapshots |
-| G.2g | Split sweep: Calmar-optimal institutional_pct | ❌ NEXT | — | — | Sweep [0.30, 0.95] on 2yr XAUUSD 1h |
+| G.2c | Inline leverage gates + RCU portfolio view + AGGRESSIVE_RETAIL profile | ✅ COMPLETE | `f891e57` | 14 | InlineLeverageGates + VersionedPortfolioView + profiles.aggressive_retail |
+| G.2g | Split sweep: Calmar-optimal institutional_pct | ✅ COMPLETE | `<pending>` | 1 | run_multi engine path + run_split_sweep.py; optimal = 0.95 (1h data, untuned aggressive) |
 | Merge | feat/gold-refactor → main | 📋 SCHEDULED | — | — | 2026-04-17 ~09:30 after Day 4 sprint cron |
 
 **Test counts:** 905 passing as of commit `19592de` (734 baseline + G.0/G.0c/G.1/G.2a-G.2f additions).
