@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """M3S Shadow Mode Validator — runs every 6h via launchd.
 
-Purpose: shorten the 4-week passive shadow clock to a 7-day active clock by
-continuously auditing M3S's proposed scaling decisions against reality.
-Finds bugs, invariant violations, and divergence between the shadow state
-and the actual paper engine.
+Purpose: shorten the 4-week passive shadow clock to a 4-day active clock
+(compressed from 7 → 4 in Session 22 sprint) by continuously auditing
+M3S's proposed scaling decisions against reality. Finds bugs, invariant
+violations, and divergence between the shadow state and the paper engine.
 
 Outputs:
     data/m3s_shadow_report.md      Human-readable status — `cat` any time
@@ -16,9 +16,11 @@ Exit codes:
     1   WARNING (advisory; doesn't block promotion)
     2   ERROR   (hard invariant violation; blocks promotion)
 
-Promotion criteria (the "7-day clock"):
-    7 consecutive days of exit 0 or 1 → Prince may flip `shadow_mode=false`.
+Promotion criteria (the "4-day clock"):
+    4 consecutive days of exit 0 or 1 → Prince may flip `shadow_mode=false`.
     ANY exit 2 resets the clock to day 0.
+    Rationale: the checker fires every 6h (16 audits across 4 days),
+    giving dense validation even in a short window.
 
 Usage:
     python3 scripts/m3s_shadow_check.py
@@ -604,16 +606,17 @@ def write_markdown_report(report: ShadowReport) -> None:
         lines.append("")
 
     # Day counter — clock: consecutive healthy/warning days
+    # Compressed from 7 → 4 days in Session 22 sprint (16 audits @ 6h cadence)
     clock_days = _read_clock_days()
-    lines.append("## 7-Day Promotion Clock")
+    lines.append("## 4-Day Promotion Clock")
     lines.append("")
     if report.overall_status == "ERROR":
         lines.append("❌ **Clock reset to day 0** — hard invariant violation.")
     elif report.overall_status == "DISABLED":
         lines.append("⏸ **Clock not started** — M3S not active.")
     else:
-        lines.append(f"Consecutive clean days: **{clock_days} / 7**")
-        if clock_days >= 7:
+        lines.append(f"Consecutive clean days: **{clock_days} / 4**")
+        if clock_days >= 4:
             lines.append("")
             lines.append(
                 "✅ **Clock complete.** Prince may flip `shadow_mode=false` "

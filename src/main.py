@@ -26,6 +26,9 @@ from src.data.feeds.funding_synthetic_feed import FundingSyntheticFeed
 from src.data.storage import Storage
 from src.data.warmup import warmup
 from src.execution.paper_executor import PaperExecutor
+from src.m3s.signal_filter.audit import CloseInfo, audit_close, audit_signal
+from src.m3s.signal_filter.features import build_meta_features
+from src.m3s.signal_filter.filter import MetaLabelFilter
 from src.m3s.allocator import Allocator as M3SAllocator
 from src.m3s.compounder import Compounder as M3SCompounder
 from src.m3s.conviction import ConvictionScorer
@@ -89,6 +92,15 @@ class TradingEngine:
         self.funding_feed: FundingSyntheticFeed | None = None
         self._funding_feed_task: asyncio.Task | None = None
 
+        # ── Phase 3c signal_audit write-path (live) ──
+        # Opens lazily on first signal. Maps (strategy, symbol) → audit_id
+        # so the close handler can UPDATE the right row.
+        self._audit_conn = None
+        self._audit_ids_by_pos: dict[tuple[str, str], int] = {}
+
+        # ── Phase 3c meta-label filter (shadow mode by default) ──
+        self.meta_filter: MetaLabelFilter | None = None
+
         # ── Monitoring ──
         self._heartbeat: Heartbeat | None = None
         self._heartbeat_task: asyncio.Task | None = None
@@ -150,9 +162,21 @@ class TradingEngine:
         self.m3s_store = M3SStore(db_path)
         load_state(self.m3s, self.m3s_store)
 
-        # Wire paper executor → M3S trade-close hook (advances compounder).
+        # Wire paper executor → M3S trade-close hook (advances compounder)
+        # AND → audit-close hook (Phase 3c signal_audit UPDATE).
         if self.paper_executor:
-            self.paper_executor.on_trade_close_hook = self.m3s.on_trade_close
+            def _combined_close_hook(strategy: str, pnl: float, symbol: str, ts_ms: int) -> None:
+                # M3S first (compounder base advance)
+                try:
+                    self.m3s.on_trade_close(strategy, pnl, symbol, ts_ms)
+                except Exception as e:
+                    log.warning("combined_close_m3s_failed", error=str(e))
+                # Then audit (Phase 3c — labels the signal)
+                try:
+                    self._audit_live_close(strategy, pnl, symbol, ts_ms)
+                except Exception as e:
+                    log.warning("combined_close_audit_failed", error=str(e))
+            self.paper_executor.on_trade_close_hook = _combined_close_hook
 
         # Seed state on boot so the shadow checker has something to audit
         # before the first scheduled tick. Safe — rebalance() on a fresh
@@ -194,6 +218,128 @@ class TradingEngine:
             db_path=db_path,
         )
 
+    # ── Phase 3c audit write-path (live) ──────────────────────────
+
+    def _get_audit_conn(self):
+        """Lazy open of a sqlite connection for signal_audit writes.
+
+        The table is created by ResultStore when backtest DB is opened,
+        but we can also trigger schema creation here to be safe on a
+        fresh install.
+        """
+        if self._audit_conn is not None:
+            return self._audit_conn
+        try:
+            import sqlite3
+            db_path = "data/trades.db"
+            self._audit_conn = sqlite3.connect(db_path, check_same_thread=False)
+            # Ensure schema exists even if ResultStore hasn't been used yet
+            from src.backtest.result_store import _BACKTEST_SCHEMA
+            self._audit_conn.executescript(_BACKTEST_SCHEMA)
+            self._audit_conn.commit()
+            log.info("live_audit_conn_opened", db=db_path)
+        except Exception as e:
+            log.warning("live_audit_conn_failed", error=str(e))
+            self._audit_conn = None
+        return self._audit_conn
+
+    def _audit_live_signal(self, signal: Signal, features: pd.Series | None) -> None:
+        """Write one signal_audit row for a live signal. Fail-safe."""
+        conn = self._get_audit_conn()
+        if conn is None:
+            return
+        try:
+            snap = self.m3s.snapshot() if self.m3s is not None else None
+            features_dict = build_meta_features(signal, features, snapshot=snap)
+            audit_id = audit_signal(
+                conn, run_id="live",
+                signal=signal,
+                features_dict=features_dict,
+                primary_model_ver=signal.strategy_name or "",
+            )
+            if audit_id is not None:
+                # Track audit_id by (strategy, symbol) so the close handler
+                # can look it up. Last-signal-wins on rapid-fire same-pair.
+                self._audit_ids_by_pos[(signal.strategy_name or "", signal.symbol)] = audit_id
+        except Exception as e:
+            log.warning("live_audit_signal_failed", error=str(e),
+                        strategy=signal.strategy_name)
+
+    def _audit_live_close(self, strategy: str, pnl: float, symbol: str, ts_ms: int) -> None:
+        """Called by paper_executor.on_trade_close_hook — UPDATE the audit row."""
+        conn = self._get_audit_conn()
+        if conn is None:
+            return
+        audit_id = self._audit_ids_by_pos.pop((strategy, symbol), None)
+        if audit_id is None:
+            return  # no matching audit row — not a bug, just a race
+        # Look up the entry price from the audit row (stored at signal time)
+        try:
+            cursor = conn.execute(
+                "SELECT entry_price, signal_action FROM signal_audit WHERE id = ?",
+                (audit_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return
+            entry_price = float(row[0]) if row[0] is not None else 0.0
+            direction = 1 if row[1] == "LONG" else -1
+            # Compute exit_price from pnl (approximation — we don't always have
+            # the actual fill price in the close hook). Assume pnl was on unit
+            # notional for directional sizing.
+            exit_price = entry_price + pnl if direction == 1 else entry_price - pnl
+        except Exception as e:
+            log.warning("live_audit_close_lookup_failed", audit_id=audit_id, error=str(e))
+            return
+
+        try:
+            audit_close(
+                conn, audit_id,
+                CloseInfo(
+                    trade_id=None,
+                    exit_ts_ms=ts_ms,
+                    exit_price=exit_price,
+                    realized_pnl=pnl,
+                    barrier_hit="signal",   # live closes route through signal path by default
+                    entry_price=entry_price,
+                    direction=direction,
+                ),
+            )
+        except Exception as e:
+            log.warning("live_audit_close_failed", audit_id=audit_id, error=str(e))
+
+    def _maybe_init_meta_filter(self, cfg) -> None:
+        """Construct the MetaLabelFilter if [meta_label] enabled in settings.
+
+        Phase 3c sprint: default shadow_mode=true. The filter logs proposed
+        decisions to structlog but does not alter live signals until
+        shadow_mode is flipped to false.
+        """
+        settings = cfg.settings if hasattr(cfg, "settings") else {}
+        section = settings.get("meta_label", {}) if isinstance(settings, dict) else {}
+        enabled = bool(section.get("enabled", False))
+        if not enabled:
+            log.info("meta_label_filter_disabled")
+            return
+
+        try:
+            self.meta_filter = MetaLabelFilter(
+                model_dir=section.get("model_dir", "data/models/meta_label"),
+                shadow_mode=bool(section.get("shadow_mode", True)),
+                veto_threshold=float(section.get("veto_threshold", 0.30)),
+                scale_sharpness=float(section.get("scale_sharpness", 8.0)),
+                scale_mode=bool(section.get("scale_mode", False)),
+                reload_interval_seconds=int(section.get("reload_interval_seconds", 60)),
+            )
+            log.info(
+                "meta_label_filter_initialized",
+                shadow=self.meta_filter.shadow_mode,
+                veto_threshold=float(section.get("veto_threshold", 0.30)),
+            )
+        except Exception as e:
+            log.warning("meta_label_filter_init_failed", error=str(e))
+            self.meta_filter = None
+
     def _maybe_start_funding_feed(self) -> None:
         """Start the FundingSyntheticFeed if funding_carry is enabled.
 
@@ -233,6 +379,20 @@ class TradingEngine:
         carry bars that don't come from the normal candle pipeline.
         """
         self._signal_count += 1
+
+        # Phase 3c audit: write signal_audit row BEFORE any filter.
+        self._audit_live_signal(signal, None)
+
+        # Phase 3c meta-label filter — carry path
+        if self.meta_filter is not None:
+            try:
+                snap = self.m3s.snapshot() if self.m3s is not None else None
+                filtered, _decision = self.meta_filter.on_signal(signal, None, snap)
+                if filtered is None:
+                    return
+                signal = filtered
+            except Exception as e:
+                log.warning("carry_meta_filter_failed", error=str(e))
 
         # M3S hook (shrink risk_pct, shadow-mode default)
         if self.m3s is not None:
@@ -338,6 +498,23 @@ class TradingEngine:
             if signals and self.paper_executor:
                 self._signal_count += len(signals)
                 for sig in signals:
+                    # Phase 3c audit: write signal_audit row BEFORE any filter.
+                    # Captures features at emission time, no lookahead.
+                    self._audit_live_signal(sig, features)
+
+                    # Phase 3c meta-label filter — runs BEFORE M3S so features
+                    # match the training distribution.
+                    if self.meta_filter is not None:
+                        try:
+                            snap = self.m3s.snapshot() if self.m3s is not None else None
+                            filtered, _decision = self.meta_filter.on_signal(sig, features, snap)
+                            if filtered is None:
+                                continue  # vetoed
+                            sig = filtered
+                        except Exception as e:
+                            log.warning("meta_filter_failed", error=str(e),
+                                        strategy=sig.strategy_name)
+
                     # M3S hook (sub-phase 0.8): shrink risk_pct before risk gate.
                     # Safe no-op when disabled or in shadow mode.
                     if self.m3s is not None:
@@ -408,6 +585,9 @@ class TradingEngine:
 
         # Initialize funding carry live feed if enabled (Strategy A paper activation).
         self._maybe_start_funding_feed()
+
+        # Initialize Phase 3c meta-label filter (shadow mode default).
+        self._maybe_init_meta_filter(cfg)
 
         # Historical warmup: load candles to prime indicators + strategy state
         warmup_result = await warmup(
@@ -487,6 +667,13 @@ class TradingEngine:
                 await self._funding_feed_task
             except asyncio.CancelledError:
                 pass
+
+        # 3c. Close audit connection (Phase 3c signal_audit)
+        if self._audit_conn is not None:
+            try:
+                self._audit_conn.close()
+            except Exception as e:
+                log.warning("audit_conn_close_failed", error=str(e))
 
         # 4. Close storage
         await self.storage.close()

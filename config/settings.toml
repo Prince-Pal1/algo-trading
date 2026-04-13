@@ -27,9 +27,28 @@ timezone = "US/Eastern"
 # Master Money Management System — phase 3b-2 (wired sub-phase 0.8).
 # enabled=true boots M3S; shadow_mode=true means log only, no signal mutation.
 # Authoritative mode requires a second explicit flip (shadow_mode=false)
-# after 7 consecutive clean days from scripts/m3s_shadow_check.py.
+# after 4 consecutive clean days from scripts/m3s_shadow_check.py (compressed
+# from 7 days in Session 22 sprint).
 enabled = true
 mode = "STANDARD"               # CONSERVATIVE | STANDARD | GROWTH | CUSTOM
 shadow_mode = true              # true = log only, no signal mutation
 db_path = "data/m3s.sqlite"
 rebalance_cadence_hours = 24.0
+
+[meta_label]
+# Phase 3c meta-label filter (Session 22 sprint).
+# Runs BEFORE M3S so features match training distribution. Filter decision
+# options: veto (return None) or scale (sigmoid multiplier on risk_pct).
+# Shadow mode logs decisions without altering signals.
+#
+# Current models in data/models/meta_label/ are LR-only (LightGBM unavailable
+# on this machine — libomp.dylib missing). AUC range 0.48-0.57 reflects the
+# research memo's "small uplift on validated primary models" prediction.
+# Shadow mode is the right deployment until we retrain with LightGBM.
+enabled = true
+shadow_mode = true
+veto_threshold = 0.30
+scale_sharpness = 8.0
+scale_mode = false
+reload_interval_seconds = 60
+model_dir = "data/models/meta_label"
