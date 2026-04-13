@@ -1,8 +1,8 @@
 # Algo Trading — Roadmap & Phase Status
 
-**Last updated:** 2026-04-13 (Session 22 — M3S complete + accelerated 7-day shadow clock)
-**Current phase:** 3b part 2 — M3S construction ✅ 10 sub-phases complete, awaiting shadow-mode activation
-**Next action:** Run `./scripts/m3s_activate_shadow.sh` to flip `settings.toml [m3s] enabled=true`, install the 6h shadow-check launchd agent, and fire the first audit. Clock is **7 days** of consecutive clean shadow runs (was 4 weeks — shortened because `scripts/m3s_shadow_check.py` actively audits invariants every 6h instead of passive monitoring). After 7 clean days, flip `shadow_mode=false` for authoritative mode.
+**Last updated:** 2026-04-13 (Session 22 — Phase 3b-3 strategy expansion: A shipped, B killed at B.3)
+**Current phase:** 3b part 3 — strategy expansion COMPLETE. Strategy A (funding_carry) shipped 5/5 sub-phases with Sharpe 2.584. Strategy B (clenow_momentum) killed at B.3 with avg Sharpe -0.124; obituary filed. M3S shadow clock continues running in parallel.
+**Next action:** Monitor M3S shadow report (`cat data/m3s_shadow_report.md`). When 7/7 days hit, flip `shadow_mode=false` for authoritative mode. Optionally: download historical BTC funding-rate Parquet via `BinanceFundingDownloader` and flip `[funding_carry] enabled = true` in `config/strategies.toml` for paper trading.
 
 > **Authority note:** This file is the **only** authoritative source for phase status. If any other file contradicts this, that other file is wrong — fix it to link here. See `CLAUDE.md` § Autonomous Workflow Protocol.
 

@@ -158,5 +158,17 @@ def _load_strategies() -> None:
     except ImportError:
         pass
 
+    try:
+        from src.strategies.carry.funding_carry import FundingCarryStrategy
+        register_strategy("funding_carry", FundingCarryStrategy)
+    except ImportError:
+        pass
+
+    try:
+        from src.strategies.momentum.clenow_momentum import ClenowMomentumStrategy
+        register_strategy("clenow_momentum", ClenowMomentumStrategy)
+    except ImportError:
+        pass
+
 
 _load_strategies()

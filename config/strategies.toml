@@ -84,3 +84,41 @@ take_profit_pips = 50
 stop_loss_pips = 25
 max_risk_per_trade = 0.005      # 0.5% of equity
 max_trades_per_day = 2
+
+[funding_carry]
+# Strategy A — Perpetual Funding Rate Carry (Phase 3b-3).
+# v1 uses the synthetic `BTCUSDT-CARRY` symbol — paper trading polls Binance
+# Futures /fapi/v1/fundingRate every 8h and feeds synthetic candles into the
+# normal pipeline. Real multi-leg Futures execution is deferred to v2.
+# See docs/planning/strategy_a_funding_carry_research.md for the research memo.
+# Gate history: A.1 PASS · A.3 Sharpe=2.584 (PASS) · A.4 MC/fee/crash/WF-OOS PASS · A.5 M3S integration PASS
+enabled = false                 # flip to true after A.5 integration verification
+risk_profile = "SAFE"
+markets = ["BTCUSDT-CARRY"]
+timeframe = "8h"
+max_risk_per_trade = 0.01
+friction_pct = 0.00005          # 0.005% per 8h epoch (amortized; see funding_synthetic.py)
+flip_persistence_bars = 3       # close on 3 consecutive negative-funding epochs (24h)
+max_drawdown_kill_pct = 0.03    # 3% unrealized DD kills the position
+max_hold_bars = 0               # 0 = no time stop
+cooldown_bars = 3               # wait 3 epochs after exit before re-entering
+
+[clenow_momentum]
+# Strategy B — Cross-Sectional Altcoin Momentum (Clenow) — 💀 KILLED AT B.3
+# Obituary: docs/strategy_obituaries/strategy_b_clenow_momentum.md
+# B.3 backtest on 9-altcoin 2-year window produced avg Sharpe -0.124 (fail 0.1 kill gate).
+# Infrastructure kept for future revival (rank cache, RankCache primitive, builder script).
+# Config section preserved with enabled=false so nothing wires it into production.
+enabled = false                 # KILLED — never flip to true without re-running B.3 with 30+ symbol universe
+risk_profile = "SAFE"
+markets = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "NEARUSDT"]
+timeframe = "1d"
+max_risk_per_trade = 0.01
+lookback_days = 60
+top_n = 5
+rebalance_cadence_days = 7
+trend_ma_window = 50
+gap_filter_pct = 0.15
+regime_ma_window = 100
+rank_cache_path = "data/historical/momentum_rank_cache.parquet"
+cooldown_bars = 0

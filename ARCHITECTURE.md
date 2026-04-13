@@ -102,6 +102,18 @@
 | Correlation Limits | `src/risk/correlation.py` | `pandas`, `numpy` | Risk Server | 📋 Phase 3b |
 | Greeks Risk | `src/risk/greeks_risk.py` | `py_vollib` | Risk Server | 📋 Phase 6 |
 
+### Strategies — Phase 3b-3 Additions (Python -- src/strategies/)
+
+| Module | File | Status | Notes |
+|---|---|---|---|
+| Funding Carry Strategy | `src/strategies/carry/funding_carry.py` | ✅ shipped (Session 22) | v1 uses synthetic `BTCUSDT-CARRY` via funding proxy; real multi-leg futures deferred to v2 |
+| Funding Synthetic Builder | `src/data/funding_synthetic.py` | ✅ shipped | Converts funding Parquet → synthetic OHLCV with `close[i+1] = close[i] × (1 + rate − friction)` |
+| Binance Funding Downloader | `src/data/downloader.py` (extended) | ✅ shipped | `BinanceFundingDownloader` class; hits `/fapi/v1/fundingRate` REST; writes to `data/historical/funding/<SYM>_8h.parquet` |
+| RankCache Primitive | `src/strategies/ranking.py` | ✅ shipped | `RankCache` + `compute_clenow_score` + `rank_weights_from_scores`; reusable for any rank-based strategy |
+| Momentum Rank Cache Builder | `scripts/build_momentum_rank_cache.py` | ✅ shipped | Offline pre-pass; computes Clenow scores per rebalance; writes `data/historical/momentum_rank_cache.parquet` |
+| Clenow Momentum Strategy | `src/strategies/momentum/clenow_momentum.py` | 💀 KILLED at B.3 (Session 22) | Kept in repo with `enabled=false`; obituary at `docs/strategy_obituaries/strategy_b_clenow_momentum.md` |
+| Universe Manifest | `config/universes.toml` | ✅ shipped | Survivorship-bias-aware top-30 altcoin manifest + delisted tokens (LUNA, FTT, UST, CEL, SRM) |
+
 ### M3S -- Master Money Management (Python -- src/m3s/)
 
 Phase 3b-2. Canonical plan: `docs/planning/m3s_plan_v1.md` § v1.1 ADDENDUM. Sub-phase 0.1 (scaffolding) complete Session 22; remaining sub-phases listed in `ROADMAP.md`.

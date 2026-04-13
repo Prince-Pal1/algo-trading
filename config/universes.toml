@@ -1,0 +1,39 @@
+# Survivorship-bias-free altcoin universe manifest for Strategy B
+# (Cross-sectional Clenow momentum, Phase 3b-3).
+#
+# v1 is a hand-curated manifest: current top-30 altcoins + explicit delisted
+# list. For v2 we'd automate this from CoinGecko historical top-50 snapshots
+# month-by-month. The v1 version is "good enough" for initial backtesting —
+# the critical thing is that the delisted section is present so the backtest
+# doesn't silently exclude LUNA/FTT/UST (the classic survivorship biases).
+
+[altcoin_top30_2020_2026]
+description = "v1 hand-curated altcoin universe for Clenow momentum."
+last_updated = "2026-04-13"
+rebalance_cadence_days = 2
+top_n = 20
+
+# Currently active altcoins on Binance USD-M (top ~30 by market cap as of 2026-04)
+symbols = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT",
+    "MATICUSDT", "LTCUSDT", "UNIUSDT", "ATOMUSDT", "NEARUSDT",
+    "ARBUSDT", "OPUSDT", "APTUSDT", "FILUSDT", "INJUSDT",
+    "TIAUSDT", "SUIUSDT", "ETCUSDT", "ICPUSDT", "HBARUSDT",
+    "VETUSDT", "ALGOUSDT", "AAVEUSDT", "MKRUSDT", "GRTUSDT",
+]
+
+# Explicitly delisted / dead tokens that were top-50 at some point.
+# Their historical data should be included in backtests up to their
+# delisting date so the strategy's historical drawdowns include these losses.
+# v1 uses a flat list (no date ranges); v2 should capture the exact active
+# window per token.
+[altcoin_top30_2020_2026.delisted]
+description = "Tokens that were top-50 by marketcap at some point but are now dead/delisted."
+symbols = [
+    "LUNAUSDT",        # Luna Classic; pre-May 2022 collapse
+    "USTUSDT",         # TerraUSD; May 2022 depeg
+    "FTTUSDT",         # FTX Token; Nov 2022 FTX collapse
+    "CELUSDT",         # Celsius Network; June 2022 bankruptcy
+    "SRMUSDT",         # Serum; Nov 2022 post-FTX
+]

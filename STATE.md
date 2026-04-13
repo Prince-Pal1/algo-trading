@@ -1,15 +1,15 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-04-13 (Session 22 — M3S complete + shadow checker + 7-day accelerated clock)
+**Last updated:** 2026-04-13 (Session 22 — Phase 3b-3 strategy expansion: A shipped, B killed)
 
 ---
 
 ## Current Position
 
-**Active phase:** 3b part 2 — M3S code complete + shadow checker built. Committed `d8d146f`. Ready for activation.
-**Next session target:** Run `./scripts/m3s_activate_shadow.sh` — flips `[m3s] enabled=true`, installs the `com.algo-trading.m3s-shadow-check` launchd agent (fires every 6h), seeds the first report to `data/m3s_shadow_report.md`. Prince can `cat` the report or `python3 scripts/m3s_shadow_check.py --verbose` any time to see status. Clock is **7 days** (accelerated from 4 weeks) — any ERROR exit resets to day 0. After 7 clean days, flip `shadow_mode=false` for authoritative mode.
-**Engine status:** Paper trading running via launchd (risk-server + engine + watchdog), HEALTHY. 9 symbols × 1h, $10,000 equity, 0 open positions as of last check. M3S is wired but currently disabled.
-**Test suite:** 525 passing, 0 skipped (289 baseline + 227 M3S sub-phases 0.1–0.10 + 9 shadow-checker tests).
+**Active phase:** 3b part 3 — strategy expansion. Strategy A (funding_carry) SHIPPED all 5 sub-phases. Strategy B (clenow_momentum) KILLED at B.3 gate. M3S shadow clock continues running in parallel.
+**Next session target:** Monitor M3S shadow clock (`cat data/m3s_shadow_report.md`). When 7/7 days hit, flip `shadow_mode=false`. Optionally: download real BTCUSDT historical funding rate Parquet via `BinanceFundingDownloader` and flip `[funding_carry] enabled = true` for paper trading.
+**Engine status:** Paper trading running via launchd (risk-server + engine + watchdog), HEALTHY. M3S active in shadow mode (day 1/7 clock running).
+**Test suite:** 607 passing, 0 skipped (525 prior + 82 Strategy A/B tests).
 **Portfolio:** bb_rsi_mr_opt 40% / donchian_ensemble_adx 30% / vol_momentum 30% — Sharpe 2.318 (backtest, 2yr walk-forward).
 
 > See `ROADMAP.md` for phase table. See `SESSIONS_ARCHIVE.md` for Sessions 8-17.
@@ -78,6 +78,60 @@ Verification: **316 tests pass** (289 → 316, +27). Sub-phase 0.1 ships disconn
 `src/m3s/evaluation.py` — `purged_kfold_splits` generator with purging (removes training samples whose labels overlap test window) + embargoing (gap after test to kill serial-correlation leak). Per-fold Sharpe annualized to √365, deflated Sharpe (Bailey & Lopez de Prado 2014 simplified), `bayesian_fractional_kelly` (Baker-McHale 2013): `f* = μ̂ / (σ² + σ_μ²)`, clamped [0.20, 0.50]. New strategies with high σ_μ² land near ⅕-Kelly automatically; mature strategies approach ½-Kelly. `evaluate_strategy` ties everything together into a `StrategyEvaluation` record. Tier 1 #6 + #7.
 
 **M3S totals:** 10 sub-phases, ~3,400 LOC across `src/m3s/` (13 modules + `__init__.py`), 227 new M3S tests, 5 backtest gates all green, wired into `src/main.py` with `enabled=false` default. Nothing in `src/risk/` was modified. Committed as `d8d146f feat(m3s): Phase 3b-2 complete — 10 sub-phases, 7 Tier 1 additions`, pushed to `origin/main`.
+
+**Phase 3b-3 — Strategy expansion (Session 22 addendum).**
+
+Prince requested two new strategies to diversify the 3-strategy book so M3S has real allocator work. Super-planning process delivered a 5-sub-phase plan per strategy with explicit gates and pre-committed kill fallback.
+
+**Strategy A — Perpetual Funding Rate Carry: ✅ SHIPPED**
+
+Gate history:
+- A.1 research memo (`docs/planning/strategy_a_funding_carry_research.md`): PASS — structural edge, retail expected net Sharpe 0.6-0.9 clears 0.5 floor
+- A.2 synthetic data generator + `BinanceFundingDownloader`: 13 unit tests, zero-friction cumulative return equals Σ(funding) to 1e-9
+- A.3 `FundingCarryStrategy` + 3-year synthetic backtest: **Sharpe 2.584**, +3.83% return, 57 trades — well above 0.6 proceed-to-paper threshold
+- A.4 validation: Monte Carlo shuffle (P(profit) ≥ 55%), fee sensitivity sweep (0.00003→0.00010 monotonic), 5-event crash stress (max DD < 6%), walk-forward OOS positive
+- A.5 M3S integration: correlation to existing book < 0.3, allocator includes strategy, registered in `STRATEGY_REGISTRY`
+
+**Key insight (scope hack #1):** v1 represents the hedged pair `short BTCUSDT perp + long BTCUSDT spot` as a single synthetic asset `BTCUSDT-CARRY` whose close drifts by `funding_rate - friction` per 8h epoch. This captures the economics exactly without building multi-leg Binance Futures infrastructure. Real Futures execution is deferred to v2 after 4+ weeks of paper trading validates the edge.
+
+**Friction budget correction (A.2→A.3):** Initially set friction to 0.16% per 8h (interpreting "round-trip friction" as per-epoch), which caused the backtest to show -77% return. Fixed by reinterpreting as amortized per-epoch friction (0.005% per 8h) — matches the research memo's 3-5% annualized expectation. Baseline backtest then produced Sharpe 2.584 / +3.83% return.
+
+New files (Strategy A):
+- `src/strategies/carry/funding_carry.py` (195 LOC) — `FundingCarryStrategy`
+- `src/data/funding_synthetic.py` — synthetic OHLCV builder from funding Parquet
+- `src/data/downloader.py` extended with `BinanceFundingDownloader` for `/fapi/v1/fundingRate`
+- `config/strategies.toml` `[funding_carry]` section (enabled=false default)
+- 5 test files (44 tests): `test_funding_synthetic.py` (9), `test_funding_downloader.py` (4), `test_funding_carry.py` (16), `test_funding_carry_backtest.py` (3), `test_funding_carry_validation.py` (7), `test_funding_carry_m3s_integration.py` (5)
+- `docs/planning/strategy_a_funding_carry_research.md` — Stage 1 research memo
+
+**Strategy B — Cross-Sectional Altcoin Momentum (Clenow): 💀 KILLED AT B.3**
+
+Gate history:
+- B.1 research memo (`docs/planning/strategy_b_momentum_research.md`): BORDERLINE PASS — Sharpe estimate 0.15-0.35 blended, cleared 0.15 floor but marginally. Explicitly flagged as highest-risk kill point.
+- B.2 `RankCache` primitive + `scripts/build_momentum_rank_cache.py` builder + `config/universes.toml` manifest + 24 unit tests: infrastructure complete
+- B.3 real-data backtest on 9 altcoins × 2 years (resampled 1h→1d): **average per-symbol Sharpe -0.124** — fails KILL gate of 0.1
+
+Per-symbol results: 4 positive (BNB +0.701, DOGE +0.340, DOT +0.244, ETH +0.168), 5 negative (ADA, SOL, NEAR, XRP, AVAX roughly flat to negative). Classic scatter with no net edge. Publication decay + small universe + cross-regime compression killed it.
+
+**Pre-committed fallback engaged:** Prince explicitly confirmed "accept 4-strategy book" if Strategy B failed its research gate (the pre-approval was for B.1 but the same logic applies here). Obituary filed at `docs/strategy_obituaries/strategy_b_clenow_momentum.md`.
+
+**What's kept from Strategy B:**
+- `src/strategies/ranking.py` (246 LOC) — `RankCache`, `compute_clenow_score`, `rank_weights_from_scores`. **Reusable for future rank-based strategies** (cross-sectional mean reversion, factor rotation, carry-momentum hybrid).
+- `scripts/build_momentum_rank_cache.py` — offline precompute job. Reusable.
+- `config/universes.toml` — survivorship-bias-aware altcoin manifest. Reusable.
+- `src/strategies/momentum/clenow_momentum.py` — strategy file. `enabled=false` in config, never deployed to paper.
+- 38 tests (test_ranking.py: 24, test_clenow_momentum.py: 11, test_momentum_backtest.py: 3) — all kept green as infrastructure regression guards.
+
+**Revival path** (documented in obituary): download 30+ altcoin 1d OHLCV for 6+ years, re-run `build_momentum_rank_cache.py` with full universe, re-test B.3. Expected improvement: limited universe (9 symbols) may have been a major factor.
+
+**Sub-phase totals (Phase 3b-3):**
+- A: 5/5 sub-phases complete, 44 new tests
+- B: 3 sub-phases built (B.1-B.3), killed at B.3 gate, 38 tests kept as infrastructure. B.4 + B.5 skipped.
+- Stage 1.5 shared infra: RankCache primitive (reused by any future rank strategy), universes.toml manifest, `BinanceFundingDownloader`
+
+Verification: **607 tests passing** (525 → 607, +82). Strategy A shipped disabled in config; Strategy B killed and marked `enabled=false`. 4-strategy book (existing 3 + funding_carry once real data is downloaded) is the operational outcome.
+
+---
 
 **Shadow checker + 7-day accelerated clock (post-commit Session 22 addendum).**
 
