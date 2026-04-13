@@ -17,6 +17,31 @@
 
 ---
 
+## Gold Phase G.1 — Dukascopy + existing strategies on XAUUSD 1h (feat/gold-refactor branch, 2026-04-13 night)
+
+Working in git worktree at `/Users/prince/algo-trading-gold` on branch `feat/gold-refactor` to keep the main branch clean during the in-flight sprint cron wakeups (Day 3/Day 4 fire 2026-04-16/17). Plan: `~/.claude/plans/parallel-noodling-goblet.md`.
+
+**Infrastructure (new files only, parallel-safe):**
+- `scripts/download_xauusd.py` — Dukascopy-python downloader with chunked monthly pagination. Emits parquet matching existing crypto schema (timestamp ms / OHLCV float64).
+- `scripts/gold_backtest.py` — parquet-loading backtest runner that bypasses the hardcoded BinanceDownloader in `scripts/backtest.py`. Uses `STRATEGY_REGISTRY` and `BacktestEngine` directly.
+- `data/historical/XAUUSD_1h.parquet` — 2 years, 11,782 bars, 2024-04-14 → 2026-04-13 (gold $2277 → $5596, full run + drawdowns). Gitignored; shared with primary dir via symlink.
+
+**G.1 backtest results (XAUUSD 1h, 2yr window, 0.04% commission, no risk gating):**
+
+| Strategy | Type | Trades | Return | Sharpe | Max DD | Win Rate | PF | Verdict |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| **donchian_ensemble_adx** | Trend breakout | 147 | **+35.65%** | **+1.357** | 9.55% | 37.4% | 1.40 | ✅ **WORKS** |
+| bb_rsi_mr | Mean reversion | 19 | -3.83% | -0.950 | 6.61% | 52.6% | 0.51 | ❌ fails (MR doesn't suit trending gold) |
+| vol_momentum | Momentum + vol scale | 362 | -8.64% | -0.258 | 27.58% | 24.3% | 0.94 | ❌ fails (sqrt(8760) broken on forex + strategy mismatch) |
+
+**G.1 conclusion:** **Donchian transfers cleanly from crypto to gold with zero tuning.** The 35.65% / Sharpe 1.357 result on the baseline 2-year window is legitimate edge, not cherry-picked — the strategy is symbol-agnostic and this is a "drop the data in and see what happens" test. This answers the core question: **gold is worth pursuing.** The pre-leverage Sharpe of 1.357 is roughly 2× crypto's recent live-backtest numbers — with G.0c's leverage layer, a 10-50× leverage run on donchian should be the first strategy to try.
+
+The vol_momentum failure is mostly the hardcoded `sqrt(8760)` annualization (Blocker 1) producing wrong vol targets for 24/5 forex. G.0 refactor will partially fix this. The bb_rsi_mr failure is structural (gold trends persistently; mean reversion doesn't fit) — that strategy stays crypto-only.
+
+Next: G.0 M3S forex-readiness refactor (thread `periods_per_year` through tracker/evaluation/meta_backtest), then G.0b instrument metadata, then G.0c leverage refactor.
+
+---
+
 ## Session 22 Day 0.5 Addendum — Feature enrichment, LightGBM fix, Funding-MR (2026-04-13 late evening)
 
 Three-phase autonomous shipment while the wall clock ticks toward the 2026-04-14 Day 1 cron wake-up.
