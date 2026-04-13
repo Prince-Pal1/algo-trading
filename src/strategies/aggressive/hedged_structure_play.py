@@ -68,11 +68,13 @@ class HedgedStructurePlayStrategy(BaseStrategy):
         max_risk_per_trade: float = 0.05,
         *,
         leverage_range: tuple[float, float] = (500.0, 1000.0),
-        hedge_trigger_pct: float = 0.01,       # 1% adverse → hedge
-        max_bars_in_hedge: int = 288,          # ~24h on M5 = 288 bars
-        max_bars_in_primary: int = 72,         # ~6h on M5
+        hedge_trigger_pct: float = 0.01,
+        max_bars_in_hedge: int = 288,
+        max_bars_in_primary: int = 72,
         structure_proximity_pips: float = 5.0,
         pip_size: float = 0.10,
+        use_experimental_entry: bool = False,
+        breakout_lookback_bars: int = 96,  # ~8h on M5
     ):
         super().__init__(
             name=name,
@@ -87,8 +89,11 @@ class HedgedStructurePlayStrategy(BaseStrategy):
         self.max_bars_in_primary = max_bars_in_primary
         self.structure_proximity_pips = structure_proximity_pips
         self.pip_size = pip_size
+        self.use_experimental_entry = use_experimental_entry
+        self.breakout_lookback_bars = breakout_lookback_bars
 
         self._s = _State()
+        self._close_history: list[float] = []
 
     def set_structure_levels(self, levels: list[StructureLevel]) -> None:
         self._s.structure_levels = list(levels)
@@ -147,13 +152,33 @@ class HedgedStructurePlayStrategy(BaseStrategy):
         s = self._s
         s.bars_in_state += 1
 
-        # ── FLAT → enter primary on a simple seed (first bar after reset) ──
+        # Maintain rolling close history for breakout detection
+        self._close_history.append(close)
+        if len(self._close_history) > self.breakout_lookback_bars * 2:
+            self._close_history = self._close_history[-self.breakout_lookback_bars * 2:]
+
+        # ── FLAT → enter primary on a real entry signal ──
         if s.state == HedgeState.FLAT:
             if atr <= 0:
                 return None
-            # Simple seed: go with the direction of the current bar
-            open_ = float(features["open"])
-            direction = 1 if close >= open_ else -1
+
+            if self.use_experimental_entry:
+                # Require enough history for a breakout check
+                if len(self._close_history) < self.breakout_lookback_bars + 1:
+                    return None
+                window = self._close_history[-self.breakout_lookback_bars - 1:-1]
+                lookback_high = max(window)
+                lookback_low = min(window)
+                if close > lookback_high:
+                    direction = 1
+                elif close < lookback_low:
+                    direction = -1
+                else:
+                    return None
+            else:
+                open_ = float(features["open"])
+                direction = 1 if close >= open_ else -1
+
             return self._open_primary(symbol, timeframe, close, atr, direction)
 
         # ── PRIMARY running ──

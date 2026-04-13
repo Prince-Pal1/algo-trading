@@ -34,6 +34,8 @@ class CandleBurstHunterStrategy(BaseStrategy):
         trail_distance_pips: float = 2.0,
         pip_size: float = 0.10,
         max_hold_bars: int = 18,           # ~90 seconds on M5 ≈ ok for bar-level
+        use_experimental_entry: bool = False,
+        ema_trend_period: int = 21,
     ):
         super().__init__(
             name=name,
@@ -50,6 +52,8 @@ class CandleBurstHunterStrategy(BaseStrategy):
         self.trail_distance_pips = trail_distance_pips
         self.pip_size = pip_size
         self.max_hold_bars = max_hold_bars
+        self.use_experimental_entry = use_experimental_entry
+        self.ema_trend_period = ema_trend_period
 
         self._atr_col = f"ATR_{atr_period}"
         self._entry_price: float = 0.0
@@ -154,6 +158,19 @@ class CandleBurstHunterStrategy(BaseStrategy):
             return None
 
         direction = 1 if close > open_ else -1
+
+        # Experimental entry filter: only fire when burst direction agrees
+        # with the EMA trend (multi-timeframe confirmation)
+        if self.use_experimental_entry:
+            ema = features.get(f"EMA_{self.ema_trend_period}")
+            if ema is None or pd.isna(ema):
+                return None
+            ema_val = float(ema)
+            if direction > 0 and close < ema_val:
+                return None
+            if direction < 0 and close > ema_val:
+                return None
+
         action = SignalAction.LONG if direction > 0 else SignalAction.SHORT
         self._entry_price = close
         self._best_price = close

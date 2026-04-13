@@ -37,6 +37,8 @@ class NewsSpikeFadeStrategy(BaseStrategy):
         hard_sl_pips: float = 40.0,
         max_hold_bars: int = 3,
         pip_size: float = _PIP_SIZE,
+        use_experimental_entry: bool = False,
+        post_news_scan_bars: int = 3,
     ):
         super().__init__(
             name=name,
@@ -55,9 +57,13 @@ class NewsSpikeFadeStrategy(BaseStrategy):
         self.max_hold_bars = max_hold_bars
         self.pip_size = pip_size
 
+        self.use_experimental_entry = use_experimental_entry
+        self.post_news_scan_bars = post_news_scan_bars
+
         self._entry_price: float = 0.0
         self._spike_distance: float = 0.0
         self._bars_in_position: int = 0
+        self._bars_since_news_start: int = -1
 
     def _in_news_window(self, ts_ms: int) -> bool:
         return any(w.contains(ts_ms) for w in self.news_windows)
@@ -132,9 +138,21 @@ class NewsSpikeFadeStrategy(BaseStrategy):
                 )
             return None
 
-        # ── Entry: inside a news window + spike > trigger ──
-        if not self._in_news_window(ts_ms):
-            return None
+        # ── Entry: inside a news window (or within post_news_scan_bars) ──
+        in_window = self._in_news_window(ts_ms)
+        if self.use_experimental_entry:
+            if in_window:
+                self._bars_since_news_start = 0
+            elif self._bars_since_news_start >= 0:
+                self._bars_since_news_start += 1
+                if self._bars_since_news_start > self.post_news_scan_bars:
+                    self._bars_since_news_start = -1
+                    return None
+            else:
+                return None
+        else:
+            if not in_window:
+                return None
 
         spike = (close - open_)
         spike_abs = abs(spike) / self.pip_size
