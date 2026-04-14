@@ -580,3 +580,92 @@ class SwiftAlmaStrategy(BaseStrategy):
         self._ladder_tp3_price = 0.0
         self._ladder_tp1_hit = False
         self._ladder_tp2_hit = False
+
+    # ── Pine parity classmethod (Stage 0 validation support) ───────
+
+    @classmethod
+    def detect_signals_lookahead(
+        cls,
+        ohlc_df,
+        *,
+        anchor_segments=None,
+        alt_tf_multiplier: int = 8,
+        alma_length: int = 2,
+        alma_offset: float = 0.85,
+        alma_sigma: float = 5.0,
+        timeframe_minutes: int = 5,
+        **_unused,
+    ):
+        """Generate Pine-faithful entry signals via the lookahead path.
+
+        This is the classmethod used by the TradingView Parity Validation
+        framework (`scripts/tv_parity_validate.py`) to confirm that this
+        port produces the EXACT same signals as Pine Script's SWIFTALGO
+        on the same OHLC data.
+
+        It replicates the `request.security(..., lookahead=barmerge.lookahead_on)`
+        semantics: at every base-TF bar inside a still-forming alt-TF bar,
+        the ALMA value is the FINAL value of that alt bar (future data in
+        backtest, which is why live Pine repaints).
+
+        Different from `on_features()` (the production path), which uses
+        `AlternateTimeframeBuilder.feed()` with non-repainting semantics.
+
+        Args:
+            ohlc_df: pd.DataFrame with columns timestamp (ms), open, high,
+                low, close
+            anchor_segments: per-bar alt-TF anchor offsets (list of
+                (ts_ms, anchor_min) tuples). If None, assumes anchor=0.
+                Typically computed by
+                `tv_parity.detect_alt_anchor_segments(tv_chart_df, alt_tf_min)`.
+            alt_tf_multiplier: Pine's intRes (default 8)
+            alma_length, alma_offset, alma_sigma: ALMA params matching
+                Pine's defaults (length=2, offset=0.85, sigma=5)
+            timeframe_minutes: chart TF in minutes (5 for M5 chart)
+            **_unused: ignored extra kwargs for flexible config dicts
+
+        Returns:
+            The input DataFrame with added columns:
+                alt_ts, alma_close, alma_open, le_trigger, se_trigger
+        """
+        from src.backtest.tv_parity import (
+            apply_lookahead_alma_cross,
+            resample_with_dynamic_anchor,
+        )
+
+        alt_tf_min = alt_tf_multiplier * timeframe_minutes
+        if anchor_segments is None:
+            anchor_segments = [(0, 0)]
+
+        alt = resample_with_dynamic_anchor(ohlc_df, alt_tf_min, anchor_segments)
+        # The resample adds alt_ts to ohlc_df internally but returns the
+        # aggregated alt bars. We need ohlc_df with alt_ts for the merge.
+        ohlc_with_alt_ts = ohlc_df.copy()
+        bar_ms = alt_tf_min * 60 * 1000
+        ohlc_with_alt_ts["_anchor_min"] = ohlc_with_alt_ts["timestamp"].apply(
+            lambda t: _anchor_for_local(int(t), anchor_segments)
+        )
+        ohlc_with_alt_ts["alt_ts"] = (
+            ((ohlc_with_alt_ts["timestamp"] - ohlc_with_alt_ts["_anchor_min"] * 60_000) // bar_ms) * bar_ms
+            + ohlc_with_alt_ts["_anchor_min"] * 60_000
+        )
+        return apply_lookahead_alma_cross(
+            ohlc_with_alt_ts, alt,
+            alma_length=alma_length, alma_offset=alma_offset, alma_sigma=alma_sigma,
+        )
+
+
+def _anchor_for_local(ts_ms: int, segments):
+    """Inline copy of anchor_for() to avoid circular-import pain.
+
+    Step-function lookup over (ts_ms → anchor_min) segments.
+    """
+    if not segments:
+        return 0
+    best = segments[0][1]
+    for seg_ts, seg_anchor in segments:
+        if seg_ts <= ts_ms:
+            best = seg_anchor
+        else:
+            break
+    return best
