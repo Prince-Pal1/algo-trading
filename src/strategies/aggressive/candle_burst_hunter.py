@@ -1,19 +1,29 @@
 """Mid-candle momentum entry for the aggressive retail sub-book.
 
-STATUS: NOT ALPHA-READY. See task "candle_burst_hunter OBITUARY".
-Short version: the strategy's core premise — "detect a fast-moving
-candle mid-bar and enter in its direction" — REQUIRES tick-level
-data. On bar-level (M1/M5/1h) the "burst" is measured AFTER the bar
-closes, by which point it's too late to enter at the start of the
-burst. The Tier 5 infra validation (G.2h.3) with an experimental
-multi-timeframe EMA-trend filter still wiped at -100% / 3451 trades
-over 2 years.
+STATUS: NOT ALPHA-READY (2026-04-14 — M1 revival attempt also failed).
 
-KILL for this phase. Revisit when:
-- Tick data + tick-level execution infrastructure lands
-- OR the strategy is redesigned as "enter on the CLOSE of a burst bar
-  confirmed by a pullback within 1-2 bars" (fundamentally a different
-  signal from mid-bar velocity)
+History:
+1. 2026-04-13 M5 kill (task #94): "burst" measured AFTER bar close,
+   too late to capture mid-bar velocity. G.2h.3 experimental
+   EMA-trend filter also wiped.
+2. 2026-04-14 M1 revival attempt (task #100, after G.5b unlocked
+   tick-adjacent M1 resolution): all 6 configs wiped to -100% on
+   12mo of 350k M1 XAUUSD bars, trade counts 1194-17591. At M1
+   cadence the (close - open) > burst_atr_mult × ATR_20 filter
+   is over-triggered by normal gold M1 noise — ATR_20 on M1 is
+   tiny (~0.5-1.5) so any 1-2 pip bar qualifies as a "burst".
+   The filter measures a fundamentally different thing at M1 vs M5.
+
+Root cause: the strategy conflates "candle travel" with "burst
+velocity". On M5 both are correlated (a 1.5×ATR bar IS a fast-moving
+minute). On M1, travel is dominated by microstructure noise, so
+1.5×ATR bars occur constantly without any directional persistence.
+A true burst detector would need "cumulative velocity over last N
+minutes" or "consecutive same-direction bars", not single-bar travel.
+
+KILL permanently. Revisit only as a new strategy (different signal
+architecture: multi-bar velocity or tick-level acceleration), not
+as a parameter tune of the existing one.
 
 Retained in src/strategies/aggressive/ as a reference for future work.
 """

@@ -162,6 +162,108 @@ class TestNewsSpikeFade:
         assert exit_sig.action == SignalAction.CLOSE
         assert exit_sig.metadata["exit_reason"] == "target"
 
+    def test_peak_reversal_waits_for_stall_then_enters(self):
+        """With require_peak_reversal=True, entry only fires on the
+        first bar after the peak where close drops reversal_pips below
+        the running peak_high. Tests the M1-revival pattern.
+
+        Note: pip_size = 0.10 by default, so reversal_pips=3.0 means
+        a 0.30 price difference (3 pips × $0.10/pip for XAUUSD).
+        """
+        window = NewsWindow(start_ms=_ts(7, 13, 25), end_ms=_ts(7, 13, 45), label="NFP")
+        s = NewsSpikeFadeStrategy(
+            news_windows=[window],
+            spike_trigger_pips=30.0,
+            require_peak_reversal=True,
+            reversal_pips=3.0,  # = 0.30 price units
+        )
+
+        # Pre-window
+        s.process("XAUUSD", "5m", _bar(2400.0, 2400.5, 2399.5, 2400.0, ts_ms=_ts(7, 13, 20)))
+        # Window start — captures pre_window_price, no signal
+        s.process("XAUUSD", "5m", _bar(2400.0, 2400.5, 2399.5, 2400.0, ts_ms=_ts(7, 13, 26)))
+
+        # Arming bar: high=2405 crosses the 30-pip trigger → peak_high=2405, NO entry yet
+        armed = s.process("XAUUSD", "5m", _bar(2400.0, 2405.0, 2400.0, 2404.9, ts_ms=_ts(7, 13, 31)))
+        assert armed is None
+        assert s._spike_armed_dir == 1
+        assert s._peak_high == 2405.0
+
+        # Peak extension: new high at 2408 → peak_high=2408, still no entry
+        # close is within 0.1 of new peak, below the 0.30 reversal threshold
+        extended = s.process("XAUUSD", "5m", _bar(2404.9, 2408.0, 2404.5, 2407.9, ts_ms=_ts(7, 13, 33)))
+        assert extended is None
+        assert s._peak_high == 2408.0
+
+        # Stall bar: high does NOT exceed peak, close drops < 3 pips below peak
+        # close = 2407.9, peak = 2408, drop = 0.1 pips (< 3 pips = 0.30 threshold)
+        stall_half = s.process("XAUUSD", "5m", _bar(2407.9, 2407.95, 2407.7, 2407.9, ts_ms=_ts(7, 13, 36)))
+        assert stall_half is None  # reversal threshold not crossed yet
+
+        # Stronger stall: close 3+ pips below peak
+        # threshold = 2408 - 0.30 = 2407.70; close = 2407.4 → crosses → entry
+        entry = s.process("XAUUSD", "5m", _bar(2407.9, 2407.9, 2407.0, 2407.4, ts_ms=_ts(7, 13, 38)))
+        assert entry is not None
+        assert entry.action == SignalAction.SHORT
+        assert entry.metadata["peak_high"] == 2408.0
+
+    def test_peak_reversal_end_to_end(self):
+        """Arm on bar N, enter on bar N+1 where close confirms the reversal."""
+        window = NewsWindow(start_ms=_ts(7, 13, 25), end_ms=_ts(7, 13, 45), label="NFP")
+        s = NewsSpikeFadeStrategy(
+            news_windows=[window],
+            spike_trigger_pips=30.0,
+            require_peak_reversal=True,
+            reversal_pips=3.0,
+            sl_mult=1.5,
+        )
+
+        # Pre-window + window start bars
+        s.process("XAUUSD", "5m", _bar(2400.0, 2400.5, 2399.5, 2400.0, ts_ms=_ts(7, 13, 20)))
+        s.process("XAUUSD", "5m", _bar(2400.0, 2400.5, 2399.5, 2400.0, ts_ms=_ts(7, 13, 26)))
+
+        # Arming bar: 50-pip up excursion; high=2405; close close to peak
+        arm = s.process("XAUUSD", "5m", _bar(2400.0, 2405.0, 2400.0, 2404.9, ts_ms=_ts(7, 13, 31)))
+        assert arm is None
+        assert s._spike_armed_dir == 1
+        assert s._peak_high == 2405.0
+
+        # Reversal bar: close drops past the 0.30 threshold
+        # peak=2405, threshold=2404.70, close=2401.5 → well past
+        sig = s.process("XAUUSD", "5m", _bar(2404.9, 2404.95, 2401.0, 2401.5, ts_ms=_ts(7, 13, 36)))
+        assert sig is not None
+        assert sig.action == SignalAction.SHORT
+        assert sig.entry_price == 2401.5
+        assert sig.metadata["entry_mode"] == "peak_reversal"
+        assert sig.metadata["peak_high"] == 2405.0
+        # SL = peak_high + (spike_pips * (sl_mult - 1.0)) * pip_size
+        # spike_pips = (2405 - 2400) / 0.1 = 50, sl = 2405 + (50 * 0.5 * 0.1) = 2407.5
+        assert sig.stop_loss == pytest.approx(2407.5)
+
+    def test_peak_reversal_down_spike_enters_long(self):
+        """Down-spike peak-reversal enters a LONG."""
+        window = NewsWindow(start_ms=_ts(7, 13, 25), end_ms=_ts(7, 13, 45), label="NFP")
+        s = NewsSpikeFadeStrategy(
+            news_windows=[window],
+            spike_trigger_pips=30.0,
+            require_peak_reversal=True,
+            reversal_pips=3.0,
+        )
+        s.process("XAUUSD", "5m", _bar(2400.0, 2400.5, 2399.5, 2400.0, ts_ms=_ts(7, 13, 20)))
+        s.process("XAUUSD", "5m", _bar(2400.0, 2400.5, 2399.5, 2400.0, ts_ms=_ts(7, 13, 26)))
+
+        # Arm: low = 2395, down-spike
+        arm = s.process("XAUUSD", "5m", _bar(2400.0, 2400.0, 2395.0, 2396.0, ts_ms=_ts(7, 13, 31)))
+        assert arm is None
+        assert s._spike_armed_dir == -1
+        assert s._peak_low == 2395.0
+
+        # Reversal bar: low doesn't drop further, close rises 10+ pips above peak_low
+        sig = s.process("XAUUSD", "5m", _bar(2396.0, 2399.0, 2395.5, 2398.5, ts_ms=_ts(7, 13, 36)))
+        assert sig is not None
+        assert sig.action == SignalAction.LONG
+        assert sig.metadata["entry_mode"] == "peak_reversal"
+
 
 # ══════════════════════════════════════════════════════════════════════
 # HedgedStructurePlayStrategy — state machine
