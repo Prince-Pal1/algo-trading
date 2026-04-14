@@ -127,6 +127,8 @@ On every new session:
 ## Key Technical Decisions (Do Not Override)
 
 - **Platform:** macOS -- MT5 does NOT work, use IC Markets cTrader + IBKR `ib_insync`
+  - **Cost asymmetry on gold (2026-04-14 task #105 + #107):** cTrader gold commission is ~3.86× higher than MT4 ($27 vs $7 round-trip per lot at $4500/oz) due to volume-based ($3 per $100k notional) vs fixed-per-lot ($3.50/lot) pricing. MT4 is NOT viable on macOS (Windows-only C++, removed per BLUEPRINT.md). We accept the higher cTrader cost as the deployment trade-off. For gold-heavy strategies, budget ~7% of equity in commissions per 1000 trades. See `docs/BROKER_FEES.md` and `src/backtest/fee_profiles.py`.
+  - **MANDATORY before every backtest:** select an explicit fee profile via `make_fee_model("ic_markets_ctrader_xauusd_normal")` — never use the default `ICMarketsMetalFeeModel()` constructor. The implicit default was a 90× slippage bug source (commit `6ae48c8` fix); this discipline rule is enforced by `feedback_select_fee_profile_first` memory.
 - **DataFrames:** pandas primary (`ta` library for indicators, not pandas-ta)
 - **Backtesting:** Custom event-driven engine (`src/backtest/engine.py`) — same code path as live. NOT VectorBT.
 - **Strategy Ingestion:** YAML IR → code generator, 6 format parsers (Pine Script, MQL4/5, NL, webhook, raw rules, Python frameworks)
