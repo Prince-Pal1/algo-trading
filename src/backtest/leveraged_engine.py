@@ -276,7 +276,16 @@ class LeveragedBacktestEngine:
                         strategy_name=t.get("strategy_name", ""),
                     ))
 
-            # Step 3: call each strategy, route its signal to the declared sub-book
+            # Step 3: call each strategy, route its signal to the declared sub-book.
+            # When the path model is an M1PathModel, attach the current bar's
+            # M1 sub-bars to the row so scalper strategies can query intrabar
+            # velocity / microstructure during signal generation. Strategies
+            # that don't care read nothing and pay no cost.
+            if isinstance(self._path_model, M1PathModel):
+                sub_bars_for_row = self._path_model._sub_bars_for(int(bar.ts_ms))
+                if sub_bars_for_row:
+                    row = row.copy()
+                    row["intrabar_sub_bars"] = sub_bars_for_row
             for strategy, sub_book, leverage in strategy_routes:
                 signal = strategy.process(symbol, timeframe, row)
                 if signal is not None:

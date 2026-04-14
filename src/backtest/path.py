@@ -52,8 +52,15 @@ from __future__ import annotations
 
 import math
 import random
+from collections import namedtuple
 from dataclasses import dataclass
 from typing import Callable, Sequence
+
+
+# M1 sub-bar OHLCV tuple — used by M1PathModel to store and return
+# intrabar data. Strategies consuming `intrabar_sub_bars` see this
+# as a list of M1SubBar named tuples with attribute access.
+M1SubBar = namedtuple("M1SubBar", ["open", "high", "low", "close", "volume"])
 
 
 @dataclass(frozen=True)
@@ -262,7 +269,7 @@ class M1PathModel:
     def __init__(
         self,
         *,
-        m1_lookup: dict[int, tuple[float, float]] | None = None,
+        m1_lookup: dict[int, "M1SubBar | tuple"] | None = None,
         m1_df: "pd.DataFrame | None" = None,  # noqa: F821 (forward ref — pd is lazy)
         sub_bar_count: int = 5,
         sub_bar_duration_ms: int = 60_000,
@@ -272,11 +279,15 @@ class M1PathModel:
         """Construct the M1 path model.
 
         Args:
-            m1_lookup: pre-built dict mapping `ts_ms → (low, high)` for
-                each M1 bar. If provided, `m1_df` is ignored.
-            m1_df: pandas DataFrame with M1 bars. Must have columns
-                `timestamp` (milliseconds) + `low` + `high`. Converted
-                to a lookup dict at construction time.
+            m1_lookup: pre-built dict mapping `ts_ms → M1SubBar` tuple
+                (open, high, low, close, volume) for each M1 bar. For
+                backward compatibility, plain `(low, high)` tuples are
+                also accepted and auto-upgraded with open=low, close=low,
+                volume=0. If provided, `m1_df` is ignored.
+            m1_df: pandas DataFrame with M1 bars. Must have `timestamp`,
+                `low`, `high` columns at minimum; `open`, `close`, `volume`
+                are also consumed if present. Converted to a lookup dict
+                at construction time.
             sub_bar_count: number of M1 sub-bars inside the trade
                 timeframe bar. Default 5 (M5 backtest). Use 60 for H1, etc.
             sub_bar_duration_ms: duration of each sub-bar in ms. Default
@@ -289,9 +300,39 @@ class M1PathModel:
             if m1_df is None:
                 raise ValueError("M1PathModel needs either m1_lookup or m1_df")
             m1_lookup = {}
+            has_open = "open" in m1_df.columns
+            has_close = "close" in m1_df.columns
+            has_volume = "volume" in m1_df.columns
             for _, row in m1_df.iterrows():
                 ts = int(row["timestamp"])
-                m1_lookup[ts] = (float(row["low"]), float(row["high"]))
+                m1_lookup[ts] = M1SubBar(
+                    open=float(row["open"]) if has_open else float(row["low"]),
+                    high=float(row["high"]),
+                    low=float(row["low"]),
+                    close=float(row["close"]) if has_close else float(row["high"]),
+                    volume=float(row["volume"]) if has_volume else 0.0,
+                )
+        else:
+            # Upgrade any legacy (low, high) 2-tuples in the lookup to
+            # full M1SubBar for interface consistency.
+            upgraded: dict[int, M1SubBar] = {}
+            for ts, v in m1_lookup.items():
+                if isinstance(v, M1SubBar):
+                    upgraded[int(ts)] = v
+                elif len(v) == 2:
+                    lo, hi = v
+                    upgraded[int(ts)] = M1SubBar(
+                        open=float(lo), high=float(hi), low=float(lo),
+                        close=float(lo), volume=0.0,
+                    )
+                elif len(v) == 5:
+                    upgraded[int(ts)] = M1SubBar(*[float(x) for x in v])
+                else:
+                    raise ValueError(
+                        f"M1PathModel m1_lookup values must be M1SubBar or "
+                        f"tuple of length 2 or 5, got len={len(v)} for ts={ts}"
+                    )
+            m1_lookup = upgraded
         self._m1 = m1_lookup
         self._sub_n = int(sub_bar_count)
         self._sub_dur_ms = int(sub_bar_duration_ms)
@@ -309,14 +350,17 @@ class M1PathModel:
         """True iff the level is within the bar's high/low range."""
         return bar.low <= level <= bar.high
 
-    def _sub_bars_for(self, m5_ts_ms: int) -> list[tuple[float, float]]:
-        """Return M1 sub-bars (low, high) tuples for the given M5 bar ts_ms.
+    def _sub_bars_for(self, m5_ts_ms: int) -> list["M1SubBar"]:
+        """Return M1 sub-bars as M1SubBar named tuples for the given bar ts_ms.
 
-        Returns an empty list if no M1 data covers this M5 bar. Missing
+        Returns an empty list if no M1 data covers this bar. Missing
         individual sub-bars (gaps inside a session) are silently skipped —
         the remaining sub-bars still give ordered coverage.
+
+        Each returned element has `.open`, `.high`, `.low`, `.close`,
+        `.volume` attributes (attribute access works via namedtuple).
         """
-        sub_bars: list[tuple[float, float]] = []
+        sub_bars: list[M1SubBar] = []
         for offset in range(self._sub_n):
             ts = m5_ts_ms + offset * self._sub_dur_ms
             hit = self._m1.get(ts)
@@ -357,8 +401,8 @@ class M1PathModel:
             self.stats["bridge_fallback_count"] += 1
             return self._bridge.fraction_into_bar(bar, level, bar_idx=bar_idx)
 
-        for i, (lo, hi) in enumerate(sub_bars):
-            if lo <= level <= hi:
+        for i, sb in enumerate(sub_bars):
+            if sb.low <= level <= sb.high:
                 self.stats["m1_hits"] += 1
                 return (i + 0.5) / len(sub_bars)
 
