@@ -72,7 +72,7 @@ from src.backtest.book import (
     LeveragedPosition,
 )
 from src.backtest.costs import ICMarketsMetalFeeModel
-from src.backtest.path import Bar, BrownianBridgeModel, check_sl_tp_hits
+from src.backtest.path import Bar, BrownianBridgeModel, M1PathModel, check_sl_tp_hits
 from src.data.feature_engine import _compute_indicators
 from src.m3s.hooks import M3S
 from src.strategies.base import BaseStrategy
@@ -150,7 +150,7 @@ class LeveragedBacktestEngine:
         initial_institutional_cash: float = 7_000.0,
         initial_aggressive_cash: float = 3_000.0,
         fee_model: ICMarketsMetalFeeModel | None = None,
-        path_model: BrownianBridgeModel | None = None,
+        path_model: BrownianBridgeModel | M1PathModel | None = None,
         m3s: M3S | None = None,
         run_id: str = "leveraged_default",
     ) -> None:
@@ -164,7 +164,10 @@ class LeveragedBacktestEngine:
                 plan's 30/70 initial suggestion.
             fee_model: IC Markets cost model. Default IC Markets Raw cTrader.
             path_model: intrabar path reconstruction model. Default
-                Brownian bridge seeded by run_id.
+                Brownian bridge seeded by run_id. Pass an `M1PathModel`
+                (with M1 ground-truth data) for tick-accuracy SL/TP
+                ordering on M5/H1 backtests — recommended for any
+                scalping strategy with SL distance < 2 × ATR.
             m3s: optional M3S facade. When provided, every LONG/SHORT signal
                 calls `m3s.request_leverage(strategy, conviction, range)`
                 and uses the granted leverage. Without an M3S instance, the
@@ -424,7 +427,7 @@ class LeveragedBacktestEngine:
         self,
         positions: dict[int, LeveragedPosition],
         bar: Bar,
-        path_model: BrownianBridgeModel,
+        path_model: BrownianBridgeModel | M1PathModel,
     ) -> dict[int, float]:
         """Return worst-case intrabar mark prices per position.
 

@@ -29,7 +29,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from src.backtest.path import Bar, BrownianBridgeModel
+from src.backtest.path import Bar, BrownianBridgeModel, M1PathModel
 
 
 M5_PATH = "data/historical/XAUUSD_5m.parquet"
@@ -89,11 +89,18 @@ def _level_timing_validation(
     m1: pd.DataFrame,
     m1_groups: dict[int, list[int]],
     rng: np.random.Generator,
+    model_kind: str = "bridge",
 ) -> LevelTimingResult:
-    """For SAMPLE_SIZE random M5 bars, compute bridge predicted fraction
-    vs M1 ground-truth fraction for a level placed inside the bar.
+    """For SAMPLE_SIZE random M5 bars, compute predicted fraction vs M1
+    ground-truth fraction for a level placed inside the bar.
+
+    model_kind: "bridge" → BrownianBridgeModel (M5-only, no M1 data).
+                "m1" → M1PathModel (uses M1 sub-bars as its prediction).
     """
-    model = BrownianBridgeModel(run_id=RUN_ID)
+    if model_kind == "bridge":
+        model: BrownianBridgeModel | M1PathModel = BrownianBridgeModel(run_id=RUN_ID)
+    else:
+        model = M1PathModel(m1_df=m1, sub_bar_count=5, run_id=RUN_ID)
     errors: list[float] = []
 
     # Filter m5 rows that have 5 M1 bars inside
@@ -148,11 +155,15 @@ def _both_hit_validation(
     m1: pd.DataFrame,
     m1_groups: dict[int, list[int]],
     rng: np.random.Generator,
+    model_kind: str = "bridge",
 ) -> BothHitResult:
     """For bars where two levels are both inside [low, high], check whether
-    the bridge model correctly identifies which was hit first vs the M1
+    the path model correctly identifies which was hit first vs the M1
     ground truth."""
-    model = BrownianBridgeModel(run_id=RUN_ID)
+    if model_kind == "bridge":
+        model: BrownianBridgeModel | M1PathModel = BrownianBridgeModel(run_id=RUN_ID)
+    else:
+        model = M1PathModel(m1_df=m1, sub_bar_count=5, run_id=RUN_ID)
     n_tested = 0
     n_agree = 0
 
@@ -202,7 +213,7 @@ def _both_hit_validation(
 
 
 def main() -> None:
-    print("G.5 — Brownian bridge intrabar path model validation")
+    print("G.5 / G.5b — Intrabar path model validation (bridge + M1)")
     print("=" * 65)
     print()
     print("Loading M5 + M1 data...")
@@ -217,39 +228,51 @@ def main() -> None:
 
     rng = np.random.default_rng(42)
 
-    print()
-    print(f"Validation 1/2: level timing error (n={SAMPLE_SIZE} random bars)")
-    timing = _level_timing_validation(m5, m1, m1_groups, rng)
-    print(f"  n_tested = {timing.n_tested}")
-    print(f"  mean error       = {timing.mean_error:.4f}")
-    print(f"  median error     = {timing.median_error:.4f}")
-    print(f"  p90 error        = {timing.p90_error:.4f}")
-    print(f"  p99 error        = {timing.p99_error:.4f}")
+    results: dict[str, tuple[LevelTimingResult, BothHitResult]] = {}
 
-    print()
-    print(f"Validation 2/2: both-hit ordering agreement (n={SAMPLE_SIZE} random bars)")
-    bh = _both_hit_validation(m5, m1, m1_groups, rng)
-    print(f"  n_tested    = {bh.n_tested}")
-    print(f"  n_agree     = {bh.n_agree}")
-    print(f"  agreement % = {bh.agreement_pct:.2f}%")
+    for kind in ("bridge", "m1"):
+        print()
+        print(f"── Model: {kind} ──")
+        print(f"Validation 1/2: level timing error (n={SAMPLE_SIZE} random bars)")
+        timing = _level_timing_validation(m5, m1, m1_groups, rng, model_kind=kind)
+        print(f"  n_tested         = {timing.n_tested}")
+        print(f"  mean error       = {timing.mean_error:.4f}")
+        print(f"  median error     = {timing.median_error:.4f}")
+        print(f"  p90 error        = {timing.p90_error:.4f}")
+        print(f"  p99 error        = {timing.p99_error:.4f}")
+
+        print(f"Validation 2/2: both-hit ordering agreement (n={SAMPLE_SIZE} random bars)")
+        bh = _both_hit_validation(m5, m1, m1_groups, rng, model_kind=kind)
+        print(f"  n_tested    = {bh.n_tested}")
+        print(f"  n_agree     = {bh.n_agree}")
+        print(f"  agreement % = {bh.agreement_pct:.2f}%")
+
+        results[kind] = (timing, bh)
 
     print()
     print("=" * 65)
-
-    # Decision gate
-    timing_pass = timing.mean_error < 0.25
-    ordering_pass = bh.agreement_pct > 80.0
-
-    print("Decision gates:")
-    print(f"  Timing gate (mean error < 0.25):       {'✅ PASS' if timing_pass else '❌ FAIL'} ({timing.mean_error:.4f})")
-    print(f"  Ordering gate (agreement > 80%):       {'✅ PASS' if ordering_pass else '❌ FAIL'} ({bh.agreement_pct:.2f}%)")
+    print("Summary:")
     print()
-    if timing_pass and ordering_pass:
-        print("✅ G.5 PASS — Brownian bridge model is sufficient for Tier 5 backtests")
-        print("   No tick-data upgrade needed. Continue with existing BrownianBridgeModel.")
+    print(f"{'Model':<12} {'Mean err':<12} {'Ordering':<12} {'Timing gate':<16} {'Ordering gate':<16}")
+    for kind, (t, bh) in results.items():
+        timing_pass = t.mean_error < 0.25
+        ordering_pass = bh.agreement_pct > 80.0
+        tg = "PASS" if timing_pass else "FAIL"
+        og = "PASS" if ordering_pass else "FAIL"
+        print(f"{kind:<12} {t.mean_error:<12.4f} {bh.agreement_pct:<11.2f}% {tg:<16} {og:<16}")
+
+    print()
+    m1_timing, m1_bh = results["m1"]
+    br_timing, br_bh = results["bridge"]
+
+    if m1_timing.mean_error < 0.25 and m1_bh.agreement_pct > 80.0:
+        print("✅ G.5b PASS — M1PathModel meets both gates.")
+        print(f"   M1 ordering {m1_bh.agreement_pct:.1f}% vs bridge {br_bh.agreement_pct:.1f}%")
+        print("   Switch leveraged engine default to M1PathModel where M1 data is available.")
     else:
-        print("❌ G.5 FAIL — Bridge model has bias. Upgrade to tick-based path model")
-        print("   before trusting Tier 5 backtest results.")
+        print("❌ G.5b FAIL — M1PathModel did not meet gates.")
+        print(f"   Timing: {m1_timing.mean_error:.4f} (need < 0.25)")
+        print(f"   Ordering: {m1_bh.agreement_pct:.2f}% (need > 80%)")
 
 
 if __name__ == "__main__":
