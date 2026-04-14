@@ -35,7 +35,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.data.feature_engine import _alma  # noqa: E402
 
 
-TV_CSV = Path.home() / "Downloads" / "VANTAGE_XAUUSD, 5 (1).csv"
+TV_CSV = Path.home() / "Downloads" / "VANTAGE_XAUUSD, 5.csv"
 
 # Pine Script SWIFTALGO parameters
 ALT_TF_MINUTES = 40
@@ -57,50 +57,90 @@ def load_tv_csv(path: Path) -> pd.DataFrame:
     return df
 
 
-def detect_alt_anchor(tv_df: pd.DataFrame) -> int:
-    """Infer the alt-TF anchor offset from TV's entry timestamps.
+def detect_alt_anchor_segments(tv_df: pd.DataFrame) -> list[tuple[int, int]]:
+    """Detect piecewise-constant anchor offsets across the data.
 
-    At a 40-min alt TF, all entries fire on the FIRST M5 of a new alt bar.
-    The minute-of-hour of each entry tells us the alignment.
-    Returns offset in minutes such that: (ts_ms - offset) mod alt_tf_ms == 0
+    Vantage sessions are anchored to an exchange-local time (New York).
+    When DST starts/ends, the UTC alignment of the alt-TF bars shifts
+    by 60 minutes, which is 20 min mod 40 min. So a single backtest
+    window spanning a DST transition sees TWO different anchor values.
+
+    Returns a list of (from_ts_ms, anchor_offset_min) tuples, sorted
+    by from_ts_ms. For any bar, the applicable anchor is the one
+    whose from_ts_ms is the largest ≤ bar's timestamp.
     """
-    entries = tv_df[tv_df["tv_long_entry"] | tv_df["tv_short_entry"]]
+    entries = tv_df[tv_df["tv_long_entry"] | tv_df["tv_short_entry"]].copy()
     if len(entries) == 0:
-        return 0
-    # Compute (timestamp_ms mod alt_tf_ms) in minutes for each entry
+        return [(0, 0)]
     alt_ms = ALT_TF_MINUTES * 60 * 1000
-    mods = entries["timestamp"] % alt_ms  # ms into current alt bar
-    mods_min = (mods // 60000).astype(int).tolist()
-    if not mods_min:
-        return 0
-    # The most common mod value is the "entry minute within alt bar" = 0
-    # So the anchor offset = the most common mod value
-    from collections import Counter
-    c = Counter(mods_min)
-    most_common, freq = c.most_common(1)[0]
-    print(f"  Anchor detection: mod distribution = {dict(c)}")
-    print(f"  Most common mod: {most_common} min  →  anchor offset = {most_common}")
-    return int(most_common)
+    entries["mod_min"] = ((entries["timestamp"] % alt_ms) // 60000).astype(int)
+    entries["date"] = entries["dt"].dt.date
+
+    # Assign a "mode anchor" to each day: the most common mod among entries
+    day_anchors = (
+        entries.groupby("date")["mod_min"]
+        .agg(lambda s: int(s.mode().iloc[0]) if not s.mode().empty else 0)
+    )
+
+    # Build segments — a new segment starts each time the day anchor changes
+    segments: list[tuple[int, int]] = []
+    prev_anchor: int | None = None
+    for d, anchor in day_anchors.items():
+        if anchor != prev_anchor:
+            # Use midnight UTC of this date as the segment start
+            ts_ms = int(pd.Timestamp(d, tz="UTC").timestamp() * 1000)
+            segments.append((ts_ms, int(anchor)))
+            prev_anchor = int(anchor)
+
+    # Ensure the very first segment starts at (or before) the first bar
+    if segments:
+        first_bar_ts = int(tv_df["timestamp"].iloc[0])
+        if segments[0][0] > first_bar_ts:
+            segments.insert(0, (first_bar_ts, segments[0][1]))
+
+    print(f"  Anchor segments: {len(segments)}")
+    for seg_ts, seg_anchor in segments:
+        seg_dt = pd.Timestamp(seg_ts, unit="ms", tz="UTC").strftime("%Y-%m-%d %H:%M")
+        print(f"    from {seg_dt} UTC: anchor = +{seg_anchor} min")
+    return segments
+
+
+def anchor_for(ts_ms: int, segments: list[tuple[int, int]]) -> int:
+    """Return the anchor offset applicable at the given timestamp."""
+    best = segments[0][1]
+    for seg_ts, seg_anchor in segments:
+        if seg_ts <= ts_ms:
+            best = seg_anchor
+        else:
+            break
+    return best
 
 
 def compute_replication_signals(
     tv_df: pd.DataFrame,
     alt_tf_min: int,
-    anchor_offset_min: int,
+    anchor_segments: list[tuple[int, int]],
     alma_length: int,
     alma_offset: float,
     alma_sigma: float,
 ) -> pd.DataFrame:
     """Run the lookahead replication logic on TV's bar data.
 
+    Uses a PER-BAR anchor offset (read from anchor_segments) to handle
+    DST transitions mid-window.
+
     Returns a DataFrame with our le_trigger / se_trigger flags added.
     """
     bar_ms = alt_tf_min * 60 * 1000
-    offset_ms = anchor_offset_min * 60 * 1000
 
-    # Assign each M5 bar to its containing alt bar (by timestamp)
+    # Assign each M5 bar to its containing alt bar using the segment anchor
     df = tv_df.copy()
-    df["alt_ts"] = ((df["timestamp"] - offset_ms) // bar_ms) * bar_ms + offset_ms
+    # Vectorized anchor lookup via a step function
+    df["anchor_min"] = df["timestamp"].apply(lambda t: anchor_for(int(t), anchor_segments))
+    df["alt_ts"] = (
+        ((df["timestamp"] - df["anchor_min"] * 60 * 1000) // bar_ms) * bar_ms
+        + df["anchor_min"] * 60 * 1000
+    )
 
     # Build alt-TF bars by groupby
     alt = df.groupby("alt_ts").agg(
@@ -186,12 +226,12 @@ def main() -> int:
     tv_df = load_tv_csv(TV_CSV)
     print(f"  {len(tv_df)} bars, {tv_df['dt'].iloc[0]} → {tv_df['dt'].iloc[-1]}")
 
-    print("\nDetecting alt-TF anchor...")
-    anchor_offset = detect_alt_anchor(tv_df)
+    print("\nDetecting alt-TF anchor segments (handles DST transitions)...")
+    anchor_segments = detect_alt_anchor_segments(tv_df)
 
-    print(f"\nComputing replication signals (anchor=+{anchor_offset}min)...")
+    print(f"\nComputing replication signals (per-bar dynamic anchor)...")
     df, alt = compute_replication_signals(
-        tv_df, ALT_TF_MINUTES, anchor_offset,
+        tv_df, ALT_TF_MINUTES, anchor_segments,
         ALMA_LENGTH, ALMA_OFFSET, ALMA_SIGMA,
     )
     print(f"  Alt bars built: {len(alt)}")
