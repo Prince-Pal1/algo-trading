@@ -383,7 +383,13 @@ class Book:
         current_free_margin = sb.free_margin({
             p.id: p.entry_price for p in sb.positions.values()  # mark at entry for simplicity
         })
-        if entry_margin > current_free_margin:
+        # Use a 1-cent epsilon to avoid rejecting positions where margin
+        # equals free margin to the nearest cent. Float precision can
+        # produce $10000.0 > $10000.0 = True due to ULP differences,
+        # which incorrectly rejects 1x-leverage strategies whose notional
+        # exactly equals available equity (e.g., SwiftAlmaStrategy with
+        # risk_pct == sl_pct → notional = equity at 1x). Discovered task #109.
+        if entry_margin > current_free_margin + 0.01:
             raise ValueError(
                 f"insufficient cash in {sub_book} sub-book: "
                 f"need margin ${entry_margin:.2f}, "
