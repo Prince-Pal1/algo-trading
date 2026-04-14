@@ -30,6 +30,7 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -41,11 +42,19 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.data.feature_engine import _alma  # noqa: E402
 
+TRADE_EXPORT_PATH = REPO_ROOT / "data" / "swift_alma_replication_trades.json"
+
 
 # ── Parameters matching Pine Script + TV's run ─────────────────────────
 START_DATE = "2025-04-14"
 END_DATE = "2026-04-14"
 ALT_TF_MINUTES = 40          # 8 × 5m (Pine default intRes=8 on M5 chart)
+# TV's Vantage XAUUSD alt bars are anchored at :10/:30/:50 past the hour,
+# a 10-minute shift from UTC-aligned :00/:20/:40 boundaries. Confirmed by
+# the minute-of-hour distribution in SWIFTALGO CSV exports. This shift
+# probably comes from Vantage's exchange session anchor. Matching it is
+# necessary for trade-by-trade equivalence with TV's strategy tester.
+ALT_BAR_ANCHOR_OFFSET_MIN = 10
 ALMA_LENGTH = 2
 ALMA_OFFSET = 0.85
 ALMA_SIGMA = 5
@@ -65,15 +74,21 @@ def load_m5_data() -> pd.DataFrame:
     return df[mask].reset_index(drop=True)
 
 
-def resample_to_alt_tf(m5: pd.DataFrame, alt_tf_min: int) -> pd.DataFrame:
+def resample_to_alt_tf(m5: pd.DataFrame, alt_tf_min: int, anchor_offset_min: int = 0) -> pd.DataFrame:
     """Resample M5 → alt-TF using integer-divide groupby on timestamp (ms).
 
-    Returns a DataFrame with one row per alt bar, plus a 'group' column
+    The `anchor_offset_min` shifts the alt-bar boundaries. At offset=0, bars
+    start at UTC 00:00, 00:40, 01:20, ... At offset=10, bars start at UTC
+    00:10, 00:50, 01:30, ... matching TV's Vantage XAUUSD anchor.
+
+    Returns a DataFrame with one row per alt bar, plus an 'alt_ts' column
     so we can map M5 bars back to their alt bar.
     """
     bar_duration_ms = alt_tf_min * 60 * 1000
+    offset_ms = anchor_offset_min * 60 * 1000
     m5 = m5.copy()
-    m5["group"] = (m5["timestamp"] // bar_duration_ms) * bar_duration_ms
+    # Shift timestamps by -offset, integer-divide, then shift back
+    m5["group"] = ((m5["timestamp"] - offset_ms) // bar_duration_ms) * bar_duration_ms + offset_ms
     alt = m5.groupby("group").agg(
         open=("open", "first"),
         high=("high", "max"),
@@ -84,10 +99,31 @@ def resample_to_alt_tf(m5: pd.DataFrame, alt_tf_min: int) -> pd.DataFrame:
 
 
 def compute_alma_pair(alt: pd.DataFrame, length: int, offset: float, sigma: float) -> pd.DataFrame:
-    """Add alma_close and alma_open columns to the alt-TF DataFrame."""
+    """Add alma_close and alma_open columns to the alt-TF DataFrame.
+
+    IMPORTANT: src.data.feature_engine._alma fills warmup NaN with 0.0,
+    which would create spurious crossovers when the first REAL alt bar
+    is compared against a 0.0 "prior" value. We drop the first (length+1)
+    alt bars to skip the warmup region entirely. Also drop the first alt
+    bar if it's a windowing artifact (incomplete because our data starts
+    mid-bar). Together this gives clean ALMA values from alt bar (length+2)
+    onwards.
+    """
     alt = alt.copy()
+    # _alma fills NaN with 0, so we get 0 for the first (length-1) rows.
+    # Drop those rows + 1 more for the shift(1) prev, + 1 for the windowing
+    # artifact alt bar (the first one is usually incomplete if data starts
+    # mid-alt-bar).
+    drop_n = length + 2
+    alt = alt.iloc[drop_n:].reset_index(drop=True)
     alt["alma_close"] = _alma(alt["close"], length, offset, sigma)
     alt["alma_open"] = _alma(alt["open"], length, offset, sigma)
+    # Explicitly mask the first `length-1` rows to NaN (since _alma.fillna
+    # would otherwise return 0.0 for those). We want no crossover fires
+    # against undefined prior values.
+    import numpy as np
+    alt.loc[alt.index[:length - 1], "alma_close"] = np.nan
+    alt.loc[alt.index[:length - 1], "alma_open"] = np.nan
     return alt
 
 
@@ -95,6 +131,7 @@ def detect_lookahead_signals(
     m5: pd.DataFrame,
     alt_with_alma: pd.DataFrame,
     alt_tf_min: int,
+    anchor_offset_min: int = 0,
 ) -> pd.DataFrame:
     """For each M5 bar, attach the ALMA values from the ALT BAR IT BELONGS TO.
 
@@ -103,19 +140,29 @@ def detect_lookahead_signals(
     real time, but are known in a historical backtest.
     """
     bar_duration_ms = alt_tf_min * 60 * 1000
+    offset_ms = anchor_offset_min * 60 * 1000
     m5 = m5.copy()
-    m5["alt_ts"] = (m5["timestamp"] // bar_duration_ms) * bar_duration_ms
+    m5["alt_ts"] = ((m5["timestamp"] - offset_ms) // bar_duration_ms) * bar_duration_ms + offset_ms
     # Left-join the alt ALMA values
     alt_lookup = alt_with_alma[["alt_ts", "alma_close", "alma_open"]]
     m5 = m5.merge(alt_lookup, on="alt_ts", how="left")
     # Detect crossovers on the alt-TF ALMA series, exposed at each M5 bar
     m5["alma_close_prev"] = m5["alma_close"].shift(1)
     m5["alma_open_prev"] = m5["alma_open"].shift(1)
-    m5["le_trigger"] = (
+    # Filter to rows with valid alma values on both sides (otherwise NaN
+    # comparisons return False, but we want to be explicit that warmup
+    # bars never fire triggers).
+    valid = (
+        m5["alma_close"].notna()
+        & m5["alma_open"].notna()
+        & m5["alma_close_prev"].notna()
+        & m5["alma_open_prev"].notna()
+    )
+    m5["le_trigger"] = valid & (
         (m5["alma_close_prev"] <= m5["alma_open_prev"])
         & (m5["alma_close"] > m5["alma_open"])
     )
-    m5["se_trigger"] = (
+    m5["se_trigger"] = valid & (
         (m5["alma_close_prev"] >= m5["alma_open_prev"])
         & (m5["alma_close"] < m5["alma_open"])
     )
@@ -215,6 +262,28 @@ def summarize(trades: list[dict]) -> dict:
     }
 
 
+def export_trades(trades: list[dict], path: Path) -> None:
+    """Write trade list as JSON with a flat, matcher-friendly schema."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    export = []
+    for t in trades:
+        export.append({
+            "trade_num": t["trade_num"],
+            "side": t["side"],
+            "entry_ts_ms": int(t["entry_ts"]),
+            "entry_dt": pd.Timestamp(t["entry_ts"], unit="ms", tz="UTC").strftime("%Y-%m-%d %H:%M"),
+            "entry_price": float(t["entry_price"]),
+            "exit_ts_ms": int(t["exit_ts"]),
+            "exit_dt": pd.Timestamp(t["exit_ts"], unit="ms", tz="UTC").strftime("%Y-%m-%d %H:%M"),
+            "exit_price": float(t["exit_price"]),
+            "pnl_pct": float(t["pnl_pct"]),
+            "pnl_usd": float(t["pnl_usd"]),
+            "equity_after": float(t["equity_after"]),
+        })
+    path.write_text(json.dumps(export, indent=2))
+    print(f"Trades exported: {path} ({len(export)} entries)")
+
+
 def main() -> int:
     print("=" * 70)
     print("SWIFT lookahead replication — reproducing TV's backtest")
@@ -227,11 +296,11 @@ def main() -> int:
 
     m5 = load_m5_data()
     print(f"M5 bars in window: {len(m5):,}")
-    alt = resample_to_alt_tf(m5, ALT_TF_MINUTES)
-    print(f"Alt {ALT_TF_MINUTES}min bars: {len(alt):,}")
+    alt = resample_to_alt_tf(m5, ALT_TF_MINUTES, ALT_BAR_ANCHOR_OFFSET_MIN)
+    print(f"Alt {ALT_TF_MINUTES}min bars: {len(alt):,} (anchor offset: +{ALT_BAR_ANCHOR_OFFSET_MIN} min)")
 
     alt_with_alma = compute_alma_pair(alt, ALMA_LENGTH, ALMA_OFFSET, ALMA_SIGMA)
-    m5_with_signals = detect_lookahead_signals(m5, alt_with_alma, ALT_TF_MINUTES)
+    m5_with_signals = detect_lookahead_signals(m5, alt_with_alma, ALT_TF_MINUTES, ALT_BAR_ANCHOR_OFFSET_MIN)
 
     # Count raw signals before simulation
     le_count = int(m5_with_signals["le_trigger"].sum())
@@ -259,6 +328,8 @@ def main() -> int:
     print(f"TV profit fct:  24.099")
     print(f"TV net P&L:     $2,237,852")
     print(f"TV return:      +223.78%")
+    print()
+    export_trades(trades, TRADE_EXPORT_PATH)
     return 0
 
 
