@@ -33,8 +33,17 @@ PID_PATH = PROJECT_DIR / "data" / "pids" / "engine.pid"
 STATUS_PATH = PROJECT_DIR / "data" / "watchdog_status.json"
 ALERTS_LOG = PROJECT_DIR / "data" / "logs" / "alerts.log"
 CHECK_INTERVAL = 90     # seconds between checks
-STALE_THRESHOLD = 180   # seconds before STALE alert
-KILL_THRESHOLD = 360    # seconds before force-kill
+STALE_THRESHOLD = 180   # seconds before STALE alert (file-mtime)
+KILL_THRESHOLD = 360    # seconds before force-kill (file-mtime)
+
+# 2026-04-14: added data-staleness check. The engine can be alive (writing
+# heartbeats every 60s) but have a frozen CandleBuilder that stops
+# emitting candles. File-mtime check never catches this. Watchdog now
+# ALSO reads last_candle_age_s INSIDE the heartbeat and kills the engine
+# if candles stop flowing for DATA_STALE_KILL_THRESHOLD seconds.
+DATA_STALE_KILL_THRESHOLD = 1800   # 30 min — longer than file-mtime to account
+                                    # for weekend market-closed windows and
+                                    # low-liquidity overnight gaps
 
 _running = True
 
@@ -99,6 +108,20 @@ def _kill_engine(pid: int) -> bool:
         return False
 
 
+def _read_candle_age_s() -> float | None:
+    """Read last_candle_age_s from heartbeat.json content.
+
+    Returns None if the file is missing, unparseable, or has no candle age
+    (which happens during engine warmup before any candles are built).
+    """
+    try:
+        data = json.loads(HEARTBEAT_PATH.read_text())
+        age = data.get("last_candle_age_s")
+        return float(age) if isinstance(age, (int, float)) else None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def _check_heartbeat() -> None:
     """Single check cycle."""
     if not HEARTBEAT_PATH.exists():
@@ -113,9 +136,10 @@ def _check_heartbeat() -> None:
         _write_status("ERROR", None, str(e))
         return
 
+    # File-mtime check (process liveness)
     if age > KILL_THRESHOLD:
         pid = _get_engine_pid()
-        detail = f"heartbeat {age:.0f}s old (>{KILL_THRESHOLD}s)"
+        detail = f"heartbeat file {age:.0f}s old (>{KILL_THRESHOLD}s)"
         if pid:
             _log_alert("CRITICAL", f"{detail} — killing engine PID {pid}")
             _kill_engine(pid)
@@ -123,11 +147,27 @@ def _check_heartbeat() -> None:
         else:
             _log_alert("CRITICAL", f"{detail} — no engine PID found to kill")
             _write_status("DEAD", age, "engine not running, heartbeat stale")
+        return
 
-    elif age > STALE_THRESHOLD:
+    # Data-staleness check (CandleBuilder liveness — catches the "alive but
+    # frozen" class of bugs where the engine keeps writing heartbeats but
+    # the candle pipeline has deadlocked).
+    candle_age = _read_candle_age_s()
+    if candle_age is not None and candle_age > DATA_STALE_KILL_THRESHOLD:
+        pid = _get_engine_pid()
+        detail = f"candle {candle_age:.0f}s stale (>{DATA_STALE_KILL_THRESHOLD}s)"
+        if pid:
+            _log_alert("CRITICAL", f"{detail} — killing engine PID {pid}")
+            _kill_engine(pid)
+            _write_status("KILLED_DATA_STALE", age, f"killed PID {pid} — {detail}")
+        else:
+            _log_alert("CRITICAL", f"{detail} — no engine PID found to kill")
+            _write_status("DATA_STALE", age, detail)
+        return
+
+    if age > STALE_THRESHOLD:
         _log_alert("WARN", f"heartbeat {age:.0f}s old (>{STALE_THRESHOLD}s) — engine may be frozen")
         _write_status("STALE", age)
-
     else:
         _write_status("HEALTHY", age)
 
