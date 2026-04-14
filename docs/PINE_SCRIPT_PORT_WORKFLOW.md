@@ -47,11 +47,26 @@ Prince opens the TradingView chart with the Pine Script applied, sets the backte
 
 1. **Chart data export**: chart menu → three dots / camera icon → "Export chart data..." → saves as CSV. **Requires TV Pro or higher subscription.** If unavailable, switch the chart symbol to a free source like `OANDA:XAUUSD` and re-run the backtest there.
 
-2. **Trade export**: strategy tester panel → "List of trades" → download icon → saves as CSV. **Free on all plans**, contains entry/exit timestamps + prices + P&L per trade but NOT the underlying OHLC bars.
+2. **Trade export**: strategy tester panel → "List of trades" → download icon (CSV) OR strategy tester panel → "..." menu → "Export…" (xlsx). **Both formats supported**. xlsx carries 5 sheets (Performance, Trades analysis, Risk-adjusted performance, List of trades, **Properties**) — the Properties sheet is the most useful because it captures every Pine input + strategy setting (chart TF, multiplier, ALMA params, TP/SL levels, commission setting, initial capital). The validator auto-extracts these to derive `--alt-tf-min` and the strategy `--config-json` so the user doesn't need to type them by hand.
 
-For maximum validation fidelity, export BOTH. The chart CSV gives bar-by-bar signal comparison (strongest check); the trades CSV gives trade-level P&L comparison (useful as a sanity check).
+For maximum validation fidelity, export BOTH the chart CSV and the trades file. The chart CSV gives bar-by-bar signal comparison (strongest check); the trades file gives trade-level P&L comparison (useful as a sanity check). Prefer xlsx for the trades file when available — it carries the Properties sheet for auto-config.
 
 **Make sure the chart window has loaded the full backtest period before exporting.** TV exports whatever is currently in chart memory. For a 1-year backtest, scroll the chart back to the start date first so all bars are loaded.
+
+### Timezone gotcha
+
+TV charts can be configured to display any timezone via Settings → Symbol → Timezone. The chart CSV captures this in two ways:
+
+- **Newer exports**: `time` column is ISO 8601 with offset, e.g. `2025-12-29T04:30:00+05:30` (IST). The validator auto-detects this offset.
+- **Older exports**: `time` column is unix seconds (UTC). No tz info — the validator falls back to UTC.
+
+The xlsx trades file's `Date and time` column is **always** in the chart's display timezone but **never** carries tz info (it's a naive `datetime64[ns]`). The validator's `--tv-trades-tz` flag overrides; by default it auto-detects from the chart CSV's ISO offset and applies the same tz to the xlsx.
+
+### 3-tier TP ladder accounting
+
+TV's strategy tester counts each `strategy.exit()` partial fill as a separate "trade" in the List of trades sheet. A SWIFT-style 3-tier ladder (TP1=50%, TP2=30%, TP3=20%) where one entry creates 3 partial closes appears as 3 rows in the xlsx, all sharing the same `(entry_ts, side, entry_price)` but with different exit timestamps and prices.
+
+The validator's `load_tv_trades_xlsx()` function collapses these legs back to ONE logical trade per unique `(entry_ts, side)` so the count matches the chart's `Long`/`Short` plotshape markers (1607 legs → 1231 unique entries on the SWIFT 108-day export). The collapsed `pnl_usd` is the SUM across legs, and `leg_count` records how many legs were merged. Disable with `dedupe_ladder_legs=False` if you need leg-level granularity.
 
 ### Step 4: Run `scripts/tv_parity_validate.py`
 

@@ -63,31 +63,44 @@ import pandas as pd
 def load_tv_chart_csv(path: str | Path) -> pd.DataFrame:
     """Load TV's "Export chart data..." CSV output.
 
-    TV's chart export uses `time` (unix seconds) + OHLC + volume, plus
-    any plotted indicator columns. The `Long` and `Short` columns come
-    from `plotshape()` calls in the Pine Script and are 1 at the bar
-    where a long/short entry fires, NaN otherwise. Other indicator
-    columns (like `condition`, `.position_size`) may also be present
-    from `plot(..., display=display.data_window)` calls.
+    TV's chart export `time` column may be either:
+      - Integer/float unix seconds (TV's older default)
+      - ISO 8601 strings with timezone offset (TV's newer default,
+        e.g. "2025-12-29T04:30:00+05:30")
+
+    Both formats are auto-detected. The output `timestamp` column is
+    always unix milliseconds (int64) in UTC, regardless of the input
+    format. The `dt` column is a UTC pd.Timestamp.
+
+    The `Long` and `Short` columns come from `plotshape()` calls in
+    the Pine Script and are 1 at the bar where a long/short entry
+    fires, NaN otherwise. Other indicator columns (like `condition`,
+    `.position_size`) may also be present from
+    `plot(..., display=display.data_window)` calls.
 
     Returns a DataFrame with columns:
-        timestamp (ms), dt (UTC datetime), open, high, low, close,
-        volume (if present), plus all indicator columns as-is.
+        timestamp (ms, int64 UTC), dt (UTC datetime), open, high, low,
+        close, volume (if present), plus all indicator columns as-is.
 
     Also adds boolean helper columns:
         tv_long_entry:  True where Long == 1
         tv_short_entry: True where Short == 1
-
-    These helpers let downstream matching code reference a consistent
-    schema regardless of whether the strategy plotshape is called
-    `Long`, `Buy`, `LE`, etc.
     """
     df = pd.read_csv(path)
     if "time" not in df.columns:
         raise ValueError(f"{path}: missing 'time' column (expected TV chart export format)")
     df = df.sort_values("time").reset_index(drop=True)
-    df["dt"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    df["timestamp"] = (df["time"] * 1000).astype("int64")
+
+    # Auto-detect time format: string → ISO 8601, numeric → unix seconds
+    first_val = df["time"].iloc[0]
+    if isinstance(first_val, str):
+        # ISO 8601 with optional timezone — pandas handles both naive and aware
+        df["dt"] = pd.to_datetime(df["time"], utc=True)
+    else:
+        # Unix seconds (numeric)
+        df["dt"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    # Convert UTC datetime to milliseconds since epoch
+    df["timestamp"] = (df["dt"].astype("int64") // 1_000_000).astype("int64")
 
     # Helper boolean columns — support the common "Long" / "Short"
     # plotshape naming. Strategies that use different names can rename
@@ -159,6 +172,325 @@ def load_tv_trades_csv(path: str | Path) -> list[dict]:
             p["trade_num"] = tn
             trades.append(p)
     return trades
+
+
+def load_tv_trades_xlsx(
+    path: str | Path,
+    *,
+    tz: str = "UTC",
+    dedupe_ladder_legs: bool = True,
+) -> list[dict]:
+    """Parse TV's "Strategy Report → Export → xlsx" Excel workbook.
+
+    TV's xlsx export carries multiple sheets (Performance, Trades
+    analysis, Risk-adjusted performance, List of trades, Properties).
+    This function reads ONLY the "List of trades" sheet — same logical
+    schema as the CSV loader but with three differences:
+
+    1. Datetime column is a real `Timestamp` (not a string), in the
+       chart's display timezone — TV does NOT include tz info in xlsx
+       exports. Caller passes `tz` to identify what TZ the naive
+       datetimes are in (e.g. "Asia/Kolkata" for IST).
+
+    2. The `Signal` column distinguishes ladder leg exits:
+         LE / SE       → entry signals
+         LXTP1/2/3     → long exit at TP1/2/3
+         SXTP1/2/3     → short exit at TP1/2/3
+         SL            → stop loss exit
+         Open          → trade still open at end of backtest
+
+    3. Pine's 3-tier TP ladder creates 3 separate "trades" in the xlsx
+       per actual entry signal — one per leg. When `dedupe_ladder_legs`
+       is True (default), legs sharing the same (entry_ts, side) are
+       collapsed into one logical trade with summed P&L and the latest
+       exit timestamp/price. This makes the count match TV's chart
+       Long/Short markers.
+
+    Use `tz="UTC"` if the xlsx datetimes are already in UTC; pass an
+    IANA timezone like "Asia/Kolkata" or "America/New_York" if TV's
+    chart is configured to display a non-UTC timezone (very common —
+    the Properties sheet doesn't record this).
+
+    Normalized output schema is identical to `load_tv_trades_csv`:
+        trade_num, side, entry_ts_ms, entry_dt, entry_price,
+        exit_ts_ms, exit_dt, exit_price, pnl_usd, pnl_pct
+    Plus, when `dedupe_ladder_legs` is True:
+        leg_count: int (1 if not a ladder trade, else 2-3)
+    """
+    df = pd.read_excel(path, sheet_name="List of trades")
+    required = {"Trade #", "Type", "Date and time", "Price USD"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"{path}: 'List of trades' missing columns: {sorted(missing)}")
+
+    pairs: dict[int, dict] = {}
+    for _, row in df.iterrows():
+        try:
+            tn = int(row["Trade #"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if tn not in pairs:
+            pairs[tn] = {}
+        type_str = str(row["Type"])
+        is_entry = type_str.startswith("Entry")
+        side = "long" if "long" in type_str else "short"
+
+        # Date may be Timestamp (default) or string (defensive)
+        dt_val = row["Date and time"]
+        if isinstance(dt_val, str):
+            try:
+                dt_naive = datetime.strptime(dt_val, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                try:
+                    dt_naive = datetime.strptime(dt_val, "%Y-%m-%d %H:%M")
+                except ValueError:
+                    continue
+            dt_local = pd.Timestamp(dt_naive, tz=tz)
+        else:
+            ts = pd.Timestamp(dt_val)
+            if ts.tz is None:
+                dt_local = ts.tz_localize(tz)
+            else:
+                dt_local = ts.tz_convert(tz)
+        ts_ms = int(dt_local.tz_convert("UTC").value // 1_000_000)
+        dt_str = dt_local.tz_convert("UTC").strftime("%Y-%m-%d %H:%M")
+
+        try:
+            price = float(row["Price USD"])
+        except (KeyError, ValueError, TypeError):
+            continue
+
+        if is_entry:
+            pairs[tn]["entry_ts_ms"] = ts_ms
+            pairs[tn]["entry_dt"] = dt_str
+            pairs[tn]["entry_price"] = price
+            pairs[tn]["side"] = side
+            pairs[tn]["entry_signal"] = str(row.get("Signal", ""))
+        else:
+            pairs[tn]["exit_ts_ms"] = ts_ms
+            pairs[tn]["exit_dt"] = dt_str
+            pairs[tn]["exit_price"] = price
+            pairs[tn]["exit_signal"] = str(row.get("Signal", ""))
+            try:
+                pairs[tn]["pnl_usd"] = float(row.get("Net P&L USD", 0) or 0)
+                pairs[tn]["pnl_pct"] = float(row.get("Net P&L %", 0) or 0)
+            except (ValueError, TypeError):
+                pairs[tn]["pnl_usd"] = 0.0
+                pairs[tn]["pnl_pct"] = 0.0
+
+    trades: list[dict] = []
+    for tn in sorted(pairs.keys()):
+        p = pairs[tn]
+        if "entry_ts_ms" in p and "exit_ts_ms" in p:
+            p["trade_num"] = tn
+            trades.append(p)
+
+    if dedupe_ladder_legs:
+        trades = _collapse_ladder_legs(trades)
+
+    return trades
+
+
+def _collapse_ladder_legs(trades: list[dict]) -> list[dict]:
+    """Collapse multi-leg ladder trades into a single entry per signal.
+
+    Pine Script's strategy tester counts each `strategy.exit()` fill as
+    a separate trade. A 3-tier TP ladder (e.g. TP1=50%, TP2=30%, TP3=20%)
+    where an entry creates 3 partial closes appears as 3 separate trades
+    in TV's xlsx, all sharing the same (entry_ts_ms, side, entry_price)
+    but with different exit timestamps and prices.
+
+    This function collapses them by grouping on (entry_ts_ms, side). The
+    consolidated trade keeps the entry, the LATEST exit ts/price, and
+    the SUM of P&L across legs. Adds a `leg_count` field showing how
+    many legs were merged.
+
+    The result count matches TV's chart `Long`/`Short` plotshape markers
+    (which fire once per signal, not once per leg).
+    """
+    by_entry: dict[tuple[int, str], dict] = {}
+    for t in trades:
+        key = (int(t["entry_ts_ms"]), str(t["side"]))
+        if key not in by_entry:
+            by_entry[key] = {
+                "trade_num": t["trade_num"],
+                "side": t["side"],
+                "entry_ts_ms": t["entry_ts_ms"],
+                "entry_dt": t["entry_dt"],
+                "entry_price": t["entry_price"],
+                "exit_ts_ms": t["exit_ts_ms"],
+                "exit_dt": t["exit_dt"],
+                "exit_price": t["exit_price"],
+                "pnl_usd": float(t.get("pnl_usd", 0.0)),
+                "pnl_pct": float(t.get("pnl_pct", 0.0)),
+                "leg_count": 1,
+                "exit_signals": [t.get("exit_signal", "")],
+            }
+        else:
+            c = by_entry[key]
+            c["leg_count"] += 1
+            c["pnl_usd"] += float(t.get("pnl_usd", 0.0))
+            c["pnl_pct"] += float(t.get("pnl_pct", 0.0))
+            c["exit_signals"].append(t.get("exit_signal", ""))
+            # Latest exit wins (TP3 / SL / reversal — whichever closed last)
+            if t["exit_ts_ms"] > c["exit_ts_ms"]:
+                c["exit_ts_ms"] = t["exit_ts_ms"]
+                c["exit_dt"] = t["exit_dt"]
+                c["exit_price"] = t["exit_price"]
+
+    return sorted(by_entry.values(), key=lambda t: t["entry_ts_ms"])
+
+
+def extract_pine_config_from_xlsx(path: str | Path) -> dict:
+    """Read TV xlsx Properties sheet → return Pine input/setting summary.
+
+    The Properties sheet in TV's xlsx export captures every Pine input
+    plus strategy meta (initial capital, commission, order size, etc.).
+    This function reads it and returns a normalized dict with the keys
+    most useful for Stage 0 validation:
+
+        symbol, timeframe, alt_tf_min, alt_tf_multiplier,
+        alma_length, alma_offset, alma_sigma,
+        sl_pct, tp1_pct, tp2_pct, tp3_pct, tp1_qty, tp2_qty, tp3_qty,
+        commission, slippage, initial_capital, order_size_pct,
+        trade_type, recalculate_on_bar_close, raw (full dict)
+
+    Used by `tv_parity_validate.py` to auto-derive the strategy's
+    `--config-json` and `--alt-tf-min` from the xlsx without requiring
+    the user to copy them by hand. Returns {} if the sheet is missing
+    or unreadable.
+    """
+    try:
+        props = pd.read_excel(path, sheet_name="Properties")
+    except (ValueError, KeyError):
+        return {}
+
+    raw: dict[str, str] = {}
+    for _, row in props.iterrows():
+        try:
+            name = str(row["name"]).strip()
+            val = row["value"]
+            raw[name] = val
+        except (KeyError, ValueError):
+            continue
+
+    def _get_float(key: str, default=None):
+        try:
+            return float(raw.get(key, default))
+        except (ValueError, TypeError):
+            return default
+
+    def _get_int(key: str, default=None):
+        try:
+            return int(float(raw.get(key, default)))
+        except (ValueError, TypeError):
+            return default
+
+    timeframe_raw = raw.get("Timeframe", "")
+    if "minute" in str(timeframe_raw):
+        chart_tf_min = int(str(timeframe_raw).split()[0])
+    elif "hour" in str(timeframe_raw):
+        chart_tf_min = int(str(timeframe_raw).split()[0]) * 60
+    else:
+        chart_tf_min = None
+
+    pine_res = _get_int("TIMEFRAME", None)  # Pine's input.timeframe('15')
+    multiplier = _get_int("Multiplier for Alernate Signals", None)  # sic, Pine typo
+    if multiplier is None:
+        multiplier = _get_int("Multiplier for Alternate Signals", None)
+    use_alt = str(raw.get("Use Alternate Signals", "")).strip() == "On"
+
+    # IMPORTANT: Pine's `res` input value (15) is the script's TF DEFAULT,
+    # but the actual runtime alt-TF is `chart_tf × multiplier`, not
+    # `res × multiplier`. SWIFT's `timeframe.in_seconds(...)` is called
+    # with the chart's TF at runtime, NOT the input value (verified
+    # empirically against the 2026-04-14 export where Properties claimed
+    # res=15 but the data showed alt_tf=40 = 5min chart × 8 multiplier).
+    # We prefer chart_tf × multiplier; pine_res only as fallback when
+    # chart TF is unknown.
+    if use_alt and chart_tf_min is not None and multiplier is not None:
+        alt_tf_min = chart_tf_min * multiplier
+    elif use_alt and pine_res is not None and multiplier is not None:
+        alt_tf_min = pine_res * multiplier
+    else:
+        alt_tf_min = None
+
+    # alt_tf_multiplier expressed in chart bars (so chart bars × this = alt bars)
+    alt_tf_multiplier = (
+        alt_tf_min // chart_tf_min
+        if alt_tf_min is not None and chart_tf_min is not None and chart_tf_min > 0
+        else None
+    )
+
+    return {
+        "symbol": raw.get("Symbol"),
+        "timeframe": raw.get("Timeframe"),
+        "chart_tf_min": chart_tf_min,
+        "pine_res_min": pine_res,
+        "alt_tf_min": alt_tf_min,
+        "alt_tf_multiplier": alt_tf_multiplier,
+        "alma_length": _get_int("MA Period"),
+        "alma_offset": _get_float("Offset for ALMA"),
+        "alma_sigma": _get_float("Offset for LSMA / Sigma for ALMA"),
+        "sl_pct": _get_float("Stop Loss"),
+        "tp1_pct": _get_float("Level TP1"),
+        "tp2_pct": _get_float("Level TP2"),
+        "tp3_pct": _get_float("Level TP3"),
+        "tp1_qty": _get_float("Qty   TP1"),
+        "tp2_qty": _get_float("Qty   TP2"),
+        "tp3_qty": _get_float("Qty   TP3"),
+        "ma_type": raw.get("MA Type: "),
+        "trade_type": raw.get("What trades should be taken : "),
+        "delay_offset": _get_int("Delay Open/Close MA"),
+        "commission": _get_float("Commission"),
+        "slippage": raw.get("Slippage"),
+        "initial_capital": _get_float("Initial capital"),
+        "order_size": raw.get("Order size"),
+        "recalculate_on_bar_close": str(raw.get("Recalculate on bar close", "")).strip() == "On",
+        "backtesting_range": raw.get("Backtesting range"),
+        "raw": raw,
+    }
+
+
+def detect_chart_tz_from_csv(path: str | Path) -> str | None:
+    """Peek at the first row of a TV chart CSV to detect display timezone.
+
+    TV's newer chart export uses ISO 8601 with the chart's display
+    timezone offset embedded, e.g. "2025-12-29T04:30:00+05:30" for
+    IST. This function returns an IANA timezone string suitable for
+    pandas' `tz` parameter (e.g. "Asia/Kolkata" for +05:30,
+    "America/New_York" for -05:00 in winter).
+
+    Returns None if the CSV uses unix seconds (no tz info available)
+    or the format is unrecognized. Caller should then fall back to
+    UTC or ask the user.
+
+    Note: this returns a fixed-offset string ("UTC+05:30") rather than
+    a true IANA name, since DST transitions can't be resolved from a
+    single timestamp. The fixed offset is sufficient for converting
+    naive xlsx datetimes to UTC for the same backtest window.
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            next(f)  # header
+            first = next(f).strip()
+    except (StopIteration, OSError):
+        return None
+    time_str = first.split(",")[0]
+    if "T" not in time_str:
+        return None
+    try:
+        ts = pd.Timestamp(time_str)
+    except (ValueError, TypeError):
+        return None
+    if ts.tz is None:
+        return None
+    # Return a fixed-offset string like "UTC+05:30" — pandas accepts this
+    offset_sec = ts.utcoffset().total_seconds()
+    sign = "+" if offset_sec >= 0 else "-"
+    hours, remainder = divmod(int(abs(offset_sec)), 3600)
+    minutes = remainder // 60
+    return f"UTC{sign}{hours:02d}:{minutes:02d}"
 
 
 # ── Anchor detection (DST-aware) ────────────────────────────────────────

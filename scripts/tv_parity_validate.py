@@ -37,9 +37,12 @@ sys.path.insert(0, str(REPO_ROOT))
 from src.backtest.tv_parity import (  # noqa: E402
     bar_by_bar_match,
     detect_alt_anchor_segments,
+    detect_chart_tz_from_csv,
+    extract_pine_config_from_xlsx,
     format_parity_report,
     load_tv_chart_csv,
     load_tv_trades_csv,
+    load_tv_trades_xlsx,
     simulate_reversal_strategy,
     trade_by_trade_match,
 )
@@ -59,9 +62,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--tv-chart-csv", required=True,
                    help="Path to TV chart data export CSV (OHLC + indicator columns)")
     p.add_argument("--tv-trades-csv", default=None,
-                   help="Optional path to TV strategy report trades CSV")
-    p.add_argument("--alt-tf-min", type=int, default=40,
-                   help="Alt-TF bar duration in minutes (default: 40 = Pine intRes=8 on M5)")
+                   help="Optional path to TV strategy trades export (.csv OR .xlsx)")
+    p.add_argument("--alt-tf-min", type=int, default=None,
+                   help="Alt-TF bar duration in minutes. If omitted and an xlsx "
+                        "trades file is provided, auto-extracted from the xlsx "
+                        "Properties sheet (Pine intRes × Pine res). Falls back to 40.")
+    p.add_argument("--tv-trades-tz", default=None,
+                   help="Timezone for the xlsx trades file (e.g. 'Asia/Kolkata' "
+                        "for IST). Default: auto-detect from chart CSV ISO offset.")
     p.add_argument("--initial-equity", type=float, default=1_000_000.0,
                    help="Starting equity for P&L sim (default: 1M matching Pine default)")
     p.add_argument("--position-pct", type=float, default=0.10,
@@ -125,22 +133,80 @@ def main() -> int:
     tv_chart_df = load_tv_chart_csv(tv_chart_path)
     print(f"           {len(tv_chart_df)} bars, {tv_chart_df['dt'].iloc[0]} → {tv_chart_df['dt'].iloc[-1]}")
 
+    # 2b. Auto-detect chart display tz (used to interpret naive xlsx times)
+    chart_tz = detect_chart_tz_from_csv(tv_chart_path)
+    if chart_tz is not None:
+        print(f"Chart TZ:  {chart_tz} (detected from ISO 8601 offset)")
+    else:
+        chart_tz = "UTC"
+
     tv_trades = None
     tv_trades_path_str = None
+    pine_cfg: dict = {}
     if args.tv_trades_csv:
         tv_trades_path = Path(args.tv_trades_csv).expanduser()
         if not tv_trades_path.exists():
-            print(f"WARNING: TV trades CSV not found at {tv_trades_path}, skipping trade-level match", file=sys.stderr)
+            print(f"WARNING: TV trades file not found at {tv_trades_path}, skipping trade-level match", file=sys.stderr)
         else:
-            tv_trades = load_tv_trades_csv(tv_trades_path)
+            ext = tv_trades_path.suffix.lower()
+            tz_to_use = args.tv_trades_tz or chart_tz
+            if ext == ".xlsx":
+                tv_trades = load_tv_trades_xlsx(tv_trades_path, tz=tz_to_use)
+                pine_cfg = extract_pine_config_from_xlsx(tv_trades_path)
+                print(f"Trades XLS:{tv_trades_path}")
+                print(f"           {len(tv_trades)} TV trades (legs collapsed) in tz={tz_to_use}")
+                if pine_cfg:
+                    chart_tf = pine_cfg.get('chart_tf_min')
+                    pine_res = pine_cfg.get('pine_res_min')
+                    alt_tf = pine_cfg.get('alt_tf_min')
+                    mult = (alt_tf // chart_tf) if (alt_tf and chart_tf) else None
+                    print(f"Pine cfg:  symbol={pine_cfg.get('symbol')} | "
+                          f"chart={pine_cfg.get('timeframe')} | "
+                          f"alt_tf_min={alt_tf} (=chart {chart_tf}min × mult {mult}; "
+                          f"Pine res input was {pine_res}min — IGNORED at runtime)")
+                    print(f"           ALMA(len={pine_cfg.get('alma_length')}, "
+                          f"offset={pine_cfg.get('alma_offset')}, "
+                          f"sigma={pine_cfg.get('alma_sigma')}) | "
+                          f"SL={pine_cfg.get('sl_pct')}% | "
+                          f"TP1/2/3={pine_cfg.get('tp1_pct')}/{pine_cfg.get('tp2_pct')}/{pine_cfg.get('tp3_pct')}")
+            else:
+                tv_trades = load_tv_trades_csv(tv_trades_path)
+                print(f"Trades CSV:{tv_trades_path}")
+                print(f"           {len(tv_trades)} TV trades")
             tv_trades_path_str = str(tv_trades_path)
-            print(f"Trades CSV:{tv_trades_path}")
-            print(f"           {len(tv_trades)} TV trades")
+
+    # 2c. Resolve alt-TF: CLI override → Pine cfg from xlsx → default 40
+    if args.alt_tf_min is not None:
+        alt_tf_min = args.alt_tf_min
+        print(f"Alt-TF:    {alt_tf_min} min (from --alt-tf-min)")
+    elif pine_cfg.get("alt_tf_min"):
+        alt_tf_min = int(pine_cfg["alt_tf_min"])
+        print(f"Alt-TF:    {alt_tf_min} min (auto-extracted from xlsx Properties)")
+    else:
+        alt_tf_min = 40
+        print(f"Alt-TF:    {alt_tf_min} min (fallback default)")
+
+    # 2d. Auto-merge Pine config into strategy config if not explicitly overridden
+    if pine_cfg:
+        # alt_tf_multiplier expressed in CHART bars (chart TF × this = alt TF)
+        chart_tf_min = pine_cfg.get("chart_tf_min")
+        if chart_tf_min and alt_tf_min and chart_tf_min > 0:
+            auto_alt_mult = alt_tf_min // chart_tf_min
+            config.setdefault("alt_tf_multiplier", auto_alt_mult)
+            config.setdefault("timeframe_minutes", chart_tf_min)
+        for src_key, dst_key in [
+            ("alma_length", "alma_length"),
+            ("alma_offset", "alma_offset"),
+            ("alma_sigma", "alma_sigma"),
+        ]:
+            if pine_cfg.get(src_key) is not None:
+                config.setdefault(dst_key, pine_cfg[src_key])
+        print(f"Auto-cfg:  {config}")
 
     # 3. Detect alt-TF anchor segments (DST-aware)
     print()
     print("Detecting alt-TF anchor segments...")
-    segments = detect_alt_anchor_segments(tv_chart_df, alt_tf_min=args.alt_tf_min)
+    segments = detect_alt_anchor_segments(tv_chart_df, alt_tf_min=alt_tf_min)
     import pandas as pd
     for seg_ts, anchor in segments:
         dt = pd.Timestamp(seg_ts, unit="ms", tz="UTC").strftime("%Y-%m-%d %H:%M")
