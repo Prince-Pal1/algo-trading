@@ -104,42 +104,63 @@ class TestNewsSpikeFade:
     def test_no_entry_outside_news_window(self):
         window = NewsWindow(start_ms=_ts(7, 13, 25), end_ms=_ts(7, 13, 45), label="NFP")
         s = NewsSpikeFadeStrategy(news_windows=[window], spike_trigger_pips=30.0)
-        # 20 pip move OUTSIDE the window
         b = _bar(2400.0, 2402.5, 2399.5, 2402.0, ts_ms=_ts(6, 12, 0))
         assert s.process("XAUUSD", "5m", b) is None
 
     def test_fade_up_spike_with_short(self):
+        """Enter the window at 2400, subsequent bar has high=2405 = 50 pip up-spike → fade short."""
         window = NewsWindow(start_ms=_ts(7, 13, 25), end_ms=_ts(7, 13, 45), label="NFP")
-        s = NewsSpikeFadeStrategy(news_windows=[window], spike_trigger_pips=30.0, pip_size=0.10)
-        # 50 pip UP spike INSIDE the window: open→close = 5.0, 50 pips > 30
-        b = _bar(2400.0, 2405.0, 2399.5, 2405.0, ts_ms=_ts(7, 13, 30))
-        sig = s.process("XAUUSD", "5m", b)
-        assert sig is not None
-        assert sig.action == SignalAction.SHORT
-        assert sig.stop_loss > sig.entry_price
+        s = NewsSpikeFadeStrategy(news_windows=[window], spike_trigger_pips=30.0)
+
+        # Pre-window bar at 12:00 — establishes pre_window_price=2400
+        pre = _bar(2400.0, 2400.5, 2399.5, 2400.0, ts_ms=_ts(7, 13, 20))
+        s.process("XAUUSD", "5m", pre)
+
+        # First window bar — should capture pre_window_price and return None
+        b1 = _bar(2400.0, 2401.0, 2399.5, 2400.5, ts_ms=_ts(7, 13, 26))
+        sig1 = s.process("XAUUSD", "5m", b1)
+        assert sig1 is None  # pre_window_price just captured, no excursion yet
+
+        # Second window bar with high=2405 = 50 pip excursion from pre_price
+        b2 = _bar(2400.5, 2405.0, 2400.0, 2404.5, ts_ms=_ts(7, 13, 31))
+        sig2 = s.process("XAUUSD", "5m", b2)
+        assert sig2 is not None
+        assert sig2.action == SignalAction.SHORT
+        assert sig2.stop_loss > sig2.entry_price
 
     def test_fade_down_spike_with_long(self):
         window = NewsWindow(start_ms=_ts(7, 13, 25), end_ms=_ts(7, 13, 45), label="NFP")
         s = NewsSpikeFadeStrategy(news_windows=[window], spike_trigger_pips=30.0)
-        b = _bar(2400.0, 2400.5, 2395.0, 2395.0, ts_ms=_ts(7, 13, 30))
-        sig = s.process("XAUUSD", "5m", b)
+
+        pre = _bar(2400.0, 2400.5, 2399.5, 2400.0, ts_ms=_ts(7, 13, 20))
+        s.process("XAUUSD", "5m", pre)
+        b1 = _bar(2400.0, 2400.5, 2399.5, 2400.0, ts_ms=_ts(7, 13, 26))
+        s.process("XAUUSD", "5m", b1)
+        # Down excursion to 2395 = 50 pips
+        b2 = _bar(2400.0, 2400.5, 2395.0, 2396.0, ts_ms=_ts(7, 13, 31))
+        sig = s.process("XAUUSD", "5m", b2)
         assert sig is not None
         assert sig.action == SignalAction.LONG
 
-    def test_target_1_exit(self):
+    def test_target_exit(self):
         window = NewsWindow(start_ms=_ts(7, 13, 25), end_ms=_ts(7, 13, 45), label="NFP")
         s = NewsSpikeFadeStrategy(
-            news_windows=[window], spike_trigger_pips=30.0, target_1_pct=0.5,
+            news_windows=[window], spike_trigger_pips=30.0, target_pct=0.5,
         )
-        # Enter SHORT on up-spike at 2405
-        b1 = _bar(2400.0, 2405.5, 2399.5, 2405.0, ts_ms=_ts(7, 13, 30))
+        pre = _bar(2400.0, 2400.5, 2399.5, 2400.0, ts_ms=_ts(7, 13, 20))
+        s.process("XAUUSD", "5m", pre)
+        b1 = _bar(2400.0, 2400.5, 2399.5, 2400.0, ts_ms=_ts(7, 13, 26))
         s.process("XAUUSD", "5m", b1)
-        # target_1 = entry - 0.5 × spike = 2405 - 2.5 = 2402.5
-        b2 = _bar(2405.0, 2405.5, 2402.0, 2403.0, ts_ms=_ts(7, 13, 35))
-        exit_sig = s.process("XAUUSD", "5m", b2)
+        # Entry bar: 50 pip up-excursion → enter SHORT at 2404.5
+        b2 = _bar(2400.5, 2405.0, 2400.0, 2404.5, ts_ms=_ts(7, 13, 31))
+        s.process("XAUUSD", "5m", b2)
+        # Target at 50% of 50-pip spike = 25 pips retracement
+        # Entry 2404.5 - 25 pips = 2402.0
+        b3 = _bar(2404.5, 2404.5, 2401.5, 2402.0, ts_ms=_ts(7, 13, 36))
+        exit_sig = s.process("XAUUSD", "5m", b3)
         assert exit_sig is not None
         assert exit_sig.action == SignalAction.CLOSE
-        assert exit_sig.metadata["exit_reason"] == "target_1"
+        assert exit_sig.metadata["exit_reason"] == "target"
 
 
 # ══════════════════════════════════════════════════════════════════════

@@ -273,6 +273,81 @@ G.2h.6 only covered donchian_gold. `vol_momentum_gold` had only a single-window 
 
 ---
 
+## G.5 — Bridge model validation (2026-04-14)
+
+`scripts/g5_tick_reconstruction_validate.py` uses the 706,212 M1 bars as ground truth. For each of 2,000 random M5 bars with 5 M1 sub-bars, compute (a) bridge model's predicted fraction_into_bar for a level placed 20-80% between low and high, (b) actual fraction from which M1 sub-bar first touched that level.
+
+**Results**:
+- **Timing gate PASS**: mean error 0.2424 (threshold 0.25), median 0.2069, p90 0.4861, p99 0.8468
+- **Ordering gate FAIL**: 71.89% agreement on which of two levels was hit first (threshold 80%)
+
+**Interpretation**: the bridge model has real signal (72% > 50% random) but a 28% ordering error. For wide-SL strategies like donchian_gold and vol_momentum_gold where SL and TP are 3+ ATRs apart, M5 bars rarely contain BOTH inside their range, so the ordering error rarely applies — those backtests are valid. For tight-SL strategies (Tier 5 with 0.3% SL, news_spike_fade with 40-pip SL), the ordering error applies frequently and could materially bias backtest numbers.
+
+**Decision**: don't upgrade the bridge model in this session (task #77 was explicitly low priority). File task #91 for a follow-up M1-based path model upgrade that would give exact hit-ordering when M1 data is available. Donchian-gold + vol_momentum_gold results stay valid. Tier 5 backtests carry a 28% noise caveat — the sign is trustworthy but the magnitude isn't.
+
+---
+
+## Task #80 — Tier 5 alpha research (2026-04-14)
+
+Dedicated research pass on the three aggressive strategies following STRATEGY_DEVELOPMENT_PROCESS.md. Time-boxed to one session with ship-or-kill verdicts.
+
+### news_spike_fade — KILL (task #92 obituary)
+
+Stage 1 research (`scripts/research_news_spike_fade.py`) used M1 data to characterize actual post-news behavior across 47 XAUUSD news events. **The fade premise is strongly confirmed**:
+- 100% of windows had >=30 pip spike, 97.9% had >=50 pip, 55.3% had >=100 pip
+- **95.7% of >=30 pip spikes retraced >= 50% within 30 minutes**
+- Mean 5-min retracement: 93 pips
+- Mean continuation after spike: only 41 pips
+- Direction balance: 38% up-spikes, 62% down-spikes
+
+Rewrote `NewsSpikeFadeStrategy` with a cumulative-excursion-from-pre-window-price design + stop-entry at trigger level (not bar close). Tested extensively:
+
+| Resolution | Trigger | TargetPct | SL_mult | Trades | WR | Return |
+|---|---:|---:|---:|---:|---:|---:|
+| M5 | 30 | 0.5 | 1.2 | 66 | 18% | -31.89% |
+| M5 | 30 | 0.5 | 3.0 | 88 | 15% | -64.06% |
+| M5 | 100 | 0.5 | 3.0 | 39 | 31% | -17.11% |
+| M5 | 200 | 0.5 | 10.0 | 11 | 64% | -0.08% |
+| M1 | 100 | 0.5 | 3.0 | 46 | 46% | -20.20% |
+
+**Zero profitable configurations.** Even at 64% win rate (trig=200 sl=10), the strategy breaks even at best.
+
+**Root cause**: the research measured retracement from the SPIKE PEAK. The strategy enters at the FIRST trigger crossing — usually mid-continuation, before the peak. SL hits during the continuation phase, before the retracement starts. The premise is real but bar-level execution can't capture tick-level fade timing. Real fix requires either tick-level intrabar detection OR the M1 path model upgrade (task #91).
+
+**Verdict: KILL**. Strategy stays in `src/strategies/aggressive/` with the new cumulative-excursion implementation retained as a reference for future tick-level work. Docstring flagged NOT ALPHA-READY. Obituary in task #92.
+
+### hedged_structure_play — KILL (task #93 obituary)
+
+Probed with experimental prior-24h breakout entry seed at leverage=10 × lookback ∈ [24, 48, 72]. **All configs wipe**:
+
+| Leverage | Lookback | Trades | WR | Return |
+|---:|---:|---:|---:|---:|
+| 10 | 24 | 386 | 35% | -99.97% |
+| 10 | 48 | 331 | 31% | -99.96% |
+| 10 | 72 | 288 | 35% | -99.81% |
+| 25 | 24 | 431 | 35% | -99.96% |
+
+**Root cause**: the hedge-at-structure-levels design assumes a RANGING market where eventually one side of the hedge will be profitable when price touches a structure level. Gold 2024-2026 is a sustained uptrend — breakout SHORTs keep losing, LONG hedges don't capture enough profit to compensate, and the "nearest level above/below" structure resolver often picks the wrong direction in a trend. 386 trades in 2 years on 1h is also plain over-trading.
+
+**Verdict: KILL**. The design is fundamentally mismatched to gold's trending character. Writing a wholly new strategy concept is scope creep for this session. Obituary in task #93.
+
+### candle_burst_hunter — KILL (task #94 obituary)
+
+No backtest iteration this session — the original G.2h.3 verdict stands. The strategy's core premise is mid-bar tick velocity detection. On bar-level data (any timeframe tested), the "burst" is measured AFTER the bar closes, too late to enter at the start of the move. G.2h.3 experimental version with EMA-trend filter still wiped -100% / 3451 trades over 2 years.
+
+**Verdict: KILL**. Revisit only with tick-level infrastructure OR redesigned as "enter on the close of a burst bar confirmed by a pullback" (which is a different strategy entirely, not mid-bar velocity). Obituary in task #94.
+
+### Summary: aggressive sub-book remains empty
+
+All 3 Tier 5 strategies are formally killed for this phase. The aggressive sub-book has NO live strategies. Starting the G.3 paper clock with `institutional_pct = 1.00` (100% institutional book, 0% aggressive). The two institutional strategies (donchian_gold + vol_momentum_gold) are the entire live footprint until either:
+1. Task #91 ships the M1 path model → re-run news_spike_fade with accurate intrabar ordering
+2. Tick data + tick-level execution infrastructure lands → re-attempt candle_burst_hunter
+3. A new strategy concept is designed that matches gold's actual trending behavior
+
+**Current test count**: 962 passing (unchanged — the Tier 5 strategy docstring changes + obituaries don't add new tests).
+
+---
+
 ## Session 22 Day 0.5 Addendum — Feature enrichment, LightGBM fix, Funding-MR (2026-04-13 late evening)
 
 Three-phase autonomous shipment while the wall clock ticks toward the 2026-04-14 Day 1 cron wake-up.

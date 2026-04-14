@@ -1,19 +1,29 @@
 """Hedged structure-play state-machine strategy for the aggressive sub-book.
 
-STATUS: NOT ALPHA-READY. The state machine and structure-level
-helpers are correct but the primary entry seed is trivial (follows
-current bar direction) so the strategy opens a position on every
-reset and relies on the hedge mechanism to save bad entries —
-which fails because the structure-level resolver uses "nearest level
-above vs below" heuristically rather than a real break/hold signal.
-Needs dedicated alpha research before paper trading.
+STATUS: NOT ALPHA-READY. See task "hedged_structure_play OBITUARY".
+Short version: the hedge-at-structure design is fundamentally
+mismatched to gold's trending behavior. In a ranging market, hedging
+at structure levels works because eventually one side is profitable.
+In a 2-year uptrend like XAUUSD 2024-2026, breakout SHORTs keep losing
+and LONG hedges don't capture enough profit to compensate.
 
-State:
+Tested with use_experimental_entry=True (prior-24h breakout seed) at
+leverage=10: 35% win rate, -99.96% return, 386 trades in 2 years
+(over-trading). At any lookback (24/48/72 bars) and any leverage, the
+outcome is the same. The problem is the design, not the parameters.
+
+KILL for this phase. Retained in src/strategies/aggressive/ as a
+reference implementation. Revisit if:
+- Gold enters a ranging regime (current is sustained uptrend)
+- OR we redesign around a different structure concept (e.g., wait for
+  actual range to form before entering; use option-like payoff
+  structures at levels instead of directional bets)
+
+State machine (unchanged, for reference):
     INITIAL → primary open
-    LONG/SHORT → primary running; if primary adverse by > hedge_trigger_pct,
-        open opposite hedge → HEDGED
-    HEDGED → wait for structure level; on trigger, close the leg going
-        against structure direction → UNHEDGED
+    LONG/SHORT → primary running; if adverse > hedge_trigger_pct, open
+        opposite hedge → HEDGED
+    HEDGED → wait for structure level; on trigger, close the losing leg
     UNHEDGED → trail the remaining leg → exit
 """
 

@@ -1,12 +1,21 @@
 """Mid-candle momentum entry for the aggressive retail sub-book.
 
-STATUS: NOT ALPHA-READY. This strategy has the right infrastructure
-(BaseStrategy contract, trailing stop, time stop, hard SL) but the
-entry trigger (`|close - open| > burst_atr_mult × ATR`) over-fires
-on bar-level data at any timeframe tested so far. On 2 years of
-XAUUSD 1h + M5 the aggressive sub-book wipes to -100%. Dedicated
-alpha research + param tuning required before paper trading.
-See STATE.md § Gold Phase G.2 tuning pass for details.
+STATUS: NOT ALPHA-READY. See task "candle_burst_hunter OBITUARY".
+Short version: the strategy's core premise — "detect a fast-moving
+candle mid-bar and enter in its direction" — REQUIRES tick-level
+data. On bar-level (M1/M5/1h) the "burst" is measured AFTER the bar
+closes, by which point it's too late to enter at the start of the
+burst. The Tier 5 infra validation (G.2h.3) with an experimental
+multi-timeframe EMA-trend filter still wiped at -100% / 3451 trades
+over 2 years.
+
+KILL for this phase. Revisit when:
+- Tick data + tick-level execution infrastructure lands
+- OR the strategy is redesigned as "enter on the CLOSE of a burst bar
+  confirmed by a pullback within 1-2 bars" (fundamentally a different
+  signal from mid-bar velocity)
+
+Retained in src/strategies/aggressive/ as a reference for future work.
 """
 
 from __future__ import annotations
