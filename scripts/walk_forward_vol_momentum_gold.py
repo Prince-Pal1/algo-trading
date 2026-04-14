@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from src.backtest.book import SUB_BOOK_INSTITUTIONAL
+from src.backtest.fee_profiles import make_fee_model
 from src.backtest.leveraged_engine import LeveragedBacktestEngine
 from src.strategies.momentum.vol_momentum_gold import VolMomentumGoldStrategy
 
@@ -82,9 +83,14 @@ def _run_backtest(
         long_only=long_only,
         session_filter=session_filter,
     )
+    # Mandatory: explicit fee profile per CLAUDE.md rule (task #105/107).
+    # Never use the default ICMarketsMetalFeeModel() constructor — that
+    # was the source of the 90× slippage bug. The cTrader profile here
+    # uses research-calibrated numbers (commit 6ae48c8 + task #106).
     engine = LeveragedBacktestEngine(
         initial_institutional_cash=TOTAL_CAPITAL,
         initial_aggressive_cash=0.0,
+        fee_model=make_fee_model("ic_markets_ctrader_xauusd_normal"),
         run_id=run_id,
     )
     result = engine.run(
