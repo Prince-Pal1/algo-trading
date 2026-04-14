@@ -71,7 +71,7 @@ from src.backtest.book import (
     Book,
     LeveragedPosition,
 )
-from src.backtest.costs import ICMarketsMetalFeeModel
+from src.backtest.costs import ICMarketsMetalFeeModel, ZeroCostFeeModel
 from src.backtest.path import Bar, BrownianBridgeModel, M1PathModel, check_sl_tp_hits
 from src.data.feature_engine import _compute_indicators
 from src.m3s.hooks import M3S
@@ -149,7 +149,7 @@ class LeveragedBacktestEngine:
         *,
         initial_institutional_cash: float = 7_000.0,
         initial_aggressive_cash: float = 3_000.0,
-        fee_model: ICMarketsMetalFeeModel | None = None,
+        fee_model: ICMarketsMetalFeeModel | ZeroCostFeeModel | None = None,
         path_model: BrownianBridgeModel | M1PathModel | None = None,
         m3s: M3S | None = None,
         run_id: str = "leveraged_default",

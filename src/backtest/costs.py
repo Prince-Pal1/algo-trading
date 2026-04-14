@@ -313,6 +313,49 @@ class ICMarketsMetalFeeModel:
         return any(w.contains(ts_ms) for w in self.spread_config.news_windows)
 
 
+@dataclass
+class ZeroCostFeeModel:
+    """Drop-in fee model that charges zero commission, zero spread, zero slippage.
+
+    Used for Pine-faithful backtests — TradingView's default strategy tester
+    uses `commission_value=0, slippage=0` unless the script sets otherwise.
+    Matching this lets us reproduce the optimistic TV numbers so we can
+    compare them apples-to-apples against realistic costs.
+
+    Interface identical to `ICMarketsMetalFeeModel`:
+      - `fill_price(side, reference_price, atr, ts_ms)` → returns reference_price
+      - `commission_usd(quantity_units)` → returns 0.0
+
+    Do NOT use for live backtests intended to predict real P&L — this is
+    strictly for reproducing Pine Script parity.
+    """
+
+    def fill_price(
+        self,
+        *,
+        side: str,
+        reference_price: float,
+        atr: float,
+        ts_ms: int,
+    ) -> float:
+        # No spread, no slippage — fill at the exact reference price
+        return reference_price
+
+    def commission_usd(self, *, quantity_units: float) -> float:
+        return 0.0
+
+    def round_trip_spread_cost_usd(
+        self,
+        *,
+        quantity_units: float,
+        in_news: bool = False,
+    ) -> float:
+        return 0.0
+
+    def is_in_news_window(self, ts_ms: int) -> bool:
+        return False
+
+
 # ── News calendar loader ─────────────────────────────────────────────────
 
 

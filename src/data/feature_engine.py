@@ -40,6 +40,47 @@ COMPUTE_WINDOW = 250
 
 # ── Indicator Definitions ──────────────────────────────────────────────────
 
+
+def _alma(
+    series: pd.Series,
+    length: int,
+    offset: float = 0.85,
+    sigma: float = 6.0,
+) -> pd.Series:
+    """Arnaud Legoux Moving Average — matches Pine Script's ta.alma exactly.
+
+    ALMA is a Gaussian-weighted moving average where `offset` controls
+    where the peak of the Gaussian sits along the window (0 = oldest,
+    1 = newest) and `sigma` controls the width (higher sigma = narrower,
+    more recent-biased).
+
+    Pine Script default: offset=0.85, sigma=6. We match it exactly.
+
+    Implementation: precompute weights once, then np.convolve. For each
+    output position i, ALMA[i] = sum(w[k] * series[i-length+1+k]) for k
+    in 0..length-1, divided by the sum of weights.
+    """
+    if length <= 0:
+        return pd.Series(np.zeros(len(series)), index=series.index)
+    m = offset * (length - 1)
+    s = length / sigma
+    weights = np.array([
+        np.exp(-((k - m) ** 2) / (2 * s * s))
+        for k in range(length)
+    ])
+    weights_sum = weights.sum()
+    if weights_sum <= 0:
+        return pd.Series(np.zeros(len(series)), index=series.index)
+    weights = weights / weights_sum
+
+    vals = series.to_numpy(dtype=float)
+    n = len(vals)
+    out = np.full(n, np.nan)
+    for i in range(length - 1, n):
+        out[i] = float(np.dot(weights, vals[i - length + 1:i + 1]))
+    return pd.Series(out, index=series.index).fillna(0.0)
+
+
 def _compute_indicators(df: pd.DataFrame, indicator_list: list[str]) -> pd.DataFrame:
     """Compute requested indicators on a DataFrame with OHLCV columns."""
     n = len(df)
@@ -133,6 +174,20 @@ def _compute_indicators(df: pd.DataFrame, indicator_list: list[str]) -> pd.DataF
             stoch = StochasticOscillator(high=high, low=low, close=close, window=length)
             df[col] = stoch.stoch()
             df[f"STOCHd_{length}"] = stoch.stoch_signal()
+
+        elif name == "alma" and length:
+            # Arnaud Legoux Moving Average — Gaussian-weighted average
+            # with tunable offset (where the peak of the Gaussian sits
+            # along the window) and sigma (width). Pine Script defaults:
+            # offset=0.85, sigma=6. We match Pine exactly.
+            col = f"ALMA_{length}"
+            df[col] = _alma(close, length, offset=0.85, sigma=6.0)
+
+        elif name == "alma_open" and length:
+            # ALMA of the OPEN price — used by the SWIFT strategy to
+            # detect ALMA-close vs ALMA-open crossovers on the alt TF.
+            col = f"ALMA_OPEN_{length}"
+            df[col] = _alma(df["open"], length, offset=0.85, sigma=6.0)
 
         # ── Scalper primitives (task #102) ────────────────────────────
         # Multi-bar velocity, microstructure, and volume-based
