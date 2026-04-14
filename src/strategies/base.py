@@ -21,7 +21,7 @@ import pandas as pd
 
 from src.utils.config import get_config
 from src.utils.logger import get_logger
-from src.utils.types import RiskProfile, Signal
+from src.utils.types import RiskProfile, Signal, Tier
 
 log = get_logger("strategy")
 
@@ -42,12 +42,21 @@ class BaseStrategy(ABC):
         timeframe: str,
         risk_profile: RiskProfile = RiskProfile.SAFE,
         max_risk_per_trade: float = 0.01,
+        leverage_range: tuple[float, float] = (1.0, 1.0),
+        tier: Tier = Tier.UNCLASSIFIED,
     ):
         self.name = name
         self.markets = [m.upper() for m in markets]
         self.timeframe = timeframe
         self.risk_profile = risk_profile
         self.max_risk_per_trade = max_risk_per_trade
+        if leverage_range[0] < 1.0 or leverage_range[1] < leverage_range[0]:
+            raise ValueError(
+                f"invalid leverage_range {leverage_range}: min must be >= 1.0 "
+                f"and max must be >= min"
+            )
+        self.leverage_range = (float(leverage_range[0]), float(leverage_range[1]))
+        self.tier = tier
 
         # State — auto-managed by process()
         self._prev_features: pd.Series | None = None

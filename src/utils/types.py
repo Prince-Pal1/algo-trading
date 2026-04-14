@@ -40,6 +40,15 @@ class RiskProfile(str, enum.Enum):
     AGGRESSIVE = "AGGRESSIVE"
 
 
+class Tier(str, enum.Enum):
+    UNCLASSIFIED = "UNCLASSIFIED"
+    INSTITUTIONAL_TREND = "INSTITUTIONAL_TREND"
+    INSTITUTIONAL_MR = "INSTITUTIONAL_MR"
+    DAY = "DAY"
+    ULTRA_SCALP = "ULTRA_SCALP"
+    AGGRESSIVE_RETAIL = "AGGRESSIVE_RETAIL"
+
+
 class Timeframe(str, enum.Enum):
     TICK = "tick"
     S5 = "5s"
@@ -93,7 +102,12 @@ class OrderBookSnapshot(msgspec.Struct):
 
 
 class Signal(msgspec.Struct):
-    """Output of BaseStrategy.on_candle() — a trading signal."""
+    """Output of BaseStrategy.on_candle() — a trading signal.
+
+    G.0c (2026-04-13) added `leverage` and `margin_used_pct` fields for
+    the leverage-first strategy architecture. They are optional — None
+    preserves the pre-G.0c behavior (implicit 1× leverage).
+    """
     symbol: str
     action: SignalAction
     confidence: float           # 0.0 to 1.0
@@ -105,6 +119,37 @@ class Signal(msgspec.Struct):
     risk_pct: float | None = None   # Suggested risk as fraction of equity
     metadata: dict | None = None
     timestamp: int = 0
+    # G.0c — leverage is a first-class parameter
+    leverage: float | None = None       # effective leverage requested (None = 1×)
+    margin_used_pct: float | None = None  # % of account margin this position would consume
+
+
+# ── M3S Leverage grants ──────────────────────────────────────────────
+
+
+class LeverageReasonCode(str, enum.Enum):
+    FULL = "full"
+    CAPPED_BY_AGGREGATE = "capped_by_aggregate"
+    CAPPED_BY_REGIME = "capped_by_regime"
+    CAPPED_BY_CONVICTION = "capped_by_conviction"
+    CAPPED_BY_CAP = "capped_by_cap"
+
+
+class LeverageGrant(msgspec.Struct, frozen=True):
+    strategy_name: str
+    ts_ms: int
+    requested: float
+    granted: float
+    reason: LeverageReasonCode
+    conviction: float
+    declared_range_min: float
+    declared_range_max: float
+    regime_target: float
+    conviction_target: float
+    aggregate_before: float
+    aggregate_cap: float
+    m3s_regime: str
+    user_reason: str = ""
 
 
 # ── Orders & Fills ─────────────────────────────────────────────────────────

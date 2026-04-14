@@ -1,0 +1,262 @@
+# ── Broker fee profiles ─────────────────────────────────────────────────
+#
+# Research-calibrated cost models for backtesting. Each profile bundles:
+#   - SpreadSlippageConfig parameters (spread, slippage, news widening)
+#   - CommissionSchedule parameters (per-lot fixed OR volume-based)
+#   - Sources cited (URLs)
+#   - Scenario tag for selection
+#
+# Loaded by `src/backtest/fee_profiles.py`. Use `get_fee_profile(name)`
+# or `make_fee_model(name)` from there.
+#
+# Calibration history:
+#   2026-04-14 task #105 + #106 — researched IC Markets official spreads
+#   page, EU spec sheet PDF, peer ECN broker comparisons, databasemart
+#   latency study. See ARCHITECTURE.md gotcha 2026-04-14 for the 90×
+#   slippage bug story.
+#
+# IMPORTANT: leverage does NOT change broker costs in dollar terms. The
+# commission, spread, and slippage are based on POSITION SIZE (notional
+# or per-lot), not on margin used. At 1000x leverage, the same $94/trade
+# cost becomes 20.9% of the $450 margin — devastating. See docs/BROKER_FEES.md
+# for the leverage interaction explanation.
+
+[meta]
+last_updated = "2026-04-14"
+tasks = [105, 106]
+
+
+# ── IC Markets cTrader / XAUUSD ─────────────────────────────────────────
+
+[profiles.ic_markets_ctrader_xauusd_normal]
+description = "IC Markets cTrader Raw Spread, XAUUSD, normal liquid session (London/NY overlap, no news)"
+broker = "IC Markets"
+platform = "ctrader"
+instrument_class = "xauusd_metals"
+scenario = "normal"
+sources = [
+    "https://www.icmarkets.com/global/en/trading-pricing/spreads",
+    "https://www.icmarkets.eu/en/trading-pricing/trading-costs",
+    "https://www.bestbrokers.com/reviews/ic-markets/spreads-fees-and-commissions/",
+]
+notes = """
+Default profile for production cTrader backtests on gold.
+
+Spread + slip calibrated as a conservative blend between IC Markets Global
+Raw (avg 0.09 pips, official) and IC Markets EU Raw (avg 0.63 pips, spec
+sheet PDF). At 0.30 pips spread + 0.30 pips slip, this matches peer ECN
+brokers Pepperstone (0.20-0.30) and is conservative vs the Global number.
+
+Commission is VOLUME-BASED at $3 per $100,000 notional USD traded. For
+gold at $4500/oz × 100 oz lot = $450k notional → $13.50/side per lot.
+This makes cTrader ~3.86× more expensive than MT4 for gold trading.
+"""
+
+[profiles.ic_markets_ctrader_xauusd_normal.spread]
+base_spread_pips = 0.30
+normal_slip_pips = 0.30
+atr_vol_mult = 0.0  # FIXED — was 0.5, ECN slip is bounded by order book depth not ATR
+news_spread_mult = 5.0
+news_slip_mult = 5.0
+pip_size = 0.10  # 1 pip = $0.10 for IC Markets 2-decimal XAUUSD quote
+
+[profiles.ic_markets_ctrader_xauusd_normal.commission]
+type = "volume_based"  # cTrader: $3 per $100k notional
+per_100k_notional_usd = 3.0
+contract_size = 100.0  # 1 lot = 100 oz
+min_commission_usd = 0.0
+
+
+[profiles.ic_markets_ctrader_xauusd_news_active]
+description = "IC Markets cTrader XAUUSD with news calendar widening enabled (load NFP/CPI/FOMC dates from news_calendar.csv)"
+broker = "IC Markets"
+platform = "ctrader"
+instrument_class = "xauusd_metals"
+scenario = "news_active"
+sources = [
+    "https://fxnx.com/en/blog/gold-news-trading-nfp-cpi-fed-rates-guide",
+    "https://www.vantagemarkets.com/en/academy/news-trading-gold/",
+]
+notes = """
+Same as ic_markets_ctrader_xauusd_normal but with `news_windows` populated
+from config/news_calendar.csv. During NFP/CPI/FOMC windows, spread × 5
+and slippage × 5. Use this profile for strategies that trade through
+high-impact news events.
+"""
+
+[profiles.ic_markets_ctrader_xauusd_news_active.spread]
+base_spread_pips = 0.30
+normal_slip_pips = 0.30
+atr_vol_mult = 0.0
+news_spread_mult = 5.0
+news_slip_mult = 5.0
+pip_size = 0.10
+load_news_calendar = true  # special flag — loader populates news_windows from news_calendar.csv
+
+[profiles.ic_markets_ctrader_xauusd_news_active.commission]
+type = "volume_based"
+per_100k_notional_usd = 3.0
+contract_size = 100.0
+
+
+[profiles.ic_markets_ctrader_xauusd_stress]
+description = "IC Markets cTrader XAUUSD pessimistic stress test — 2× normal spread + slip, for worst-case strategy validation"
+broker = "IC Markets"
+platform = "ctrader"
+instrument_class = "xauusd_metals"
+scenario = "stress"
+sources = [
+    "Internal — applied 2× safety multiplier on normal scenario for stress testing",
+]
+notes = """
+Use this profile to stress-test a strategy under conservative assumptions.
+If a strategy survives the `stress` profile, its alpha is robust to cost
+estimation error. If it only works in `normal`, the margin is thin.
+"""
+
+[profiles.ic_markets_ctrader_xauusd_stress.spread]
+base_spread_pips = 0.60   # 2× normal
+normal_slip_pips = 0.60   # 2× normal
+atr_vol_mult = 0.0
+news_spread_mult = 5.0
+news_slip_mult = 5.0
+pip_size = 0.10
+
+[profiles.ic_markets_ctrader_xauusd_stress.commission]
+type = "volume_based"
+per_100k_notional_usd = 3.0
+contract_size = 100.0
+
+
+# ── IC Markets MT4 / XAUUSD ─────────────────────────────────────────────
+
+[profiles.ic_markets_mt4_xauusd_normal]
+description = "IC Markets MT4 Raw Spread, XAUUSD, normal liquid session — significantly cheaper than cTrader for gold"
+broker = "IC Markets"
+platform = "mt4"
+instrument_class = "xauusd_metals"
+scenario = "normal"
+sources = [
+    "https://www.icmarkets.com/global/en/trading-pricing/spreads",
+]
+notes = """
+For gold-heavy strategies, MT4 saves ~$53/trade vs cTrader because MT4
+charges $3.50/lot/side FIXED while cTrader charges $3 per $100k notional
+(volume-based, scales with gold price). At $4500/oz × 100 oz lot, MT4
+commission is $7 round trip vs cTrader $27 — a 3.86× advantage.
+
+Per CLAUDE.md we deploy on cTrader by default, but for SWIFT-style
+gold scalpers MT4 should be reconsidered. Note: macOS users cannot
+run MT5 (MetaTrader5 PyPI is Windows-only C++), but MT4 might work
+via Wine or a separate VPS.
+"""
+
+[profiles.ic_markets_mt4_xauusd_normal.spread]
+base_spread_pips = 0.30
+normal_slip_pips = 0.30
+atr_vol_mult = 0.0
+news_spread_mult = 5.0
+news_slip_mult = 5.0
+pip_size = 0.10
+
+[profiles.ic_markets_mt4_xauusd_normal.commission]
+type = "fixed_per_lot"  # MT4: $3.50/lot/side FIXED
+per_lot_per_side_usd = 3.50
+contract_size = 100.0
+min_commission_usd = 0.0
+
+
+# ── IC Markets cTrader / FX majors ──────────────────────────────────────
+
+[profiles.ic_markets_ctrader_fx_majors_normal]
+description = "IC Markets cTrader Raw Spread, FX majors (EURUSD, GBPUSD, USDJPY etc), normal liquid session"
+broker = "IC Markets"
+platform = "ctrader"
+instrument_class = "fx_majors"
+scenario = "normal"
+sources = [
+    "https://www.icmarkets.com/global/en/trading-pricing/spreads",
+    "https://www.databasemart.com/blog/customer-stories-115",
+]
+notes = """
+For FX where 1 standard lot = $100,000 notional, cTrader's $3-per-$100k
+formula equals $3/lot/side — nearly identical to MT4's $3.50. So FX
+costs are similar across platforms.
+
+Spread is much tighter than gold (EURUSD avg 0.10 pips per IC Markets).
+Slippage on cTrader London server measured at 0.00001 (1 micro-pip)
+on EURUSD per databasemart latency study — ECN orders are filled
+near-instantly with negligible slip on liquid pairs.
+"""
+
+[profiles.ic_markets_ctrader_fx_majors_normal.spread]
+base_spread_pips = 0.10  # EURUSD avg per IC Markets official
+normal_slip_pips = 0.10  # very tight on cTrader ECN
+atr_vol_mult = 0.0
+news_spread_mult = 5.0
+news_slip_mult = 5.0
+pip_size = 0.0001  # 4-decimal FX quote, 1 pip = 0.0001
+
+[profiles.ic_markets_ctrader_fx_majors_normal.commission]
+type = "volume_based"
+per_100k_notional_usd = 3.0
+contract_size = 100000.0  # 1 standard lot = 100k base currency units
+
+
+[profiles.ic_markets_mt4_fx_majors_normal]
+description = "IC Markets MT4 Raw Spread, FX majors, normal liquid session"
+broker = "IC Markets"
+platform = "mt4"
+instrument_class = "fx_majors"
+scenario = "normal"
+sources = [
+    "https://www.icmarkets.com/global/en/trading-pricing/spreads",
+]
+notes = """
+For FX, MT4 and cTrader commissions are nearly equal ($3.50 vs $3.00).
+The platform choice for FX should be driven by execution speed +
+features, not fees.
+"""
+
+[profiles.ic_markets_mt4_fx_majors_normal.spread]
+base_spread_pips = 0.10
+normal_slip_pips = 0.10
+atr_vol_mult = 0.0
+news_spread_mult = 5.0
+news_slip_mult = 5.0
+pip_size = 0.0001
+
+[profiles.ic_markets_mt4_fx_majors_normal.commission]
+type = "fixed_per_lot"
+per_lot_per_side_usd = 3.50
+contract_size = 100000.0
+
+
+# ── Pine-faithful (zero cost) ───────────────────────────────────────────
+
+[profiles.pine_zero_cost]
+description = "Zero commission, zero spread, zero slippage — matches TradingView strategy tester defaults for Pine port validation"
+broker = "(none)"
+platform = "(none)"
+instrument_class = "(any)"
+scenario = "pine_faithful"
+sources = []
+notes = """
+Use this profile to reproduce TradingView's strategy tester output
+during Stage 0 Pine Script port validation. NOT for production
+backtests. After validating port equivalence, switch to a real broker
+profile for Phase 2 (strategy viability).
+"""
+
+[profiles.pine_zero_cost.spread]
+base_spread_pips = 0.0
+normal_slip_pips = 0.0
+atr_vol_mult = 0.0
+news_spread_mult = 1.0
+news_slip_mult = 1.0
+pip_size = 0.10
+
+[profiles.pine_zero_cost.commission]
+type = "fixed_per_lot"
+per_lot_per_side_usd = 0.0
+contract_size = 100.0

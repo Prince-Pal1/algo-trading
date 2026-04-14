@@ -12,6 +12,8 @@ This document codifies the 7-stage hedge fund-style strategy development process
 
 Use this before declaring any strategy "done":
 
+- [ ] **Stage 0** *(Pine-derived strategies only)*: TV parity validation ≥ 99.0% bar-by-bar match via `scripts/tv_parity_validate.py`. See `docs/PINE_SCRIPT_PORT_WORKFLOW.md`.
+- [ ] **Fee profile selected** *(every backtest)*: explicit named profile from `src/backtest/fee_profiles.py` — never use implicit defaults. See `docs/BROKER_FEES.md`.
 - [ ] Stage 1: 4 research questions answered (inefficiency, persistence, killers, decay)
 - [ ] Stage 2: Strategy implemented with `BaseStrategy.on_features() -> Signal | None`
 - [ ] Stage 3: Backtest on 12 symbols, ≥1 symbol with Sharpe > 0 and ≥5 trades
@@ -41,6 +43,51 @@ Without a disciplined process, strategy development devolves into:
 4. **Anti-overfitting by default** — Fee sensitivity, walk-forward OOS, deflated Sharpe
 5. **Portfolio thinking** — Individual Sharpe matters less than cross-strategy correlation
 6. **Iterate then stop** — 3 consecutive rounds of <5% improvement = convergence
+
+---
+
+## The 7 Stages (8 with Stage 0)
+
+### Stage 0: Pine Script Port Validation *(externally-sourced strategies only)*
+
+**Purpose:** When a strategy comes from an external Pine Script (TradingView), confirm the Python port is LOGICALLY EQUIVALENT to the Pine Script BEFORE evaluating its alpha. Separates "is the port right?" from "does the strategy have alpha?" — two distinct questions that are easy to conflate.
+
+**Why this stage was added (2026-04-14):** The SWIFT investigation (8 commits, 6 hours) consumed disproportionate effort because we couldn't tell if our -98% backtest vs TV's +223% backtest was a port bug, a data-source mismatch, or a real cost-driven gap. After we eventually proved the port was correct (100% bar-by-bar match), the answer fell out trivially: TV's number was a Pine Script `lookahead_on` repainting artifact. With Stage 0 in place, every future Pine port is validated upfront, eliminating this entire class of confusion.
+
+**Mandatory artifacts from the user:**
+1. The Pine Script source code
+2. A TradingView **chart data CSV** export (Pro+ subscription, "Export chart data..." menu)
+3. A TradingView **strategy report trades CSV** export (free on all plans, Strategy Tester → List of trades download icon)
+4. The exact Pine input parameters used in the backtest
+
+**Mandatory artifact from the developer (you):**
+- A Python port subclass of `BaseStrategy` with TWO methods:
+  - `on_features(symbol, timeframe, features) -> Signal | None` — the production path (non-repainting, used by `LeveragedBacktestEngine`)
+  - `detect_signals_lookahead(cls, ohlc_df, *, anchor_segments=None, **config) -> pd.DataFrame` — the validation classmethod (Pine-faithful, batch-processes the full DataFrame)
+
+**Validation gate:**
+```bash
+PYTHONPATH=. python3 scripts/tv_parity_validate.py \
+    --strategy-module src.strategies.<category>.<name> \
+    --strategy-class <StrategyClass> \
+    --config-json '{"param1": value, ...}' \
+    --tv-chart-csv "<path>.csv" \
+    --tv-trades-csv "<path>.csv" \
+    --alt-tf-min 40
+```
+
+**Pass criterion:** ≥ 99.0% bar-by-bar entry match. Anything less = port has a bug, must be fixed before Stage 1.
+
+**Common bugs caught by Stage 0:**
+- Wrong indicator parameters (length, sigma, offset)
+- Missing `lookahead_on` repainting semantics
+- DST anchor transitions ignored (typical 60-min shift = 20 min mod 40 min in alt-TF grid)
+- Warmup truncation (CSV starts mid-alt-bar)
+- Sign convention flipped (le_trigger / se_trigger swapped)
+
+**Reference implementation:** `src/strategies/trend_following/swift_alma.py` — see `SwiftAlmaStrategy.detect_signals_lookahead` and `on_features`. Achieved 100% bar-by-bar match on 107 days of real Vantage XAUUSD data spanning a DST transition (1228/1228 entries). Documented in `docs/PINE_SCRIPT_PORT_WORKFLOW.md`.
+
+**When Stage 0 is skipped:** Internally-developed strategies (no Pine source) skip directly to Stage 1. The validation gate exists ONLY for ports — there's nothing to validate against if the strategy is original.
 
 ---
 
@@ -132,6 +179,36 @@ class MyStrategy(BaseStrategy):
 ### Stage 3: Initial Backtest
 
 **Purpose:** Does the strategy produce any positive results at all?
+
+**MANDATORY PRE-STEP — select fee profile.** Before running any backtest, choose a named fee profile from `src/backtest/fee_profiles.py` matching the strategy's deployment scenario. NEVER use implicit `ICMarketsMetalFeeModel()` defaults — see `docs/BROKER_FEES.md` for why (the 90× slippage bug killed multiple strategies in 2026-04).
+
+```python
+from src.backtest.fee_profiles import make_fee_model
+
+# For production gold backtest (default cTrader)
+fee_model = make_fee_model("ic_markets_ctrader_xauusd_normal")
+
+# For gold-heavy strategies — MT4 saves ~$53/trade vs cTrader
+fee_model = make_fee_model("ic_markets_mt4_xauusd_normal")
+
+# For strategies that trade through NFP/CPI/FOMC
+fee_model = make_fee_model("ic_markets_ctrader_xauusd_news_active")
+
+# For robustness check (2× normal costs)
+fee_model = make_fee_model("ic_markets_ctrader_xauusd_stress")
+
+# For Pine Script port validation ONLY (Stage 0, NOT for production)
+fee_model = make_fee_model("pine_zero_cost")
+```
+
+**Cite the fee profile in the backtest report.** The profile name encodes your cost assumption; future readers can reproduce the result.
+
+**Leverage sanity check.** For any strategy at >100x leverage, run:
+```python
+from src.backtest.fee_profiles import cost_as_pct_of_margin
+pct = cost_as_pct_of_margin(per_trade_cost_usd, notional_usd, leverage)
+```
+If `pct > 5%`, the strategy is fragile to costs — reduce leverage or trade frequency.
 
 **Commands:**
 ```bash

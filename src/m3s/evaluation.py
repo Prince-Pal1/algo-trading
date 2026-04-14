@@ -49,7 +49,8 @@ from src.utils.logger import get_logger
 log = get_logger("m3s.evaluation")
 
 
-_CRYPTO_ANNUALIZATION = math.sqrt(365.0)
+_CRYPTO_ANNUALIZATION = math.sqrt(365.0)  # Legacy default — G.0 parameterized callers
+_DEFAULT_PERIODS_PER_YEAR = 365.0          # Pass 252 at call time for forex
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -147,15 +148,23 @@ class StrategyEvaluation:
     reasoning: str
 
 
-def _fold_sharpe(pnls: np.ndarray) -> float:
-    """Annualized Sharpe of a fold's PnL vector. Zero if too few trades."""
+def _fold_sharpe(
+    pnls: np.ndarray,
+    periods_per_year: float = _DEFAULT_PERIODS_PER_YEAR,
+) -> float:
+    """Annualized Sharpe of a fold's PnL vector. Zero if too few trades.
+
+    Args:
+        periods_per_year: annualization denominator. Default 365 for crypto
+            24/7 (backward compat). Pass 252 for forex (XAUUSD etc.).
+    """
     if len(pnls) < 2:
         return 0.0
     mean = float(pnls.mean())
     std = float(pnls.std(ddof=0))
     if std == 0.0:
         return 0.0
-    return (mean / std) * _CRYPTO_ANNUALIZATION
+    return (mean / std) * math.sqrt(periods_per_year)
 
 
 def _deflated_sharpe(
@@ -245,6 +254,7 @@ def evaluate_strategy(
     n_trials: int = 1,
     kelly_cap: float = 0.50,
     min_fraction: float = 0.20,
+    periods_per_year: float = _DEFAULT_PERIODS_PER_YEAR,
 ) -> StrategyEvaluation:
     """Run purged K-fold CV on a strategy's PnL series and compute its
     Bayesian fractional Kelly.
@@ -258,6 +268,9 @@ def evaluate_strategy(
         n_trials: number of strategies tried (inflates the DSR correction)
         kelly_cap: maximum Kelly fraction returned
         min_fraction: minimum Kelly fraction returned
+        periods_per_year: annualization denominator for fold Sharpes.
+            Default 365 for crypto 24/7 (backward compat). Pass 252 for
+            forex (XAUUSD, FX majors) — G.0 gold-plan parameterization.
 
     Returns:
         StrategyEvaluation with fold Sharpes, mean/std_err, DSR, and
@@ -284,7 +297,7 @@ def evaluate_strategy(
     actual_splits = min(n_splits, max(2, n // 5))
     for fold in purged_kfold_splits(n, n_splits=actual_splits, embargo_pct=embargo_pct):
         test_pnls = arr[fold.test_indices]
-        fs = _fold_sharpe(test_pnls)
+        fs = _fold_sharpe(test_pnls, periods_per_year=periods_per_year)
         fold_sharpes.append(fs)
 
     # Sharpe distribution stats

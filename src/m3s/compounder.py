@@ -177,36 +177,90 @@ class Compounder:
         self._mode = mode
         self._state.mode = mode.name.value
 
+    # ── Leverage picker (G.0c.3 — regime-aware target leverage) ─────
+
+    def target_leverage(
+        self,
+        leverage_range: tuple[float, float],
+        snapshot: PortfolioSnapshot,
+    ) -> float:
+        """Return a target effective leverage within `leverage_range` based on
+        current portfolio regime (mode + drawdown + HWM distance).
+
+        Strategies declare their leverage_range; M3S picks the actual level
+        per regime. This is the G.0c.3 leverage-first hook. Strategies that
+        want leverage should call this method at signal time to get a
+        regime-appropriate value, then set `signal.leverage` before emitting.
+
+        Decision heuristic (intentionally simple; more sophisticated regime
+        rules can be added without changing the interface):
+          - CONSERVATIVE mode → always min of range
+          - STANDARD mode    → middle of range when drawdown < 2%, min otherwise
+          - GROWTH mode      → max of range when drawdown < 5%, middle when
+                               < 10%, min when deeper
+          - CUSTOM mode      → middle of range (CUSTOM has its own rules,
+                               users can override by setting signal.leverage
+                               explicitly)
+
+        Caps:
+          - NEVER exceeds max(leverage_range) no matter what mode says
+          - NEVER below min(leverage_range) for live signals
+          - If range is (1, 1) (default crypto), always returns 1.0
+        """
+        lo, hi = float(leverage_range[0]), float(leverage_range[1])
+        if lo < 1.0:
+            lo = 1.0
+        if hi < lo:
+            hi = lo
+        if lo >= hi:
+            # Single-point range — just return it
+            return lo
+
+        dd = float(snapshot.drawdown_pct)
+        mode_name = self._mode.name.value
+
+        if mode_name == "CONSERVATIVE":
+            return lo
+        if mode_name == "STANDARD":
+            return lo + (hi - lo) * 0.5 if dd < 0.02 else lo
+        if mode_name == "GROWTH":
+            if dd < 0.05:
+                return hi
+            if dd < 0.10:
+                return lo + (hi - lo) * 0.5
+            return lo
+        # CUSTOM or unknown — conservative middle
+        return lo + (hi - lo) * 0.5
+
     # ── Scalar composition (called on every signal) ─────────────────
 
-    def risk_scalar(self, snapshot: PortfolioSnapshot) -> float:
-        """Return the scalar to multiply into Signal.risk_pct.
-
-        Composition (all in [0, cap]):
-          - vol_target_scalar  — vol targeting vs realized portfolio vol
-          - mode_pace_scalar   — rolling-Sharpe pace dial (mode-clamped)
-          - cvar_scalar        — tail-risk protection (Tier 1 #5)
-          - dd_scalar          — DD freeze / halt
-        Final is clamped to [_SCALAR_HARD_FLOOR, _SCALAR_HARD_CEILING].
+    def risk_scalar(
+        self,
+        snapshot: PortfolioSnapshot,
+        leverage: float = 1.0,
+    ) -> float:
+        """Composition scalar for Signal.risk_pct. At leverage==1.0 uses the
+        legacy product (bit-exact with pre-G.2b); at leverage>1 uses geometric
+        mean + explicit leverage damping so factors don't fight at high L.
         """
-        # (1) DD halt — short-circuit before doing any other work.
         dd_scalar = self._dd_scalar(snapshot.drawdown_pct)
         if dd_scalar == 0.0:
             return 0.0
 
-        # (2) Vol targeting.
         vol_scalar = self._vol_target_scalar(snapshot)
-
-        # (3) Mode pace dial — dynamic compounding, rolling Sharpe based.
         pace_scalar = self._mode_pace_scalar(snapshot)
-
-        # (4) CVaR tail-risk scaling.
         cvar_scalar = self._cvar_scalar(snapshot) if self._cvar_enabled else 1.0
 
-        combined = vol_scalar * pace_scalar * cvar_scalar * dd_scalar
-        final = max(_SCALAR_HARD_FLOOR, min(_SCALAR_HARD_CEILING, combined))
+        if leverage <= 1.0:
+            combined = vol_scalar * pace_scalar * cvar_scalar * dd_scalar
+        else:
+            product = vol_scalar * pace_scalar * cvar_scalar
+            risk_geomean = product ** (1.0 / 3.0) if product > 0 else 0.0
+            stress = 1.0 - min(vol_scalar, pace_scalar, cvar_scalar)
+            leverage_damping = math.exp(-stress * math.log1p(leverage) * 0.1)
+            combined = risk_geomean * leverage_damping * dd_scalar
 
-        return final
+        return max(_SCALAR_HARD_FLOOR, min(_SCALAR_HARD_CEILING, combined))
 
     # ── Base advancement (called on scheduled tick or trade close) ──
 

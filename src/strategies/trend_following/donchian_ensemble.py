@@ -26,7 +26,7 @@ import pandas as pd
 from src.strategies.base import BaseStrategy
 from src.strategies.filters.regime_filter import VPINRegimeFilter
 from src.utils.config import get_config
-from src.utils.types import RiskProfile, Signal, SignalAction
+from src.utils.types import RiskProfile, Signal, SignalAction, Tier
 
 
 class DonchianEnsembleStrategy(BaseStrategy):
@@ -40,6 +40,8 @@ class DonchianEnsembleStrategy(BaseStrategy):
         risk_profile: RiskProfile = RiskProfile.SAFE,
         max_risk_per_trade: float = 0.01,
         *,
+        leverage_range: tuple[float, float] = (1.0, 1.0),
+        tier: Tier = Tier.UNCLASSIFIED,
         # Channel periods
         dc_short: int = 20,
         dc_medium: int = 55,
@@ -56,7 +58,10 @@ class DonchianEnsembleStrategy(BaseStrategy):
         adx_trend_threshold: float | None = None,
         vpin_filter: VPINRegimeFilter | None = None,
     ):
-        super().__init__(name, markets, timeframe, risk_profile, max_risk_per_trade)
+        super().__init__(
+            name, markets, timeframe, risk_profile, max_risk_per_trade,
+            leverage_range=leverage_range, tier=tier,
+        )
 
         self.dc_short = dc_short
         self.dc_medium = dc_medium

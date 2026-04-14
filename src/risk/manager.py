@@ -127,6 +127,16 @@ class RiskManager:
             return RiskDecision(approved=False, reason=reason, checks_passed=checks_passed)
         checks_passed.append("duplicate_filter")
 
+        # 5b. Leverage gates (G.0c) — hard rejects, M3S cannot override.
+        # Only fire when Signal.leverage is set AND gates are enabled. Crypto
+        # strategies leave leverage=None so these gates are no-ops for them.
+        if self.config.leverage_gates_enabled and signal.leverage is not None:
+            reason = self._check_leverage_gates(signal)
+            if reason:
+                self._log_decision(signal, False, reason, checks_passed)
+                return RiskDecision(approved=False, reason=reason, checks_passed=checks_passed)
+            checks_passed.append("leverage_gates")
+
         # 6. Kelly sizer — mode-resolved fractions + profile
         risk_cap = self.config.max_risk_per_trade * mode_mults.max_risk_per_trade
         kelly_frac = self.config.kelly_default_fraction * mode_mults.kelly_default_fraction
@@ -186,6 +196,79 @@ class RiskManager:
     def set_strategy_stats(self, strategy: str, stats: StrategyStats) -> None:
         """Update cached stats for a strategy."""
         self._strategy_stats[strategy] = stats
+
+    def _check_leverage_gates(self, signal: Signal) -> str | None:
+        """G.0c leverage-first safety gates.
+
+        Three hard rejects, in order:
+        1. Per-position leverage > max_per_position_leverage (absolute cap)
+        2. Aggregate portfolio leverage would exceed max_aggregate_leverage
+        3. Stop loss is inside the liquidation buffer zone
+
+        Returns a rejection reason string, or None to pass.
+        """
+        cfg = self.config
+        lev = signal.leverage or 1.0
+
+        # Gate 1: per-position absolute cap. Hard limit regardless of strategy.
+        if lev > cfg.max_per_position_leverage:
+            return (
+                f"LEVERAGE_CAP: requested leverage {lev:.0f}x exceeds "
+                f"max_per_position_leverage {cfg.max_per_position_leverage:.0f}x"
+            )
+
+        # Gate 2: aggregate portfolio leverage.
+        # Current effective leverage = sum of (position_notional / equity)
+        # across open positions. Adding this new signal must not push the
+        # total above max_aggregate_leverage.
+        equity = self.state.current_equity
+        if equity <= 0:
+            return "LEVERAGE_CAP: zero equity"
+        # Sum notionals of existing open positions
+        existing_notional = 0.0
+        for pos in self.state.open_positions.values():
+            price = float(getattr(pos, "entry_price", 0.0) or 0.0)
+            qty = float(getattr(pos, "quantity", 0.0) or 0.0)
+            existing_notional += abs(price * qty)
+        # Estimate notional of the new signal
+        new_notional = 0.0
+        if signal.entry_price and signal.risk_pct and signal.stop_loss:
+            stop_dist = abs(signal.entry_price - signal.stop_loss)
+            if stop_dist > 0:
+                risk_amount = equity * float(signal.risk_pct)
+                qty_est = risk_amount / stop_dist
+                new_notional = abs(signal.entry_price * qty_est)
+        total_leverage = (existing_notional + new_notional) / equity
+        if total_leverage > cfg.max_aggregate_leverage:
+            return (
+                f"AGGREGATE_LEVERAGE: total {total_leverage:.1f}x would exceed "
+                f"cap {cfg.max_aggregate_leverage:.1f}x "
+                f"(existing ${existing_notional:.0f} + new ${new_notional:.0f} "
+                f"vs equity ${equity:.0f})"
+            )
+
+        # Gate 3: liquidation buffer.
+        # At leverage L, margin_call distance ≈ equity / (notional × L).
+        # Reject if the stop is closer to entry than `liquidation_buffer_pct`
+        # of the margin-call distance — i.e., if a small slip past the stop
+        # would blow the account.
+        if signal.entry_price and signal.stop_loss and lev > 1.0:
+            stop_dist_pct = abs(signal.entry_price - signal.stop_loss) / signal.entry_price
+            # Margin-call distance at leverage L is roughly 1/L of price
+            # (a 1/L move wipes the margin). Require stop to be WITHIN that
+            # distance by at least liquidation_buffer_pct margin.
+            margin_call_dist_pct = 1.0 / lev
+            buffer = cfg.liquidation_buffer_pct
+            # Stop must be closer than (1 - buffer) × margin_call_dist
+            max_safe_stop = margin_call_dist_pct * (1.0 - buffer)
+            if stop_dist_pct > max_safe_stop:
+                return (
+                    f"LIQUIDATION_BUFFER: stop distance {stop_dist_pct:.3%} at "
+                    f"{lev:.0f}x leverage is inside liquidation zone "
+                    f"(max_safe={max_safe_stop:.3%}, buffer={buffer:.0%})"
+                )
+
+        return None
 
     def set_mode(self, mode: str, custom: dict[str, float] | None = None) -> None:
         """Change operating mode at runtime."""

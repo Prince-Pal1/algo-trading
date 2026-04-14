@@ -164,6 +164,32 @@ class TestRollingStats:
         assert sstat.lifetime_sharpe > 0.0
         assert math.isfinite(sstat.lifetime_sharpe)
 
+    def test_periods_per_year_backward_compat_default_365(self):
+        """G.0 refactor: default periods_per_year should preserve existing crypto behavior."""
+        pt = PortfolioTracker(initial_equity=10_000.0)
+        assert pt._periods_per_year == 365.0
+        assert pt._annualization == pytest.approx(math.sqrt(365.0))
+
+    def test_periods_per_year_forex_252(self):
+        """G.0 refactor: passing periods_per_year=252 yields sqrt(252) annualization."""
+        pt = PortfolioTracker(initial_equity=10_000.0, periods_per_year=252.0)
+        assert pt._periods_per_year == 252.0
+        assert pt._annualization == pytest.approx(math.sqrt(252.0))
+
+    def test_lifetime_sharpe_differs_between_crypto_and_forex(self):
+        """Same trade data, different periods_per_year → different Sharpe."""
+        pt_crypto = PortfolioTracker(initial_equity=10_000.0, periods_per_year=365.0)
+        pt_forex = PortfolioTracker(initial_equity=10_000.0, periods_per_year=252.0)
+        # Identical trade history on both trackers
+        for i in range(10):
+            pt_crypto.on_trade_close("a", pnl=50.0 + i, symbol="X", ts_ms=_ts(i))
+            pt_forex.on_trade_close("a", pnl=50.0 + i, symbol="X", ts_ms=_ts(i))
+        snap_c = pt_crypto.snapshot(now_ms=_ts(10))
+        snap_f = pt_forex.snapshot(now_ms=_ts(10))
+        # Same PnL series, different annualization → forex Sharpe lower by sqrt(252/365)
+        ratio = snap_f.per_strategy["a"].lifetime_sharpe / snap_c.per_strategy["a"].lifetime_sharpe
+        assert ratio == pytest.approx(math.sqrt(252.0 / 365.0), rel=1e-6)
+
 
 class TestExposureAndCorrelation:
     def test_invalid_exposure_raises(self):

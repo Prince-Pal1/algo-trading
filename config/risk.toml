@@ -25,6 +25,16 @@ min_trades_for_kelly = 30       # Need 30+ trades before Kelly kicks in
 max_order_value_usd = 10000     # No single order > $10K (paper phase)
 max_quantity_multiplier = 10    # No order > 10x average trade size
 
+[leverage]
+# G.0c leverage-first safety gates. Hard limits enforced by RiskManager —
+# M3S cannot override these. Fire only on signals with an explicit
+# `leverage` field set (crypto spot strategies leave it None, so these
+# gates are no-ops for them).
+gates_enabled = true                    # Master toggle
+max_aggregate_leverage = 100.0          # Portfolio-wide effective leverage cap
+max_per_position_leverage = 500.0       # Per-signal absolute ceiling
+liquidation_buffer_pct = 0.20           # Reject stops within 20% of margin-call distance
+
 [modes]
 default = "AGGRESSIVE"          # Profit-first default
 
@@ -47,3 +57,15 @@ drawdown_sensitivity = 0.5      # 50% of normal drawdown scaling
 drawdown_floor = 0.3            # Never reduce below 30% size
 use_risk_based_limits = true
 max_risk_pct_per_position = 0.04
+
+[profiles.aggressive_retail]
+# G.2c Tier 5 aggressive sub-book profile.
+# Leverage gates are DISABLED so 1000× retail scalping can run, but
+# fat_finger stays ACTIVE to prevent mis-keyed disasters.
+leverage_gate_per_position_enabled = false
+leverage_gate_aggregate_enabled = false
+liquidation_buffer_check_enabled = false
+fat_finger_max_value_usd_override = 100.0
+duplicate_filter_enabled = true
+daily_loss_limit_sub_book_pct = 0.30
+max_concurrent_aggressive_positions = 3
