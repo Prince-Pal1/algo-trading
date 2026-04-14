@@ -80,31 +80,65 @@ class SpreadSlippageConfig:
     bid = mid - spread/2 - slippage. `fill_price()` computes this given
     a reference price and ATR context.
 
-    Defaults are calibrated to IC Markets cTrader raw XAUUSD:
-    - base_spread_pips: 0.13 pips = $1.30 per standard lot spread cost
-      (matches Brokerchooser-verified IC Markets typical)
-    - normal_slip_pips: 0.2 pips queue slippage — what the order book
-      moves between signal emission and fill
-    - atr_vol_mult: slippage widens with volatility. During low-ATR
-      quiet periods slip ~= normal; during high-ATR fast moves slip can
-      be 2-3× that
-    - news_spread_mult: 10× widening during news windows (empirically
-      IC Markets raw goes from 0.13 → 1.0-2.0 pips during NFP)
-    - news_slip_mult: 8× slip widening during news
+    Defaults are calibrated to IC Markets Raw cTrader XAUUSD using
+    PUBLISHED official broker numbers + peer ECN measurements (2026-04-14
+    research pass, task #105):
+
+    base_spread_pips: 0.30 pips
+        Conservative blend between IC Markets Global Raw (0.09 avg) and
+        IC Markets EU Raw (0.63 avg per cdn.icmarkets.eu spec sheet).
+        Aligned with peer ECN brokers Pepperstone (0.20-0.30) and
+        Exness (0.0-0.20). Sources:
+          - https://www.icmarkets.com/global/en/trading-pricing/spreads
+          - https://cdn.icmarkets.eu/uploads/Commodity-Specification-Sheet.pdf
+          - https://www.bestbrokers.com/reviews/ic-markets/spreads-fees-and-commissions/
+
+    normal_slip_pips: 0.30 pips
+        Conservative — gold is slightly less liquid than EURUSD where
+        databasemart latency study measured cTrader London slippage at
+        0.00001 (1 micro-pip). Bumped 30% above the spread baseline as
+        gold has wider tick increments. Sources:
+          - https://www.databasemart.com/blog/customer-stories-115
+          - https://www.myfxbook.com/press-release/-99-slippage-free-advantage/36625
+            (Exness XAUUSD 99% slippage-free, peer ECN comparable)
+
+    atr_vol_mult: 0.0 (DISABLED)
+        ⚠️ HISTORICAL BUG: previous default was 0.5, which scaled slip
+        as half of bar ATR. With XAUUSD M5 median ATR ~$7, this produced
+        35.6 pips of slip per fill — ~90× too high for ECN brokers.
+        ECN slippage is bounded by order book depth (typically <1 pip),
+        not by bar volatility. The ATR scaling was a port from a
+        market-maker model and never made sense for raw cTrader fills.
+        Removed entirely. See ARCHITECTURE.md gotcha 2026-04-14.
+
+    news_spread_mult: 5.0
+        Halved from previous 10× because real news widening on gold is
+        3-10× the normal spread, not always 10×. Source: multiple FXNX,
+        Vantage Markets gold news trading guides documenting
+        widening behavior on NFP/CPI/FOMC.
+
+    news_slip_mult: 5.0
+        Same reasoning as news_spread_mult. During NFP/CPI/FOMC the
+        order book thins out and slippage can spike to 1-5 pips for a
+        few minutes. 5× normal_slip_pips (0.30) = 1.5 pips peak slip
+        during news, matches anecdotal trader reports.
 
     Numbers are PER SIDE (buy leg or sell leg), not per round trip.
     A round-trip trade pays spread twice (open + close).
 
-    Pip convention: for XAUUSD, 1 pip = $0.10 move. At contract_size=100
-    (1 lot = 100 oz), 1 pip = $10 per lot = $10/100oz = $0.10/oz. All
-    the per-pip numbers in this config are in that convention.
+    Pip convention for XAUUSD on IC Markets:
+        - 2-decimal quote (e.g. 4500.05)
+        - 1 pip = $0.10 price units
+        - 1 lot = 100 oz → 1 pip move = $10 P&L per lot
+        - Verified against IC Markets official spreads page +
+          getknowtrading.com pip calculator + multiple peer broker docs.
     """
-    base_spread_pips: float = 0.13
-    normal_slip_pips: float = 0.2
-    atr_vol_mult: float = 0.5
+    base_spread_pips: float = 0.30
+    normal_slip_pips: float = 0.30
+    atr_vol_mult: float = 0.0
     news_windows: tuple[NewsWindow, ...] = field(default_factory=tuple)
-    news_spread_mult: float = 10.0
-    news_slip_mult: float = 8.0
+    news_spread_mult: float = 5.0
+    news_slip_mult: float = 5.0
     pip_size: float = 0.10  # price units per pip for XAUUSD (2-decimal quote)
 
 
@@ -202,52 +236,117 @@ def round_trip_spread_cost_usd(
 
 @dataclass(frozen=True)
 class CommissionSchedule:
-    """Per-lot-per-side commission schedule.
+    """Commission schedule supporting BOTH per-lot fixed and volume-based pricing.
 
-    IC Markets cTrader raw XAUUSD:
-        per_lot_per_side_usd = $3.00
-        contract_size        = 100 (oz per lot)
-        min_commission_usd   = 0.0
+    IC Markets uses TWO different commission structures depending on platform
+    (verified 2026-04-14 task #105 against the official spreads page):
 
-    Per round-trip (open + close), a 1-lot XAUUSD trade pays $6 commission.
-    Contrast with the old flat 0.04% model which, on $50,000 notional,
-    would be $20/side or $40/round-trip. The flat model was 6-7× too
-    expensive at high leverage, masking real alpha.
+    1. **MT4/MT5 Raw Spread** — FIXED per-lot commission
+       Use: per_lot_per_side_usd=3.50, per_100k_notional_usd=None
+       For XAUUSD: $3.50/side regardless of gold price → $7 round-trip per lot.
+       Also same rate for FX pairs.
 
-    For sub-lot trades (0.01, 0.05 lots), commission scales linearly with
-    the quantity_units / contract_size ratio. There's usually no minimum
-    per-trade commission on ECN accounts, but the field exists for brokers
-    that do impose one.
+    2. **cTrader / TradingView Raw Spread** — VOLUME-BASED commission
+       Use: per_lot_per_side_usd=None, per_100k_notional_usd=3.0
+       Commission = ($3 × notional_usd / $100,000) per side.
+       For XAUUSD at $4500/oz × 100 oz = $450,000 notional:
+         → $13.50/side per lot → $27 round-trip per lot.
+       For FX where 1 lot = $100k notional, this works out to $3/side
+       (matches MT4 nearly exactly).
+
+    **For gold on cTrader, commission is ~3.86× higher than MT4.** This
+    is a real economic difference, not a calibration choice. Per CLAUDE.md
+    we deploy on cTrader, so the ICMarketsMetalFeeModel default uses the
+    cTrader schedule.
+
+    Sources:
+      - https://www.icmarkets.com/global/en/trading-pricing/spreads
+      - https://www.icmarkets.eu/en/trading-pricing/trading-costs
+      - https://www.bestbrokers.com/reviews/ic-markets/spreads-fees-and-commissions/
+
+    For volume-based schedules, commission_usd() requires a reference_price
+    argument so the function can compute notional from quantity × price.
+    For per-lot schedules, reference_price is ignored.
+
+    For sub-lot trades (0.01, 0.05 lots), commission scales linearly.
+    No minimum commission on ECN accounts (min_commission_usd=0).
     """
-    per_lot_per_side_usd: float = 3.0
-    contract_size: float = 100.0  # default XAUUSD 1 lot = 100 oz
+    per_lot_per_side_usd: float | None = None  # MT4 fixed (e.g. $3.50)
+    per_100k_notional_usd: float | None = 3.0  # cTrader volume-based (default)
+    contract_size: float = 100.0  # XAUUSD 1 lot = 100 oz
     min_commission_usd: float = 0.0
+
+
+# Factory functions for the two IC Markets schedules
+def make_ic_markets_mt4_xauusd_schedule() -> CommissionSchedule:
+    """IC Markets MT4 Raw Spread schedule for XAUUSD: $3.50/lot/side fixed."""
+    return CommissionSchedule(
+        per_lot_per_side_usd=3.50,
+        per_100k_notional_usd=None,
+        contract_size=100.0,
+    )
+
+
+def make_ic_markets_ctrader_xauusd_schedule() -> CommissionSchedule:
+    """IC Markets cTrader Raw Spread schedule: $3 per $100k notional, volume-based.
+
+    For gold at typical ~$4000-$5000/oz price, this works out to
+    ~$12-15 per side per lot — significantly higher than MT4's $3.50.
+    """
+    return CommissionSchedule(
+        per_lot_per_side_usd=None,
+        per_100k_notional_usd=3.0,
+        contract_size=100.0,
+    )
 
 
 def commission_usd(
     *,
     quantity_units: float,
     schedule: CommissionSchedule,
+    reference_price: float | None = None,
 ) -> float:
     """Round-trip commission for a position of `quantity_units`.
 
-    Formula:
-        lots = quantity_units / contract_size
-        per_leg = max(min_commission_usd, lots × per_lot_per_side_usd)
-        round_trip = 2 × per_leg
+    Dispatches on schedule type:
+      - per_lot_per_side_usd set → MT4-style fixed per-lot pricing
+        (reference_price ignored)
+      - per_100k_notional_usd set → cTrader-style volume-based pricing
+        (reference_price REQUIRED)
 
     Args:
-        quantity_units: position size in instrument units.
-        schedule: CommissionSchedule.
+        quantity_units: position size in instrument units (oz for XAUUSD).
+        schedule: CommissionSchedule (must set exactly one pricing field).
+        reference_price: current price used to compute notional value.
+            Required for volume-based schedules; ignored for per-lot.
 
     Returns:
-        USD commission for the full round-trip.
+        USD commission for the full round-trip (entry + exit).
     """
     if quantity_units <= 0:
         return 0.0
-    lots = quantity_units / schedule.contract_size
-    per_leg = max(schedule.min_commission_usd, lots * schedule.per_lot_per_side_usd)
-    return 2.0 * per_leg
+
+    if schedule.per_100k_notional_usd is not None:
+        # Volume-based (cTrader)
+        if reference_price is None or reference_price <= 0:
+            raise ValueError(
+                "reference_price required for volume-based commission schedules. "
+                "Pass current fill_price to commission_usd()."
+            )
+        notional_usd = quantity_units * reference_price
+        per_leg_usd = (notional_usd / 100_000.0) * schedule.per_100k_notional_usd
+        per_leg_usd = max(schedule.min_commission_usd, per_leg_usd)
+    elif schedule.per_lot_per_side_usd is not None:
+        # Fixed per-lot (MT4)
+        lots = quantity_units / schedule.contract_size
+        per_leg_usd = max(schedule.min_commission_usd, lots * schedule.per_lot_per_side_usd)
+    else:
+        raise ValueError(
+            "CommissionSchedule must set either per_lot_per_side_usd "
+            "(MT4 style) or per_100k_notional_usd (cTrader style)."
+        )
+
+    return 2.0 * per_leg_usd
 
 
 # ── Broker-specific fee model ────────────────────────────────────────────
@@ -257,21 +356,34 @@ def commission_usd(
 class ICMarketsMetalFeeModel:
     """Convenience wrapper bundling spread + commission for IC Markets XAUUSD.
 
-    Construct with optional news calendar override. Use the wrapper methods
-    directly in the BacktestEngine to avoid threading multiple config
-    objects through every call site.
+    Defaults to the **cTrader Raw Spread** schedule because per CLAUDE.md
+    we deploy on IC Markets cTrader. For MT4 backtests, construct with
+    `commission_schedule=make_ic_markets_mt4_xauusd_schedule()`.
+
+    Both schedules use the same SpreadSlippageConfig defaults (the
+    research-calibrated 0.30 spread + 0.30 slip + 0.0 ATR mult).
 
     Usage:
-        model = ICMarketsMetalFeeModel()  # defaults calibrated for XAUUSD
+        model = ICMarketsMetalFeeModel()  # cTrader by default
         fill = model.fill_price(side="BUY", reference_price=2400.50,
                                  atr=3.0, ts_ms=1738681300000)
-        cost = model.commission_usd(quantity_units=20.833)  # 1 lot
+        cost = model.commission_usd(quantity_units=20.833,
+                                     reference_price=2400.50)  # required for cTrader
         rt_spread = model.round_trip_spread_cost_usd(
             quantity_units=20.833, in_news=False,
         )
+
+        # MT4 alternative (cheaper for gold):
+        from src.backtest.costs import make_ic_markets_mt4_xauusd_schedule
+        model_mt4 = ICMarketsMetalFeeModel(
+            commission_schedule=make_ic_markets_mt4_xauusd_schedule()
+        )
+        cost_mt4 = model_mt4.commission_usd(quantity_units=20.833)  # no price needed
     """
     spread_config: SpreadSlippageConfig = field(default_factory=SpreadSlippageConfig)
-    commission_schedule: CommissionSchedule = field(default_factory=CommissionSchedule)
+    commission_schedule: CommissionSchedule = field(
+        default_factory=make_ic_markets_ctrader_xauusd_schedule
+    )
 
     def fill_price(
         self,
@@ -289,10 +401,16 @@ class ICMarketsMetalFeeModel:
             config=self.spread_config,
         )
 
-    def commission_usd(self, *, quantity_units: float) -> float:
+    def commission_usd(
+        self,
+        *,
+        quantity_units: float,
+        reference_price: float | None = None,
+    ) -> float:
         return commission_usd(
             quantity_units=quantity_units,
             schedule=self.commission_schedule,
+            reference_price=reference_price,
         )
 
     def round_trip_spread_cost_usd(
@@ -341,7 +459,12 @@ class ZeroCostFeeModel:
         # No spread, no slippage — fill at the exact reference price
         return reference_price
 
-    def commission_usd(self, *, quantity_units: float) -> float:
+    def commission_usd(
+        self,
+        *,
+        quantity_units: float,
+        reference_price: float | None = None,
+    ) -> float:
         return 0.0
 
     def round_trip_spread_cost_usd(

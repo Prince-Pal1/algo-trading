@@ -324,7 +324,10 @@ class LeveragedBacktestEngine:
                 atr=self._get_atr(df, -1),
                 ts_ms=int(df.iloc[-1].get("timestamp", 0) or 0),
             )
-            commission = self._fee_model.commission_usd(quantity_units=pos.quantity)
+            commission = self._fee_model.commission_usd(
+                quantity_units=pos.quantity,
+                reference_price=fill,
+            )
             pos_strategy = pos.strategy_name
             closed = book.close_position(pos.id, exit_price=fill, commission=commission)
             trades.append(self._to_trade(
@@ -418,7 +421,10 @@ class LeveragedBacktestEngine:
                 atr=0.0,
                 ts_ms=bar.ts_ms,
             )
-            commission = self._fee_model.commission_usd(quantity_units=pos.quantity)
+            commission = self._fee_model.commission_usd(
+                quantity_units=pos.quantity,
+                reference_price=fill_price,
+            )
             pos_strategy = pos.strategy_name
             pos_entry_idx = pos.entry_idx
             closed = book.close_position(
@@ -494,6 +500,7 @@ class LeveragedBacktestEngine:
                 )
                 commission = self._fee_model.commission_usd(
                     quantity_units=pos.quantity,
+                    reference_price=fill_price,
                 )
                 closed = book.close_position(
                     pid, exit_price=fill_price, commission=commission,

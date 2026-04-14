@@ -48,8 +48,9 @@ class TestZeroCostFeeModel:
         assert isinstance(ic_fill, float)
         assert isinstance(zc_fill, float)
 
-        ic_comm = ic.commission_usd(quantity_units=20.833)
-        zc_comm = zc.commission_usd(quantity_units=20.833)
+        # cTrader (default) needs reference_price; both should accept it
+        ic_comm = ic.commission_usd(quantity_units=20.833, reference_price=2400.0)
+        zc_comm = zc.commission_usd(quantity_units=20.833, reference_price=2400.0)
         assert isinstance(ic_comm, float)
         assert isinstance(zc_comm, float)
 
@@ -69,6 +70,6 @@ class TestZeroCostFeeModel:
         assert zc.fill_price(side="BUY", reference_price=2400.0, atr=3.0, ts_ms=1000) == 2400.0
         assert zc.fill_price(side="SELL", reference_price=2400.0, atr=3.0, ts_ms=1000) == 2400.0
 
-        # IC Markets has nonzero commission
-        assert ic.commission_usd(quantity_units=100.0) > 0
-        assert zc.commission_usd(quantity_units=100.0) == 0.0
+        # IC Markets has nonzero commission (cTrader default needs reference_price)
+        assert ic.commission_usd(quantity_units=100.0, reference_price=2400.0) > 0
+        assert zc.commission_usd(quantity_units=100.0, reference_price=2400.0) == 0.0
