@@ -13,6 +13,7 @@ This document codifies the 7-stage hedge fund-style strategy development process
 Use this before declaring any strategy "done":
 
 - [ ] **Stage 0** *(Pine-derived strategies only)*: TV parity validation ≥ 99.0% bar-by-bar match via `scripts/tv_parity_validate.py`. See `docs/PINE_SCRIPT_PORT_WORKFLOW.md`.
+- [ ] **Fee profile selected** *(every backtest)*: explicit named profile from `src/backtest/fee_profiles.py` — never use implicit defaults. See `docs/BROKER_FEES.md`.
 - [ ] Stage 1: 4 research questions answered (inefficiency, persistence, killers, decay)
 - [ ] Stage 2: Strategy implemented with `BaseStrategy.on_features() -> Signal | None`
 - [ ] Stage 3: Backtest on 12 symbols, ≥1 symbol with Sharpe > 0 and ≥5 trades
@@ -178,6 +179,36 @@ class MyStrategy(BaseStrategy):
 ### Stage 3: Initial Backtest
 
 **Purpose:** Does the strategy produce any positive results at all?
+
+**MANDATORY PRE-STEP — select fee profile.** Before running any backtest, choose a named fee profile from `src/backtest/fee_profiles.py` matching the strategy's deployment scenario. NEVER use implicit `ICMarketsMetalFeeModel()` defaults — see `docs/BROKER_FEES.md` for why (the 90× slippage bug killed multiple strategies in 2026-04).
+
+```python
+from src.backtest.fee_profiles import make_fee_model
+
+# For production gold backtest (default cTrader)
+fee_model = make_fee_model("ic_markets_ctrader_xauusd_normal")
+
+# For gold-heavy strategies — MT4 saves ~$53/trade vs cTrader
+fee_model = make_fee_model("ic_markets_mt4_xauusd_normal")
+
+# For strategies that trade through NFP/CPI/FOMC
+fee_model = make_fee_model("ic_markets_ctrader_xauusd_news_active")
+
+# For robustness check (2× normal costs)
+fee_model = make_fee_model("ic_markets_ctrader_xauusd_stress")
+
+# For Pine Script port validation ONLY (Stage 0, NOT for production)
+fee_model = make_fee_model("pine_zero_cost")
+```
+
+**Cite the fee profile in the backtest report.** The profile name encodes your cost assumption; future readers can reproduce the result.
+
+**Leverage sanity check.** For any strategy at >100x leverage, run:
+```python
+from src.backtest.fee_profiles import cost_as_pct_of_margin
+pct = cost_as_pct_of_margin(per_trade_cost_usd, notional_usd, leverage)
+```
+If `pct > 5%`, the strategy is fragile to costs — reduce leverage or trade frequency.
 
 **Commands:**
 ```bash
