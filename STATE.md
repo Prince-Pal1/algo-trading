@@ -1,6 +1,6 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-04-13 (Session 22 compressed sprint Day 0.5 — validation + promotion layer shipped)
+**Last updated:** 2026-04-14 (Session 22 Day 1 — main automation forensic audit + watchdog data-staleness patch)
 
 ---
 
@@ -8,10 +8,32 @@
 
 **Active phase:** Phase 3b-2 M3S shadow + Phase 3c meta-labeling shadow running in parallel. Validation layer, promotion scripts, feature enrichment, and project status aggregator all shipped. All code is in place for the 2026-04-16/17 automated cron promotions — wall-clock is the only remaining blocker (4-day shadow clock).
 **Next session target:** Nothing manual needed before the 2026-04-16 09:07 CronCreate wake-up. If interrupted earlier, `cat data/project_status.md` gives single-pane status; `./scripts/promote_m3s_authoritative.sh --dry-run` re-runs all 4 gates.
-**Engine status:** Paper trading running via launchd (risk-server + engine + watchdog), HEALTHY. M3S active in shadow mode (day 1/4 compressed clock). Meta-label filter active in shadow mode (4 LR models loaded, AUC 0.486-0.571).
-**Test suite:** 658 passing, 0 skipped.
+**Engine status:** Paper trading running via launchd (risk-server + engine + watchdog), HEALTHY. Orphan engine process from 2026-04-13 Sunday killed at 16:23 IST today (was writing stale heartbeats for 2 days with frozen CandleBuilder). New engine PID 33988 running since 10:50 UTC. Watchdog patched with `DATA_STALE_KILL_THRESHOLD=1800s` data-staleness check and reloaded (PID 34293). M3S active in shadow mode (day 1/4 compressed clock). Meta-label filter active in shadow mode (4 LR models loaded, AUC 0.486-0.571).
+**Test suite:** 686 passing on main, 962 passing on feat/gold-refactor, 0 skipped.
 **Portfolio:** bb_rsi_mr_opt 40% / donchian_ensemble_adx 30% / vol_momentum 30% + funding_carry live. Sharpe 2.318 baseline (backtest, 2yr walk-forward).
 **Meta-label training:** 2,819 harvested audit rows from backtests; 4 LR models trained with 24-key feature schema (15 populated + 9 placeholders for future enrichment); LightGBM rejected by A/B sanity check (uplift < 0.03 AUC threshold).
+
+## Session 22 Day 1 — Main automation forensic audit (2026-04-14 afternoon)
+
+Triggered by Prince's smell-test: *"isn't it suspicious that main hasn't made any commits in 2 days? The running background processes are supposed to improve the branch. Either the automation isn't working, or if it's working then it's not throwing errors when it should. And the 6h cron is overdue — why?"*
+
+**What I found:**
+1. **CRITICAL — Orphan engine process from 2 days ago**: `ps aux` revealed TWO PIDs running `src.main` — the launchd-tracked one AND an orphan (PID 61932) from Sunday 9PM that survived a launchd restart. The orphan had a frozen CandleBuilder and was writing heartbeats with `last_candle_age_s=8570` (2.4h stale). `launchctl kickstart -k` only killed the launchd-tracked PID; the orphan needed manual `kill -9`. Killed at 16:23 IST, fresh engine PID 33988 started immediately.
+2. **CRITICAL — Watchdog blind to data staleness**: watchdog only checked `os.stat(heartbeat.json).st_mtime`. The orphan kept touching the file every 30s → mtime stayed fresh → watchdog reported HEALTHY while data was stale for hours. Patched with `_read_candle_age_s()` that parses `last_candle_age_s` from the heartbeat content + new kill branch at `DATA_STALE_KILL_THRESHOLD=1800s`. Committed as `7c5d000` on main, cherry-picked to `feat/gold-refactor` as `fcb13b9`.
+3. **FALSE ALARM — "launchd agents never fire"**: my initial forensic hypothesis was that `project-status` and `m3s-shadow-check` had never fired their StartInterval. Wrong — `launchctl print` shows `runs=42` (project-status) and `runs=5` (m3s-shadow-check). The 0-byte log files are normal because the scripts run silently (structlog writes to a different path, not the stdout/stderr redirected by the plist). Reduced run counts (vs naive wall-clock expectation of 96/8) are due to macOS suspending `StartInterval` fires during sleep — a known behavior, not a bug. Watchdog patch catches any resulting drift at the engine level.
+4. **FALSE ALARM — `joblib` missing**: Day 3 DRY-RUN on 2026-04-13 reported ImportError. Verified today: `joblib 1.5.3` is installed (probably pulled in as transitive dep). `meta_label_shadow_check.py` runs cleanly when invoked directly.
+5. **The "no commits in 2 days" smell was half right**: it's true that commits are rare (only Day 3/4 promotions commit, and shadow checks write to gitignored `data/`), so zero commits was by design. BUT the underlying smell was correct — the orphan+frozen-CandleBuilder bug was real and had gone undetected for 2 days precisely because watchdog was checking the wrong thing. Smell test vindicated.
+
+**Post-fix verification:**
+- Engine: `status=HEALTHY, uptime=540s, tick_count=23708, strategy_exceptions=0`
+- Watchdog: `status=HEALTHY, heartbeat_age_s=0.7`, running on patched code (PID 34293)
+- Test suite on main: `686 passed in 17.90s`
+- Test suite on feat/gold-refactor (after cherry-pick): `962 passed in 19.72s`
+- Both branches pushed to origin.
+
+**Commits:**
+- `7c5d000` on main: `fix(watchdog): catch frozen CandleBuilder via heartbeat data-staleness`
+- `fcb13b9` on feat/gold-refactor: same (cherry-picked).
 
 > See `ROADMAP.md` for phase table. See `SESSIONS_ARCHIVE.md` for Sessions 8-17.
 

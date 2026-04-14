@@ -1,7 +1,7 @@
 # Algo Trading — Roadmap & Phase Status
 
-**Last updated:** 2026-04-13 (Session 22 compressed sprint Day 0.5 — validation + promotion layer shipped)
-**Current phase:** 3b-2 (M3S) shadow mode ACTIVE + Phase 3c meta-labeling shadow mode ACTIVE. Validation layer (meta_label_shadow_check + deflated_sharpe_from_audit), promotion scripts (promote_m3s_authoritative.sh + promote_meta_label.sh), libomp+LightGBM available (LR still winning A/B), feature enrichment 15→24 keys, project_status.py aggregator shipped. 4 meta-label LR models trained on 2,819 harvested + retrained with 24-key schema. All 658 tests pass. M3S shadow clock day 1/4 (compressed from 7).
+**Last updated:** 2026-04-14 (Session 22 Day 1 — main automation forensic audit + watchdog data-staleness patch)
+**Current phase:** 3b-2 (M3S) shadow mode ACTIVE + Phase 3c meta-labeling shadow mode ACTIVE. Validation layer (meta_label_shadow_check + deflated_sharpe_from_audit), promotion scripts (promote_m3s_authoritative.sh + promote_meta_label.sh), libomp+LightGBM available (LR still winning A/B), feature enrichment 15→24 keys, project_status.py aggregator shipped. 4 meta-label LR models trained on 2,819 harvested + retrained with 24-key schema. All 686 tests pass on main, 962 on feat/gold-refactor. M3S shadow clock day 1/4 (compressed from 7). Watchdog data-staleness patch shipped (discovered+fixed today after Prince's automation smell test).
 **Next action:** Wall-clock gated: 4-day shadow clock → 2026-04-16 cron auto-runs promote_m3s_authoritative.sh + promote_meta_label.sh --to advisory. Manual interim: `cat data/project_status.md` at any time for single-pane status. Dry-run promotions validate end-to-end: `./scripts/promote_m3s_authoritative.sh --dry-run` shows 3/4 gates passing (clock blocks).
 
 > **Authority note:** This file is the **only** authoritative source for phase status. If any other file contradicts this, that other file is wrong — fix it to link here. See `CLAUDE.md` § Autonomous Workflow Protocol.
@@ -23,8 +23,9 @@
 | 6 | Options Module | Iron condor SPX positive 1-year | ❌ NOT STARTED | — | — |
 | 7 | Production Deployment | 7 days unattended on VPS | ❌ NOT STARTED | — | Phase 3-milestone + M3S |
 | 8 | Scale | 3+ strategies portfolio Sharpe >1.5 | 🟡 PARTIAL — 3 strategies live, Sharpe 2.318 in backtest only | Session 10-11, 14-16 | OOS portfolio validation on live paper data |
+| DISCOVERED 2026-04-14 | Watchdog data-staleness patch | Kill engine when `last_candle_age_s > 1800s` even if file mtime is fresh | ✅ COMPLETE | `7c5d000` main / `fcb13b9` gold; ARCHITECTURE.md Known Gotchas 2026-04-14 | — |
 
-**Legend:** ✅ complete · ❌ not started · 🟡 in progress/partial
+**Legend:** ✅ complete · ❌ not started · 🟡 in progress/partial · **DISCOVERED** = unplanned work surfaced mid-session (Rule 2)
 
 ---
 
