@@ -238,6 +238,41 @@ Mean OOS: Calmar +8.515 ± 9.5, Sharpe +2.001 ± 2.5, return +2.92% per 30-day f
 
 ---
 
+## Gap closer — walk-forward vol_momentum_gold (G.2h.6b, 2026-04-14 morning)
+
+G.2h.6 only covered donchian_gold. `vol_momentum_gold` had only a single-window in-sample tune (Calmar 1.365). Closing the asymmetry by running the same 6-fold walk-forward schedule on vol_momentum_gold.
+
+`scripts/walk_forward_vol_momentum_gold.py` — 6 folds × (3mo train + 1mo test), grid search over (mw, vl, vt, sl_atr_mult) per fold with session_filter=True and long_only=True locked from the tuning pass.
+
+**Per-fold OOS results:**
+
+| Fold | Best params | Return | DD | Calmar | Sharpe | Trades |
+|---:|---|---:|---:|---:|---:|---:|
+| 1 | mw=168 vl=240 vt=0.15 sl=3.0 | +1.51% | 1.82% | +5.08 | +1.70 | 9 |
+| 2 | mw=240 vl=168 vt=0.20 sl=3.0 | **-5.64%** | 7.54% | **-4.58** | **-3.83** | 9 |
+| 3 | mw=240 vl=168 vt=0.20 sl=2.5 | +1.46% | 5.48% | +1.62 | +0.76 | 8 |
+| 4 | mw=168 vl=168 vt=0.15 sl=3.0 | +7.29% | 2.45% | +18.23 | +4.78 | 6 |
+| 5 | mw=240 vl=240 vt=0.15 sl=3.0 | +3.40% | 1.34% | +15.56 | +3.52 | 8 |
+| 6 | mw=240 vl=240 vt=0.20 sl=3.0 | **-1.17%** | 2.96% | **-2.42** | **-1.44** | 7 |
+
+**Aggregate OOS:** mean return +1.14% / mean DD 3.60% / mean Calmar +5.582 ± 9.4 / mean Sharpe +0.912 ± 3.2 / 47 total trades. **Gate PASS** (mean Calmar > 0.3).
+
+**Comparison with donchian_gold walk-forward** (from G.2h.6):
+
+| Metric | donchian_gold | vol_momentum_gold |
+|---|---:|---:|
+| Mean OOS Calmar | +8.515 | +5.582 |
+| Mean OOS Sharpe | +2.001 | +0.912 |
+| Mean return / fold | +2.92% | +1.14% |
+| Losing folds | 1/6 (fold 4) | 2/6 (folds 2, 6) |
+| Total trades | 30 | 47 |
+
+**Diversification confirmation**: donchian_gold's losing fold (4) is one of vol_momentum_gold's BIGGEST winners (+7.29%). vol_momentum_gold's losing folds (2, 6) both had donchian_gold profitable. The two strategies cover different regimes — exactly what the correlation gate (+0.23) predicted. Combining them in the institutional book reduces aggregate variance vs either alone.
+
+**Honest G.3 Day 1 baseline for the combined book**: expect 30-50% of months to have one strategy losing. Plan for per-month drawdown up to ~8% in the worst rolling window. Combined mean month return ~2.0% (simple arithmetic average).
+
+---
+
 ## Session 22 Day 0.5 Addendum — Feature enrichment, LightGBM fix, Funding-MR (2026-04-13 late evening)
 
 Three-phase autonomous shipment while the wall clock ticks toward the 2026-04-14 Day 1 cron wake-up.
