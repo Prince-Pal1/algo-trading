@@ -205,5 +205,14 @@ def _load_strategies() -> None:
     except ImportError:
         pass
 
+    # Task #141 — smoke_demo is a minimal SMA crossover used ONLY by
+    # scripts/smoke_test_dashboard.py to exercise the full pipeline
+    # end-to-end. Registered so the dashboard page 7 picker lists it.
+    try:
+        from src.strategies.demos.smoke_demo import SmokeDemoStrategy
+        register_strategy("smoke_demo", SmokeDemoStrategy)
+    except ImportError:
+        pass
+
 
 _load_strategies()

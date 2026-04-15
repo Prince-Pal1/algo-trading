@@ -119,9 +119,41 @@ page = st.sidebar.radio(
         "Validation",
         "Strategies",
         "Run Deep Backtest",
+        "Glossary",
     ],
     index=0,
 )
+
+
+# ---------------------------------------------------------------------------
+# Instrument-class mapping (task #141)
+# ---------------------------------------------------------------------------
+# Used by the Run Deep Backtest fee selector to filter the broker/platform
+# tree to profiles that match the selected strategy's primary market.
+# Adding a new market is a one-line change — the fee tree, the filter, and
+# the dashboard UI all read from this dict.
+INSTRUMENT_CLASS_BY_MARKET: dict[str, str] = {
+    "XAUUSD": "xauusd_metals",
+    "EURUSD": "fx_majors",
+    "GBPUSD": "fx_majors",
+    "USDJPY": "fx_majors",
+    # Future: "BTCUSDT": "crypto_perp", etc.
+}
+
+
+# ---------------------------------------------------------------------------
+# Cached recent-runs loader (task #141.2)
+# ---------------------------------------------------------------------------
+# Defined at module level so both the History section and the Run section
+# can reach it (Run needs to invalidate the cache via .clear() after a
+# subprocess completes so the just-finished run shows up immediately).
+# TTL 30s is a belt-and-braces fallback in case .clear() is skipped.
+@st.cache_data(ttl=30)
+def _load_recent_runs_cached(db_path: str, limit: int, cutoff_days: int):
+    from src.strategies.storage import list_recent_runs
+    return list_recent_runs(
+        limit=limit, cutoff_days=cutoff_days, db_path=db_path,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -728,45 +760,250 @@ elif page == "Strategies":
 
 
 # ---------------------------------------------------------------------------
-# Page 7: Run Deep Backtest — Streamlit-native alternative to questionary TUI
+# Page 8: Glossary — technical term reference (task #141.3)
+# ---------------------------------------------------------------------------
+# Renders from LEVERAGE_MODE_HELP + TECHNICAL_TERMS dicts at runtime so
+# definitions never drift from the `help=` kwargs sprinkled across page 7.
+# Single source of truth: `src/backtest/deep_backtest_interactive.py`.
+
+elif page == "Glossary":
+    from src.backtest.deep_backtest_interactive import (
+        LEVERAGE_MODE_HELP,
+        TECHNICAL_TERMS,
+    )
+
+    st.title("📖 Dashboard Glossary")
+    st.caption(
+        "Definitions of every technical term used in the Run Deep Backtest "
+        "and Strategies pages. Same text powers the hover tooltips — edit "
+        "`src/backtest/deep_backtest_interactive.py` to update both at once."
+    )
+
+    col_search, _ = st.columns([2, 3])
+    with col_search:
+        search = st.text_input(
+            "🔍 Filter",
+            value="",
+            placeholder="Type to filter terms (e.g. 'kelly', 'walk', 'vanity')",
+        )
+
+    def _matches(term: str, definition: str) -> bool:
+        if not search:
+            return True
+        q = search.lower()
+        return q in term.lower() or q in definition.lower()
+
+    st.markdown("---")
+    st.markdown("## ⚙️ Leverage modes")
+    st.caption(
+        "Each mode is a different position-sizing strategy. Pick the mode "
+        "that matches how you want leverage to interact with your strategy's "
+        "signal. See `docs/LEVERAGE_STRATEGY_DESIGN.md` for the full research."
+    )
+    for mode_name, definition in LEVERAGE_MODE_HELP.items():
+        if not _matches(mode_name, definition):
+            continue
+        with st.container():
+            st.markdown(f"#### `{mode_name}`")
+            st.markdown(definition)
+            st.markdown("")
+
+    st.markdown("---")
+    st.markdown("## 📚 Technical terms")
+    st.caption("Alphabetical. Matches the `help=` tooltips on Run Deep Backtest page 7.")
+    for term, definition in sorted(TECHNICAL_TERMS.items()):
+        if not _matches(term, definition):
+            continue
+        with st.container():
+            st.markdown(f"#### `{term}`")
+            st.markdown(definition)
+            st.markdown("")
+
+    st.markdown("---")
+    st.markdown("## 🔗 Further reading")
+    st.markdown(
+        """
+        - **`docs/LEVERAGE_STRATEGY_DESIGN.md`** — full leverage research + mode assignment recommendations
+        - **`docs/BROKER_FEES.md`** — fee profile catalog + cost-asymmetry analysis
+        - **`ROADMAP.md`** — phase table + discovered-task history
+        - **`ARCHITECTURE.md`** — module registry + data flow diagrams
+        """
+    )
+
+
+# ---------------------------------------------------------------------------
+# Page 7: Run Deep Backtest — broker-grouped fees + history + tooltips (task #141)
 # ---------------------------------------------------------------------------
 
 elif page == "Run Deep Backtest":
     import subprocess
 
     from src.backtest.deep_backtest_interactive import (
-        FEES_CATALOG,
         LEVERAGES_CATALOG,
         LEVERAGE_MODES_CATALOG,
+        LEVERAGE_MODE_HELP,
+        TECHNICAL_TERMS,
         TIMEFRAMES_CATALOG,
         WINDOWS_CATALOG,
     )
     from src.backtest.deep_backtest import _check_window_availability
+    from src.backtest.fee_profiles import (
+        group_profiles_by_broker_platform,
+        list_brokers,
+    )
     from src.strategies.router import STRATEGY_REGISTRY as _CLASS_REGISTRY
+    from src.strategies.storage import list_recent_runs
 
-    st.title("Run Deep Backtest")
+    st.title("🚀 Run Deep Backtest")
     st.caption(
         "Browser-native alternative to the `questionary` TUI. Pick dimensions, "
         "hit Run, watch output stream live. Result auto-captures into the "
-        "Strategies page when it finishes."
+        "**Strategies** page when it finishes. 📖 See the **Glossary** page "
+        "for definitions of every technical term."
     )
+
+    # ── Section switcher ──────────────────────────────────────────────
+    # Use `st.radio` (not `st.tabs`) so only the selected section's body
+    # evaluates on each rerun. Tabs would re-evaluate all three bodies on
+    # every 2Hz UI refresh during streaming, hammering the DB.
+    section = st.radio(
+        "Section",
+        ["▶ Run", "📜 History"],
+        horizontal=True,
+        help="Run = new backtest. History = replay recent runs with embedded reports.",
+        key="p7_section",
+    )
+
+    # Safety guard: if a subprocess is currently running and the user
+    # switches away from Run, warn them and stop rendering the other
+    # section until they come back.
+    if st.session_state.get("p7_running") and section != "▶ Run":
+        st.warning(
+            "⚠️ A deep backtest is currently running. Switch back to the "
+            "**▶ Run** section to see the live log stream. History is "
+            "disabled while a run is in progress."
+        )
+        st.stop()
+
+    # ─────────────────────────────────────────────────────────────────
+    #                        📜 HISTORY SECTION
+    # ─────────────────────────────────────────────────────────────────
+    if section == "📜 History":
+        st.markdown("### 📜 Recent deep_backtest runs")
+        st.caption(
+            "Most recent runs across ALL strategies. "
+            "Pick a row to embed its HTML report below. "
+            "Cache TTL: 30s — completed runs appear within 30s without a reload."
+        )
+
+        col_hist1, col_hist2 = st.columns([3, 1])
+        with col_hist2:
+            hist_limit = st.number_input(
+                "Max rows", value=20, min_value=5, max_value=100, step=5,
+                help="Recent N runs to show.",
+            )
+            hist_cutoff = st.number_input(
+                "Cutoff (days)", value=30, min_value=1, max_value=365, step=1,
+                help="Hide runs older than N days.",
+            )
+
+        try:
+            runs = _load_recent_runs_cached(_DB_PATH, int(hist_limit), int(hist_cutoff))
+        except Exception as e:
+            st.error(f"Failed to load run history: {type(e).__name__}: {e}")
+            runs = []
+
+        if not runs:
+            st.info(
+                "No runs in the selected window. Run a deep_backtest from the "
+                "**▶ Run** section to populate the history."
+            )
+        else:
+            with col_hist1:
+                hist_df = pd.DataFrame([
+                    {
+                        "when": (r["run_timestamp"] or "")[:19],
+                        "strategy": r["strategy_name"],
+                        "description": r.get("description") or r["version_slug"],
+                        "mode": r.get("leverage_mode") or "—",
+                        "L": r.get("baseline_leverage"),
+                        "tf": r.get("timeframe") or "—",
+                        "verdict": r.get("run_verdict") or "—",
+                        "return_pct": r.get("run_max_return_pct"),
+                        "calmar": r.get("run_best_calmar"),
+                        "sane": "✓" if r.get("run_max_return_sane") else
+                                ("⚠" if r.get("run_max_return_sane") is False else "—"),
+                        "cells": r.get("matrix_n_cells"),
+                    }
+                    for r in runs
+                ])
+                st.dataframe(hist_df, use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+            st.markdown("### 📊 Report viewer")
+            st.caption(
+                "Pick one run to embed its full HTML report below. "
+                "Use **Open in new tab** for the full-screen Plotly view."
+            )
+
+            # Picker labels are descriptive; map back to the raw row by index.
+            run_labels = [
+                f"{(r['run_timestamp'] or '')[:19]}  ·  {r['strategy_name']}  ·  "
+                f"{r.get('description') or r['version_slug']}  ·  "
+                f"verdict={r.get('run_verdict') or '—'}  ·  "
+                f"return={r.get('run_max_return_pct'):+.2f}%"
+                if r.get('run_max_return_pct') is not None else
+                f"{(r['run_timestamp'] or '')[:19]}  ·  {r['strategy_name']}  ·  {r['version_slug']}"
+                for r in runs
+            ]
+            picked_run_label = st.selectbox("Select a run", run_labels, key="p7_hist_pick")
+            picked_run = runs[run_labels.index(picked_run_label)]
+
+            abs_html_path = _to_absolute(picked_run.get("report_html_path"))
+            col_btn1, col_btn2 = st.columns([1, 3])
+            with col_btn1:
+                if abs_html_path and abs_html_path.exists():
+                    st.link_button(
+                        "🗔 Open in new tab",
+                        f"file://{abs_html_path}",
+                        help="Opens the full HTML report in a new browser tab.",
+                    )
+            with col_btn2:
+                st.caption(
+                    f"version_id: `{picked_run.get('version_id')}` · "
+                    f"report: `{picked_run.get('report_html_path') or '(none)'}`"
+                )
+
+            if abs_html_path and abs_html_path.exists():
+                try:
+                    html_content = abs_html_path.read_text()
+                    st.components.v1.html(html_content, height=900, scrolling=True)
+                except Exception as e:
+                    st.error(f"Failed to render HTML: {e}")
+            else:
+                st.warning(
+                    "No HTML report found for this run. The row exists in "
+                    "`strategy_version_runs` but the report_html_path is "
+                    "null or the file was moved/deleted."
+                )
+
+        st.stop()  # History section has its own content, skip the Run body
+
+    # ─────────────────────────────────────────────────────────────────
+    #                          ▶ RUN SECTION
+    # ─────────────────────────────────────────────────────────────────
+
     st.info(
         "ℹ️ **Deep backtest is currently XAUUSD-only.** The picker below only "
         "shows strategies that (a) can be instantiated with no kwargs and "
         "(b) declare XAUUSD as a supported market. Crypto strategies like "
         "`bb_rsi_mr` and `vol_momentum` use a different data path — run them "
-        "via `python -m scripts.backtest run <name>` from the terminal. "
-        "Gold data extension is a follow-up: see "
-        "`src/backtest/deep_backtest.py::_load_timeframe` (the XAUUSD hardcoding)."
+        "via `python -m scripts.backtest run <name>` from the terminal."
     )
 
     # ── Strategy picker — filter to deep-backtest-compatible strategies ──
-    # Compatibility requires:
-    #   (a) cls() instantiation with no kwargs works (tested via try/except)
-    #   (b) the instance declares XAUUSD in its markets list
-    # Picking a non-compatible strategy would crash at Phase 0 preflight
-    # with either TypeError (missing args) or NotImplementedError (XAUUSD only).
     compatible_names: list[str] = []
+    compatible_instances: dict[str, Any] = {}
     incompatible_reasons: dict[str, str] = {}
     for name, cls in _CLASS_REGISTRY.items():
         try:
@@ -779,6 +1016,7 @@ elif page == "Run Deep Backtest":
             incompatible_reasons[name] = f"markets={markets} (no XAUUSD)"
             continue
         compatible_names.append(name)
+        compatible_instances[name] = inst
     compatible_names.sort()
 
     if not compatible_names:
@@ -789,36 +1027,41 @@ elif page == "Run Deep Backtest":
         )
         st.stop()
 
-    strategy = st.selectbox(
-        "Strategy",
-        compatible_names,
-        help=(
-            f"{len(compatible_names)} deep-backtest-compatible strategies. "
-            f"{len(incompatible_reasons)} others hidden "
-            f"(see `scripts.backtest` for crypto alternatives)."
-        ),
+    # ── 🎯 Strategy + symbol ──────────────────────────────────────────
+    st.markdown("### 🎯 Strategy")
+    col_strat, col_cash = st.columns([2, 1])
+    with col_strat:
+        strategy = st.selectbox(
+            "Strategy",
+            compatible_names,
+            help=(
+                f"{len(compatible_names)} deep-backtest-compatible strategies. "
+                f"{len(incompatible_reasons)} others hidden. "
+                f"Auto-detected from `STRATEGY_REGISTRY`."
+            ),
+        )
+    with col_cash:
+        initial_cash = st.number_input(
+            "Initial cash ($)",
+            value=10000.0, step=1000.0, min_value=1000.0,
+            help=TECHNICAL_TERMS["initial_cash"],
+        )
+    symbol = st.text_input(
+        "Symbol",
+        value="XAUUSD",
+        help=TECHNICAL_TERMS["symbol"],
     )
 
-    # Show hidden strategies in an expander so the user can see why
     if incompatible_reasons:
-        with st.expander(f"Hidden strategies ({len(incompatible_reasons)}) — incompatible with gold deep_backtest"):
+        with st.expander(f"🙈 Hidden strategies ({len(incompatible_reasons)}) — incompatible with gold deep_backtest"):
             for n, reason in sorted(incompatible_reasons.items()):
                 st.caption(f"• `{n}` — {reason}")
 
-    # ── Symbol (defaults to XAUUSD for gold stack) ───────────────────
-    col_s1, col_s2 = st.columns(2)
-    with col_s1:
-        symbol = st.text_input("Symbol", value="XAUUSD")
-    with col_s2:
-        initial_cash = st.number_input("Initial cash ($)", value=10000.0, step=1000.0, min_value=1000.0)
+    st.divider()
 
-    st.markdown("---")
+    # ── 📅 Windows & timeframes ──────────────────────────────────────
+    st.markdown("### 📅 Windows & timeframes")
 
-    # ── Matrix dimensions ────────────────────────────────────────────
-    st.subheader("Matrix dimensions")
-    st.caption("Multi-select tick boxes — each combination becomes one matrix cell.")
-
-    # Windows with per-window availability check (probe 1h data for the symbol)
     window_labels = []
     window_values = {}
     for days, label in WINDOWS_CATALOG:
@@ -826,10 +1069,7 @@ elif page == "Run Deep Backtest":
             available, reason = _check_window_availability(days, "1h", symbol)
         except Exception as e:
             available, reason = False, f"probe error: {type(e).__name__}"
-        if available:
-            tag = label
-        else:
-            tag = f"{label}  (NOT AVAILABLE — {reason})"
+        tag = label if available else f"{label}  (NOT AVAILABLE — {reason})"
         window_labels.append(tag)
         window_values[tag] = (days, available)
 
@@ -839,8 +1079,8 @@ elif page == "Run Deep Backtest":
             "Time windows",
             window_labels,
             default=[lbl for lbl in window_labels if window_values[lbl][1] and window_values[lbl][0] in (90, 365)],
+            help=TECHNICAL_TERMS["window"],
         )
-        # Filter out unavailable picks
         window_days_list = [window_values[lbl][0] for lbl in picked_windows if window_values[lbl][1]]
 
     with col_tf:
@@ -850,73 +1090,176 @@ elif page == "Run Deep Backtest":
             "Timeframes",
             tf_labels,
             default=[l for l in tf_labels if tf_map[l] in ("1h",)],
+            help=TECHNICAL_TERMS["timeframe"],
         )
         timeframes_list = [tf_map[l] for l in picked_tfs]
 
-    # Fees + leverages
-    col_f, col_l = st.columns(2)
-    with col_f:
-        fee_labels = [desc for _, desc in FEES_CATALOG]
-        fee_map = {desc: key for key, desc in FEES_CATALOG}
-        picked_fees = st.multiselect(
-            "Fee profiles",
-            fee_labels,
-            default=[desc for _, desc in FEES_CATALOG if "MT4" in desc],
-        )
-        fees_list = [fee_map[l] for l in picked_fees]
+    st.divider()
 
-    with col_l:
+    # ── 💰 Broker-specific fees ───────────────────────────────────────
+    st.markdown("### 💰 Broker & fees")
+    st.caption(
+        "**New in task #141:** Pick broker → platforms → cost scenario. "
+        "The dropdown is now broker-grouped so you can see the MT4 vs cTrader "
+        "distinction clearly. Resolves to the concrete fee profile keys the "
+        "subprocess consumes."
+    )
+
+    # Derive instrument_class from the selected strategy's market list.
+    inst_obj = compatible_instances.get(strategy)
+    inst_markets = getattr(inst_obj, "markets", []) if inst_obj else []
+    primary_market = inst_markets[0] if inst_markets else "XAUUSD"
+    instrument_class = INSTRUMENT_CLASS_BY_MARKET.get(primary_market, "xauusd_metals")
+
+    col_broker, col_platform, col_scenario = st.columns([1, 2, 2])
+    with col_scenario:
+        scenarios = ["normal", "news_active", "stress", "pine_faithful"]
+        picked_scenario = st.radio(
+            "Cost scenario",
+            scenarios,
+            index=0,
+            help=TECHNICAL_TERMS["scenario"],
+        )
+
+    # For pine_faithful scenario we ignore instrument_class so the
+    # broker-less `(none)` pine_zero_cost profile is reachable.
+    fee_tree = group_profiles_by_broker_platform(
+        instrument_class=None if picked_scenario == "pine_faithful" else instrument_class,
+        scenario=picked_scenario,
+    )
+
+    with col_broker:
+        broker_options = sorted(fee_tree.keys()) if fee_tree else []
+        if not broker_options:
+            st.warning(
+                f"No profiles for scenario={picked_scenario!r}, "
+                f"market={primary_market!r}."
+            )
+            picked_broker = None
+            fees_list = []
+        else:
+            default_broker_idx = (
+                broker_options.index("IC Markets")
+                if "IC Markets" in broker_options else 0
+            )
+            picked_broker = st.radio(
+                "Broker",
+                broker_options,
+                index=default_broker_idx,
+                help=TECHNICAL_TERMS["broker"],
+            )
+
+    with col_platform:
+        if picked_broker:
+            platforms = sorted(fee_tree[picked_broker].keys())
+            default_platforms = [p for p in platforms if p == "mt4"] or platforms[:1]
+            picked_platforms = st.multiselect(
+                "Platforms",
+                platforms,
+                default=default_platforms,
+                help=TECHNICAL_TERMS["platform"],
+            )
+            # Resolve to concrete profile keys
+            fees_list = []
+            for p in picked_platforms:
+                fees_list.extend(fee_tree[picked_broker].get(p, []))
+        else:
+            fees_list = []
+
+    if fees_list:
+        st.caption(f"→ Resolved to **{len(fees_list)}** profile(s): `{', '.join(fees_list)}`")
+
+    st.divider()
+
+    # ── ⚡ Leverage + modes ──────────────────────────────────────────
+    st.markdown("### ⚡ Leverage & modes")
+    col_levs, col_baseline = st.columns([3, 1])
+    with col_levs:
         picked_levs = st.multiselect(
             "Leverages (x)",
             [str(l) for l in LEVERAGES_CATALOG],
             default=["10"],
+            help=TECHNICAL_TERMS["leverage"],
         )
         leverages_list = [float(x) for x in picked_levs]
+    with col_baseline:
+        baseline_lev = st.number_input(
+            "Baseline leverage",
+            value=10.0, step=1.0, min_value=1.0, max_value=1000.0,
+            help=TECHNICAL_TERMS["baseline_leverage"],
+        )
 
-    # Leverage modes (multi-select → runs pipeline once per mode)
+    # Leverage modes — with per-mode tooltips from LEVERAGE_MODE_HELP
     mode_labels = [desc for _, desc in LEVERAGE_MODES_CATALOG]
     mode_map = {desc: mode for mode, desc in LEVERAGE_MODES_CATALOG}
+    mode_help_lines = [
+        f"**{mode.value}** — {LEVERAGE_MODE_HELP.get(mode.value, '')}"
+        for mode, _ in LEVERAGE_MODES_CATALOG
+    ]
     picked_modes = st.multiselect(
-        "Leverage modes (one run per mode, separate report dirs)",
+        "Leverage modes (one subprocess per mode, separate reports)",
         mode_labels,
         default=[desc for mode, desc in LEVERAGE_MODES_CATALOG if mode.value == "margin_capped"],
+        help="\n\n".join(mode_help_lines),
     )
     modes_list = [mode_map[l] for l in picked_modes]
 
-    st.markdown("---")
+    st.divider()
 
-    # ── Walk-forward + advanced ──────────────────────────────────────
-    col_wf1, col_wf2, col_wf3 = st.columns(3)
+    # ── 📊 Walk-forward + advanced ───────────────────────────────────
+    st.markdown("### 📊 Walk-forward")
+    col_wf1, col_wf2 = st.columns(2)
     with col_wf1:
-        wf_enabled = st.checkbox("Walk-forward OOS validation", value=True)
+        wf_enabled = st.checkbox(
+            "Walk-forward OOS validation",
+            value=True,
+            help=TECHNICAL_TERMS["walk_forward"],
+        )
     with col_wf2:
-        wf_retune = st.checkbox("WF retune (per-fold grid search)", value=False, disabled=not wf_enabled)
-    with col_wf3:
-        baseline_lev = st.number_input(
-            "Baseline leverage (RISK_SCALED only)", value=10.0, step=1.0, min_value=1.0, max_value=1000.0,
+        wf_retune = st.checkbox(
+            "WF retune (per-fold grid search)",
+            value=False,
+            disabled=not wf_enabled,
+            help=TECHNICAL_TERMS["wf_retune"],
         )
 
-    with st.expander("Advanced options"):
+    with st.expander("⚙️ Advanced options"):
         version_slug_override = st.text_input(
             "Explicit version slug (optional)",
             value="",
-            help="Overrides the auto-generated `{mode}_L{baseline}_{tf}` slug. "
-                 "Useful for naming bespoke variants (e.g. `optimized_v2`).",
+            help=TECHNICAL_TERMS["version_slug"] + (
+                " Setting this overrides the auto-generated triplet. "
+                "Useful for naming bespoke variants (e.g. `optimized_v2`)."
+            ),
         )
         strategy_params_raw = st.text_input(
-            "Strategy param overrides (key=value, comma-separated)",
+            "Strategy param overrides",
             value="",
-            help="E.g. `session_filter=true,max_risk_per_trade=0.02`",
+            help=TECHNICAL_TERMS["strategy_params"],
         )
         col_kelly1, col_kelly2, col_kelly3 = st.columns(3)
         with col_kelly1:
-            kelly_win_rate = st.number_input("Kelly win rate (0-1)", value=0.0, step=0.05, min_value=0.0, max_value=1.0)
+            kelly_win_rate = st.number_input(
+                "Kelly win rate",
+                value=0.0, step=0.05, min_value=0.0, max_value=1.0,
+                help=TECHNICAL_TERMS["kelly_win_rate"],
+            )
         with col_kelly2:
-            kelly_payoff = st.number_input("Kelly payoff ratio", value=0.0, step=0.5, min_value=0.0)
+            kelly_payoff = st.number_input(
+                "Kelly payoff ratio",
+                value=0.0, step=0.5, min_value=0.0,
+                help=TECHNICAL_TERMS["kelly_payoff_ratio"],
+            )
         with col_kelly3:
-            kelly_fraction = st.number_input("Kelly fraction", value=0.5, step=0.25, min_value=0.0, max_value=1.0)
+            kelly_fraction = st.number_input(
+                "Kelly fraction",
+                value=0.5, step=0.25, min_value=0.0, max_value=1.0,
+                help=TECHNICAL_TERMS["kelly_fraction"],
+            )
 
-    # ── Preview + cell count ─────────────────────────────────────────
+    st.divider()
+
+    # ── 🔢 Cell-count preview (metric row) ───────────────────────────
     n_cells = (
         max(1, len(window_days_list)) *
         max(1, len(timeframes_list)) *
@@ -924,14 +1267,12 @@ elif page == "Run Deep Backtest":
         max(1, len(fees_list)) *
         max(1, len(modes_list))
     )
-    st.info(
-        f"**Planned matrix:** {len(window_days_list) or 1} windows × "
-        f"{len(timeframes_list) or 1} TFs × "
-        f"{len(leverages_list) or 1} leverages × "
-        f"{len(fees_list) or 1} fees × "
-        f"{len(modes_list) or 1} modes = **{n_cells} cells**  "
-        f"(runtime estimate: ~{max(1, n_cells * 2)}s)"
-    )
+    est_runtime_s = max(1, n_cells * 2)
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+    col_m1.metric("Cells", n_cells, help=TECHNICAL_TERMS["matrix"])
+    col_m2.metric("Est. runtime", f"{est_runtime_s}s" if est_runtime_s < 120 else f"{est_runtime_s // 60}m")
+    col_m3.metric("Modes", len(modes_list) or 1)
+    col_m4.metric("Fees", len(fees_list) or 1)
 
     can_run = (
         len(window_days_list) > 0 and
@@ -941,31 +1282,21 @@ elif page == "Run Deep Backtest":
         len(modes_list) > 0
     )
     if not can_run:
-        st.warning("Tick at least one value in every dimension to enable the Run button.")
+        st.warning("⚠️ Tick at least one value in every dimension to enable the Run button.")
 
-    # ── Run button + live log stream ─────────────────────────────────
+    # ── 🚀 Run button + live log stream ──────────────────────────────
     if st.button("🚀 Run Deep Backtest", type="primary", disabled=not can_run):
-        import time as _time  # local import to avoid shadowing at module scope
+        import time as _time
 
-        # Build the CLI args we would pass to scripts/deep_backtest.py.
-        # We use `--non-interactive` to skip the TUI since the browser is the UI.
-        # Multi-mode runs are handled by passing multiple --leverage-mode flags
-        # OR by running the subprocess once per mode. The deep_backtest.py CLI
-        # supports ONE mode per invocation (the TUI handles multi-mode by
-        # looping), so we do the same.
+        st.session_state["p7_running"] = True
 
         results_log = st.empty()
         status_placeholder = st.empty()
         log_buffer: list[str] = []
 
-        # Throttle UI updates: st.code() repaints + websocket round-trip cost
-        # ~50-100ms per call. A deep_backtest emits ~500 log lines; without
-        # throttling that's ~30-60s of pure rendering overhead on top of the
-        # ~10-15s actual pipeline. Batch updates to at most 2 per second.
         UI_UPDATE_INTERVAL_S = 0.5
-        LOG_DISPLAY_TAIL = 200  # keep last N lines in view
+        LOG_DISPLAY_TAIL = 200
 
-        # Extra args shared across modes
         base_cmd_tail = [
             "--non-interactive",
             "--symbol", symbol,
@@ -991,13 +1322,17 @@ elif page == "Run Deep Backtest":
         if kelly_fraction != 0.5:
             base_cmd_tail.extend(["--kelly-fraction", str(kelly_fraction)])
 
-        # One subprocess per mode (same as TUI's multi-mode loop)
         import os
         env = os.environ.copy()
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
 
+        # Subprocess watchdog — kill on timeout to prevent UI hangs
+        # Budget: ~10s per cell minimum, 300s floor, 1h ceiling.
+        WATCHDOG_TIMEOUT_S = max(300, min(3600, n_cells * 10))
+
         total_modes = len(modes_list)
         overall_start = _time.time()
+        proc = None
         for mode_idx, mode in enumerate(modes_list, start=1):
             mode_start = _time.time()
             status_placeholder.markdown(
@@ -1025,14 +1360,19 @@ elif page == "Run Deep Backtest":
             )
             assert proc.stdout is not None
 
-            # Throttled log streaming: accumulate lines into log_buffer but
-            # only push to Streamlit at most UI_UPDATE_INTERVAL_S seconds
-            # apart. Without this, st.code() repaints on every line cost
-            # ~50-100ms × ~500 lines = 25-50s of pure UI overhead per mode.
             last_ui_push = _time.time()
+            timed_out = False
             for line in proc.stdout:
                 log_buffer.append(line)
                 now = _time.time()
+                if now - mode_start > WATCHDOG_TIMEOUT_S:
+                    proc.kill()
+                    timed_out = True
+                    log_buffer.append(
+                        f"\n[WATCHDOG] Mode `{mode.value}` killed after "
+                        f"{WATCHDOG_TIMEOUT_S}s timeout.\n"
+                    )
+                    break
                 if now - last_ui_push >= UI_UPDATE_INTERVAL_S:
                     display = "".join(log_buffer[-LOG_DISPLAY_TAIL:])
                     results_log.code(display, language="bash")
@@ -1042,23 +1382,23 @@ elif page == "Run Deep Backtest":
                         f"overall: {now - overall_start:.1f}s)"
                     )
                     last_ui_push = now
-            proc.wait()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                timed_out = True
 
-            # Final flush — make sure the last lines are visible after the
-            # subprocess exits even if they arrived inside a throttle window.
             display = "".join(log_buffer[-LOG_DISPLAY_TAIL:])
             results_log.code(display, language="bash")
 
-            # scripts/deep_backtest.py uses exit codes as verdict signals:
-            #   0 = DEPLOYABLE
-            #   1 = NEEDS_WF / RESEARCH_ONLY  ← legitimate research outcomes
-            #   2 = FAILED (verdict) — pipeline ran, strategy failed gates
-            #   anything else = real crash (import error, bad config, etc.)
-            #
-            # All of {0, 1, 2} mean the pipeline completed and a report was
-            # written. The auto-capture hook already landed a row in the
-            # strategies table. Only exit codes outside {0, 1, 2} are true
-            # crashes we should surface as errors.
+            if timed_out:
+                status_placeholder.error(
+                    f"⏰ Mode `{mode.value}` TIMED OUT after {WATCHDOG_TIMEOUT_S}s. "
+                    f"Consider reducing matrix size or increasing the timeout "
+                    f"(currently `max(300, cells × 10)` seconds)."
+                )
+                break
+
             VERDICT_CODE_MAP = {
                 0: ("success", "✓", "DEPLOYABLE"),
                 1: ("warning", "⚠", "NEEDS_WF / RESEARCH_ONLY"),
@@ -1074,22 +1414,24 @@ elif page == "Run Deep Backtest":
                     status_placeholder.success(msg)
                 else:
                     status_placeholder.warning(msg)
-                # Continue to next mode — non-DEPLOYABLE is expected research output
             else:
                 status_placeholder.error(
-                    f"✗ Mode `{mode.value}` CRASHED with exit code {proc.returncode} "
-                    f"— this is a real pipeline error, not a verdict. "
+                    f"✗ Mode `{mode.value}` CRASHED with exit code {proc.returncode}. "
                     f"Check the log output above for the traceback."
                 )
                 break
 
-        # Final summary — accept {0, 1, 2} as "all modes ran"
-        if proc.returncode in (0, 1, 2):
+        st.session_state["p7_running"] = False
+
+        if proc is not None and proc.returncode in (0, 1, 2):
+            # Invalidate the history cache so the just-completed run shows up
+            # immediately when the user switches to the History section.
+            _load_recent_runs_cached.clear()
             st.success(
-                f"All {total_modes} mode(s) ran to completion. "
-                f"Switch to the **Strategies** page to see the new version row(s) — "
-                f"auto-capture landed them in `strategy_versions` automatically. "
+                f"✓ All {total_modes} mode(s) ran to completion. "
+                f"Switch to the **📜 History** section to view the new run(s), "
+                f"or the **Strategies** page to see the versioned registry. "
                 f"Verdicts: exit 0 = DEPLOYABLE, 1 = NEEDS_WF/RESEARCH_ONLY, 2 = FAILED."
             )
             if proc.returncode == 0:
-                st.balloons()  # celebration only for DEPLOYABLE
+                st.balloons()

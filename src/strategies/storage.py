@@ -1118,6 +1118,80 @@ def list_strategies(
         conn.close()
 
 
+def list_recent_runs(
+    *,
+    limit: int = 20,
+    cutoff_days: int | None = 30,
+    db_path: str | None = None,
+) -> list[dict]:
+    """Global 'most recent deep_backtest runs across ALL strategies' query.
+
+    Task #141.2 — powers the Run Deep Backtest page 7 History section.
+    Returns the most recent N rows from `strategy_version_runs` joined
+    with parent strategy + version metadata, ordered by run_timestamp
+    DESC. Optionally filters out runs older than `cutoff_days` days.
+
+    Args:
+        limit: max rows to return (default 20, enough for a page of
+            history without overwhelming the UI or the DB).
+        cutoff_days: filter out runs older than N days. `None` = no
+            cutoff. Default 30 — a month-old run is usually not what
+            the user wants to see in "recent history".
+        db_path: optional DB override for test isolation.
+
+    Returns:
+        List of dicts (not dataclasses — history rows are audit records,
+        not mutable entities). Each dict has:
+          - run_timestamp: ISO-8601 string
+          - strategy_name, version_slug, description
+          - leverage_mode, baseline_leverage, timeframe
+          - verdict, max_return_pct, max_return_sane, best_calmar
+          - matrix_n_cells, report_dir, report_html_path
+          - version_id (for deep-linking to the Strategies page)
+    """
+    conn = _connect(db_path)
+    try:
+        sql = (
+            "SELECT r.id AS run_id, r.version_id, r.run_timestamp, "
+            "       r.report_dir AS run_report_dir, "
+            "       r.report_html_path AS run_report_html_path, "
+            "       r.verdict AS run_verdict, "
+            "       r.max_return_pct AS run_max_return_pct, "
+            "       r.max_return_sane AS run_max_return_sane, "
+            "       r.best_calmar AS run_best_calmar, "
+            "       r.matrix_n_cells, "
+            "       s.name AS strategy_name, "
+            "       v.version_slug, v.description, v.leverage_mode, "
+            "       v.baseline_leverage, v.timeframe, "
+            "       v.report_html_path AS version_report_html_path "
+            "FROM strategy_version_runs r "
+            "JOIN strategy_versions v ON v.id = r.version_id "
+            "JOIN strategies s ON s.id = v.strategy_id"
+        )
+        params: list[Any] = []
+        if cutoff_days is not None:
+            sql += " WHERE datetime(r.run_timestamp) >= datetime('now', ?)"
+            params.append(f"-{int(cutoff_days)} days")
+        sql += f" ORDER BY datetime(r.run_timestamp) DESC, r.id DESC LIMIT {int(limit)}"
+        rows = conn.execute(sql, params).fetchall()
+        out: list[dict] = []
+        for row in rows:
+            d = dict(row)
+            # Normalize max_return_sane to bool
+            if d.get("run_max_return_sane") is not None:
+                d["run_max_return_sane"] = bool(d["run_max_return_sane"])
+            # Prefer the run's stored report path over the version's
+            # current path (the version's top-level report_html_path
+            # tracks the HERO cell via keep-best, not the latest run).
+            d["report_html_path"] = (
+                d.get("run_report_html_path") or d.get("version_report_html_path")
+            )
+            out.append(d)
+        return out
+    finally:
+        conn.close()
+
+
 def list_version_runs(
     *,
     version_id: int | None = None,
