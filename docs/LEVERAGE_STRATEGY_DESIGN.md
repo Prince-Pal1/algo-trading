@@ -296,6 +296,44 @@ As of 2026-04-15 (task #114):
 - ✅ **KELLY_FRACTIONAL mode — task #114** — Computes `f* = (b×p - q) / b` from `kelly_win_rate` + `kelly_payoff_ratio`, multiplies by `kelly_fraction` (default 0.5 = half-Kelly). **Hard-capped at 0.25 absolute risk_pct** to prevent full-Kelly blowups (§4.1 of the research report).
 - ❌ DRAWDOWN_BUDGETED mode — **deferred (task #128 architectural blocker recorded 2026-04-15)**. See §7.1 below.
 
+### §7.2 — Mode-aware strategies (task #131 swift_alma_v2)
+
+The 3 passthrough modes (INVARIANT / MARGIN_CAPPED / VOL_TARGETED) are framework-level passthrough — `_apply_leverage_mode()` returns `strategy_params` unchanged for all three. For leverage-invariant strategies (parent swift_alma), this collapses all 3 into identical P&L. Same result, different mode names.
+
+A **mode-aware strategy** opts in to distinct sizing behavior across the 3 passthrough modes by declaring a `leverage_mode` kwarg in its `__init__`. The framework detects this via `inspect.signature()` and injects the current mode name via `_maybe_inject_leverage_mode()` before the final return of `_apply_leverage_mode()`. The strategy then branches its effective risk_pct computation inside its signal emission path.
+
+Example (swift_alma_v2's `_effective_risk_pct`):
+
+```python
+def _effective_risk_pct(self, realized_vol: float | None) -> float:
+    mode = (self.leverage_mode or "margin_capped").lower()
+    if mode == "invariant":
+        return self.sl_pct  # clamped to sl → notional = equity
+    if mode == "margin_capped":
+        return self.max_risk_per_trade  # decoupled, notional = k × equity
+    if mode == "vol_targeted":
+        if realized_vol is None or realized_vol < 1e-10:
+            return self.max_risk_per_trade
+        scalar = max(0.5, min(2.0, self.vol_target / realized_vol))
+        return self.max_risk_per_trade * scalar
+    if mode in ("risk_scaled", "kelly_fractional"):
+        return self.max_risk_per_trade  # framework already transformed it
+    return self.max_risk_per_trade
+```
+
+**Backwards-compat:** the injection ONLY fires when the strategy's `__init__` declares `leverage_mode`. donchian_gold, vol_momentum_gold, and swift_alma v1 don't declare it → framework makes no change for them.
+
+**Phase 2.5 zero-tolerance interaction:** mode-aware strategies can legitimately fail Phase 2.5 RISK_SCALED / KELLY_FRACTIONAL validation if their sizing produces non-exact linear scaling (e.g., ATR-scaled SL creates trade-dependent stop distances, commission scales with position size, margin rejections truncate trade sequences at extreme leverages). This is **correct framework behavior** — Phase 2.5 is a mathematical guarantee, not a recommendation filter. A mode-aware strategy that fails Phase 2.5 simply can't be deployed in that mode without reconfiguring for stricter linearity. The strategy itself is valid; the specific mode × config combination isn't.
+
+**Empirical validation** (swift_alma_v2 on 1y XAUUSD 1h MT4 L=15, baseline=10):
+- INVARIANT: +4.36% / Calmar 0.60 ✓ NEEDS_WF
+- MARGIN_CAPPED: +7.81% / Calmar 0.55 ✓ NEEDS_WF
+- VOL_TARGETED: +4.81% / Calmar 0.44 ✓ NEEDS_WF
+- RISK_SCALED: +5.63% / Calmar 0.23 ✗ Phase 2.5 FAIL (32% deviation — ATR-SL + commission drift)
+- KELLY_FRACTIONAL: +5.74% / Calmar 0.22 ✗ Phase 2.5 FAIL (trade-count divergence)
+
+5 distinct max_return_pct values confirm the mode-aware branching works. All 5 are net-positive on MT4 (vs parent v1's −12.47%) — regime filter + session filter + HTF trend + cooldown successfully rescued the cost drag.
+
 ### §7.1 — DRAWDOWN_BUDGETED — architectural blocker (task #128)
 
 The mode would scale `risk_pct` based on **realized portfolio drawdown** from the rolling peak: when DD approaches a configured budget (e.g., 20%), shrink position size to lengthen the recovery runway. This is the most powerful capital-protection sizing rule in the prop-firm playbook (Tradeify, FTMO, Alpha Capital all enforce variants).

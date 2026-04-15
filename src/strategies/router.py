@@ -199,5 +199,11 @@ def _load_strategies() -> None:
     except ImportError:
         pass
 
+    try:
+        from src.strategies.trend_following.swift_alma_v2 import SwiftAlmaV2Strategy
+        register_strategy("swift_alma_v2", SwiftAlmaV2Strategy)
+    except ImportError:
+        pass
+
 
 _load_strategies()

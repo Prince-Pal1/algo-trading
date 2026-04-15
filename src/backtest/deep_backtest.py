@@ -488,6 +488,34 @@ def _resolve_indicators(config: DeepBacktestConfig) -> list[str] | None:
 _KELLY_HARD_CAP: float = 0.25
 
 
+def _maybe_inject_leverage_mode(
+    params: dict[str, Any],
+    mode: "LeverageMode",
+    config: DeepBacktestConfig,
+) -> dict[str, Any]:
+    """Inject `leverage_mode=mode.value` into strategy_params for strategies
+    that declare a `leverage_mode` kwarg in their `__init__` (task #131).
+
+    Backwards-compat: strategies that don't declare the kwarg (donchian_gold,
+    vol_momentum_gold, swift_alma v1) are unaffected — the framework only
+    injects when introspection confirms the strategy accepts it.
+
+    Enables strategy-internal mode-aware sizing (see
+    `src/strategies/trend_following/swift_alma_v2.py::_effective_risk_pct`)
+    without requiring framework-wide branching for the 3 passthrough modes
+    (INVARIANT / MARGIN_CAPPED / VOL_TARGETED) that the framework treats
+    identically.
+    """
+    try:
+        cls = _resolve_strategy_class(config.strategy)
+        sig = inspect.signature(cls.__init__)
+        if "leverage_mode" in sig.parameters:
+            params["leverage_mode"] = mode.value
+    except Exception:
+        pass  # don't block the pipeline on introspection errors
+    return params
+
+
 def _apply_leverage_mode(config: DeepBacktestConfig, leverage: float) -> dict[str, Any]:
     """Transform strategy_params based on config.leverage_mode.
 
@@ -511,6 +539,10 @@ def _apply_leverage_mode(config: DeepBacktestConfig, leverage: float) -> dict[st
             leverage is a margin gate only). Hard-capped at 0.25.
 
     Raises ValueError for KELLY_FRACTIONAL without priors.
+
+    Task #131: mode-aware strategies (e.g., swift_alma_v2) receive a
+    `leverage_mode` kwarg injection via `_maybe_inject_leverage_mode()`
+    before the final return, regardless of which mode branch ran.
     """
     mode = config.leverage_mode
     params = dict(config.strategy_params)  # shallow copy — never mutate input
@@ -519,7 +551,7 @@ def _apply_leverage_mode(config: DeepBacktestConfig, leverage: float) -> dict[st
     if mode in (LeverageMode.INVARIANT,
                 LeverageMode.MARGIN_CAPPED,
                 LeverageMode.VOL_TARGETED):
-        return params
+        return _maybe_inject_leverage_mode(params, mode, config)
 
     param_name = config.risk_pct_param_name
 
@@ -543,7 +575,7 @@ def _apply_leverage_mode(config: DeepBacktestConfig, leverage: float) -> dict[st
         baseline = max(float(config.baseline_leverage), 1.0)
         scaled = base_risk_pct * (float(leverage) / baseline)
         params[param_name] = scaled
-        return params
+        return _maybe_inject_leverage_mode(params, mode, config)
 
     if mode == LeverageMode.KELLY_FRACTIONAL:
         if config.kelly_win_rate is None or config.kelly_payoff_ratio is None:
@@ -558,10 +590,10 @@ def _apply_leverage_mode(config: DeepBacktestConfig, leverage: float) -> dict[st
         f_star = max(0.0, (b * p - q) / b) if b > 0 else 0.0
         scaled = min(_KELLY_HARD_CAP, float(config.kelly_fraction) * f_star)
         params[param_name] = scaled
-        return params
+        return _maybe_inject_leverage_mode(params, mode, config)
 
     # Unknown / future mode — passthrough
-    return params
+    return _maybe_inject_leverage_mode(params, mode, config)
 
 
 # ── Data loading ─────────────────────────────────────────────────────────
