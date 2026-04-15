@@ -542,7 +542,7 @@ elif page == "Strategies":
             # ── Run history for this version
             history = list_version_runs(
                 strategy_name=s.name,
-                version_slug=picked_slug,
+                version_slug=v.version_slug,
                 limit=50,
                 db_path=_DB_PATH,
             )
