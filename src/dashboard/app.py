@@ -587,18 +587,60 @@ elif page == "Run Deep Backtest":
         "hit Run, watch output stream live. Result auto-captures into the "
         "Strategies page when it finishes."
     )
+    st.info(
+        "ℹ️ **Deep backtest is currently XAUUSD-only.** The picker below only "
+        "shows strategies that (a) can be instantiated with no kwargs and "
+        "(b) declare XAUUSD as a supported market. Crypto strategies like "
+        "`bb_rsi_mr` and `vol_momentum` use a different data path — run them "
+        "via `python -m scripts.backtest run <name>` from the terminal. "
+        "Gold data extension is a follow-up: see "
+        "`src/backtest/deep_backtest.py::_load_timeframe` (the XAUUSD hardcoding)."
+    )
 
-    # ── Strategy picker ──────────────────────────────────────────────
-    strategy_names = sorted(_CLASS_REGISTRY.keys())
-    if not strategy_names:
-        st.error("No strategies registered in `router.STRATEGY_REGISTRY`.")
+    # ── Strategy picker — filter to deep-backtest-compatible strategies ──
+    # Compatibility requires:
+    #   (a) cls() instantiation with no kwargs works (tested via try/except)
+    #   (b) the instance declares XAUUSD in its markets list
+    # Picking a non-compatible strategy would crash at Phase 0 preflight
+    # with either TypeError (missing args) or NotImplementedError (XAUUSD only).
+    compatible_names: list[str] = []
+    incompatible_reasons: dict[str, str] = {}
+    for name, cls in _CLASS_REGISTRY.items():
+        try:
+            inst = cls()
+        except Exception as e:
+            incompatible_reasons[name] = f"init error: {type(e).__name__}"
+            continue
+        markets = getattr(inst, "markets", []) or []
+        if "XAUUSD" not in markets:
+            incompatible_reasons[name] = f"markets={markets} (no XAUUSD)"
+            continue
+        compatible_names.append(name)
+    compatible_names.sort()
+
+    if not compatible_names:
+        st.error(
+            "No deep_backtest-compatible strategies found. Every strategy in "
+            "`router.STRATEGY_REGISTRY` either fails to instantiate or doesn't "
+            "declare XAUUSD in its markets list. Add a gold strategy first."
+        )
         st.stop()
 
     strategy = st.selectbox(
         "Strategy",
-        strategy_names,
-        help="Registered strategy class to backtest. Sourced from `src/strategies/router.py::STRATEGY_REGISTRY`.",
+        compatible_names,
+        help=(
+            f"{len(compatible_names)} deep-backtest-compatible strategies. "
+            f"{len(incompatible_reasons)} others hidden "
+            f"(see `scripts.backtest` for crypto alternatives)."
+        ),
     )
+
+    # Show hidden strategies in an expander so the user can see why
+    if incompatible_reasons:
+        with st.expander(f"Hidden strategies ({len(incompatible_reasons)}) — incompatible with gold deep_backtest"):
+            for n, reason in sorted(incompatible_reasons.items()):
+                st.caption(f"• `{n}` — {reason}")
 
     # ── Symbol (defaults to XAUUSD for gold stack) ───────────────────
     col_s1, col_s2 = st.columns(2)
