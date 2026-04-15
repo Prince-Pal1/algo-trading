@@ -814,20 +814,47 @@ elif page == "Run Deep Backtest":
                 results_log.code(display, language="bash")
             proc.wait()
 
-            if proc.returncode == 0:
-                status_placeholder.success(
-                    f"✓ Mode `{mode.value}` completed (mode {mode_idx}/{total_modes})"
+            # scripts/deep_backtest.py uses exit codes as verdict signals:
+            #   0 = DEPLOYABLE
+            #   1 = NEEDS_WF / RESEARCH_ONLY  ← legitimate research outcomes
+            #   2 = FAILED (verdict) — pipeline ran, strategy failed gates
+            #   anything else = real crash (import error, bad config, etc.)
+            #
+            # All of {0, 1, 2} mean the pipeline completed and a report was
+            # written. The auto-capture hook already landed a row in the
+            # strategies table. Only exit codes outside {0, 1, 2} are true
+            # crashes we should surface as errors.
+            VERDICT_CODE_MAP = {
+                0: ("success", "✓", "DEPLOYABLE"),
+                1: ("warning", "⚠", "NEEDS_WF / RESEARCH_ONLY"),
+                2: ("warning", "⚠", "FAILED (verdict)"),
+            }
+            if proc.returncode in VERDICT_CODE_MAP:
+                level, glyph, verdict_label = VERDICT_CODE_MAP[proc.returncode]
+                msg = (
+                    f"{glyph} Mode `{mode.value}` → **{verdict_label}** "
+                    f"(mode {mode_idx}/{total_modes}, exit {proc.returncode})"
                 )
+                if level == "success":
+                    status_placeholder.success(msg)
+                else:
+                    status_placeholder.warning(msg)
+                # Continue to next mode — non-DEPLOYABLE is expected research output
             else:
                 status_placeholder.error(
-                    f"✗ Mode `{mode.value}` failed with exit code {proc.returncode}"
+                    f"✗ Mode `{mode.value}` CRASHED with exit code {proc.returncode} "
+                    f"— this is a real pipeline error, not a verdict. "
+                    f"Check the log output above for the traceback."
                 )
                 break
 
-        if proc.returncode == 0:
+        # Final summary — accept {0, 1, 2} as "all modes ran"
+        if proc.returncode in (0, 1, 2):
             st.success(
-                f"All {total_modes} mode(s) complete. "
+                f"All {total_modes} mode(s) ran to completion. "
                 f"Switch to the **Strategies** page to see the new version row(s) — "
-                f"auto-capture landed them in `strategy_versions` automatically."
+                f"auto-capture landed them in `strategy_versions` automatically. "
+                f"Verdicts: exit 0 = DEPLOYABLE, 1 = NEEDS_WF/RESEARCH_ONLY, 2 = FAILED."
             )
-            st.balloons()
+            if proc.returncode == 0:
+                st.balloons()  # celebration only for DEPLOYABLE
