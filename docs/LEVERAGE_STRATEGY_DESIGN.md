@@ -267,10 +267,21 @@ Backtests are optimistic. Real markets have slippage, latency, gap risk, and reg
 | Strategy | Current mode | File | Recommended mode | Notes |
 |---|---|---|---|---|
 | `swift_alma` | INVARIANT | `src/strategies/trend_following/swift_alma.py` | Keep INVARIANT | Pine parity; regime filter needed before scaling |
-| `donchian_gold` | MARGIN_CAPPED | `src/strategies/trend_following/donchian_gold.py` | RISK_SCALED (baseline=10, deploy L=15) | Half-Kelly per task #113 analysis |
-| `vol_momentum_gold` | VOL_TARGETED | `src/strategies/momentum/vol_momentum_gold.py` | VOL_TARGETED + RISK_SCALED composed | Raise vol_target to 0.30, deploy L=20 |
+| `donchian_gold` | MARGIN_CAPPED | `src/strategies/trend_following/donchian_gold.py` | **RISK_SCALED** (baseline=10, deploy L=15) | Half-Kelly per task #113 analysis. **Empirically validated 2026-04-15**: WF continuous Calmar +11.7, annual return +140%, 5/6 profitable folds. ✅ DEPLOYABLE. |
+| `vol_momentum_gold` | VOL_TARGETED | `src/strategies/momentum/vol_momentum_gold.py` | **MARGIN_CAPPED** (L=10-15, default vol_target=0.20) | **Research's §6.2 RISK_SCALED recommendation was empirically WRONG** — see research report §11. vol_mom's base edge is too modest for the return-biased gate at any RISK_SCALED leverage (L=12 annual 14.6%, L=20 annual 24.2%, gate requires 100%). The strategy is **risk-efficient** (high Calmar) but **low-return**, belongs in MARGIN_CAPPED mode where the gate is `Calmar ≥ 1.0` which it easily passes. Task #114 cross-validation showed DEPLOYABLE at continuous Calmar +4.93. Use as diversifier, not return engine. |
 
-See the full research report at [`reports/leverage_strategy_research_2026-04-15.md`](../reports/leverage_strategy_research_2026-04-15.md) for the math behind these recommendations.
+See the full research report at [`reports/leverage_strategy_research_2026-04-15.md`](../reports/leverage_strategy_research_2026-04-15.md) §11 for the empirical validation runs and corrected recommendations.
+
+### Key lesson — mode selection is strategy-specific
+
+The empirical validation surfaced a subtle framework insight: **the Phase 5 verdict gate is mode-specific**, and choosing the wrong mode can make a deployable strategy look like a failed one.
+
+- **Return-hungry, high-edge strategies** → RISK_SCALED with high baseline (donchian_gold fits here)
+- **Risk-efficient, low-return strategies** → MARGIN_CAPPED (vol_momentum_gold fits here)
+- **Pine ports** → INVARIANT (swift_alma fits here)
+- **Vol-regime-dependent** → VOL_TARGETED alone (not composed with RISK_SCALED)
+
+The `leverage_mode` enum is a tool for matching sizing philosophy to strategy edge profile. It's NOT a universal "amplify returns" button. Applying RISK_SCALED to a risk-efficient strategy tests the wrong thing — the gate asks "does this strategy produce enough return to justify aggressive sizing?" and risk-efficient strategies answer "no" even when they're otherwise healthy.
 
 ---
 
