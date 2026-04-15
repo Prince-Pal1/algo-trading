@@ -110,6 +110,12 @@ class DeepBacktestConfig:
     initial_cash: float = 10_000.0
     sub_book: str = SUB_BOOK_INSTITUTIONAL
     warmup_bars: int = 250
+    # Optional list of indicator keys to precompute via engine.run(indicators=...).
+    # Required for strategies that read pre-computed features (donchian_gold,
+    # vol_momentum_gold, etc.) instead of computing on_features inline.
+    # None → auto-detect from strategy.INDICATORS class attr if present, else
+    # fall back to the superset of common gold indicators.
+    indicators: list[str] | None = None
 
     # Walk-forward config
     wf_enabled: bool = True
@@ -250,44 +256,89 @@ class DeepBacktestResult:
 # ── Strategy resolution ──────────────────────────────────────────────────
 
 
+def _resolve_strategy_class(spec: str | type[BaseStrategy] | BaseStrategy) -> type[BaseStrategy]:
+    """Return the strategy class given a spec (without instantiating)."""
+    if isinstance(spec, BaseStrategy):
+        return type(spec)
+    if inspect.isclass(spec) and issubclass(spec, BaseStrategy):
+        return spec
+    if isinstance(spec, str):
+        if ":" in spec:
+            module_path, class_name = spec.split(":", 1)
+            mod = __import__(module_path, fromlist=[class_name])
+            return getattr(mod, class_name)
+        if spec in STRATEGY_REGISTRY:
+            return STRATEGY_REGISTRY[spec]
+        available = sorted(STRATEGY_REGISTRY.keys())
+        raise KeyError(
+            f"Strategy '{spec}' not found in STRATEGY_REGISTRY "
+            f"(available: {available}). Use a dotted path "
+            f"'module.path:ClassName' or register the strategy first."
+        )
+    raise TypeError(f"Unsupported strategy spec: {type(spec)}")
+
+
 def _resolve_strategy(
     spec: str | type[BaseStrategy] | BaseStrategy,
     params: dict[str, Any],
     timeframe: str,
 ) -> BaseStrategy:
-    """Instantiate a strategy from a registry key, dotted path, class, or instance.
-
-    Always passes `timeframe=...` — all BaseStrategy subclasses accept it.
-    Other params are merged on top of the strategy's own defaults.
+    """Instantiate a strategy. Tries to pass `timeframe=...` first; if the
+    strategy's __init__ doesn't accept `timeframe` (some gold strategies
+    don't — they take timeframe at engine.run() time), falls back gracefully.
     """
     if isinstance(spec, BaseStrategy):
-        # User-provided instance. Warn if params/timeframe don't match, but
-        # don't rebuild (user's responsibility).
         return spec
 
-    if inspect.isclass(spec) and issubclass(spec, BaseStrategy):
-        cls = spec
-    elif isinstance(spec, str):
-        if ":" in spec:
-            module_path, class_name = spec.split(":", 1)
-            mod = __import__(module_path, fromlist=[class_name])
-            cls = getattr(mod, class_name)
-        elif spec in STRATEGY_REGISTRY:
-            cls = STRATEGY_REGISTRY[spec]
-        else:
-            available = sorted(STRATEGY_REGISTRY.keys())
-            raise KeyError(
-                f"Strategy '{spec}' not found in STRATEGY_REGISTRY "
-                f"(available: {available}). Use a dotted path "
-                f"'module.path:ClassName' or register the strategy first."
-            )
-    else:
-        raise TypeError(f"Unsupported strategy spec: {type(spec)}")
+    cls = _resolve_strategy_class(spec)
 
-    # Build kwargs. `timeframe` always passed; other params override defaults.
+    # Introspect the constructor to decide whether to pass `timeframe`.
+    sig = inspect.signature(cls.__init__)
+    accepts_timeframe = (
+        "timeframe" in sig.parameters
+        or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    )
     kwargs = dict(params)
-    kwargs.setdefault("timeframe", timeframe)
+    if accepts_timeframe:
+        kwargs.setdefault("timeframe", timeframe)
     return cls(**kwargs)
+
+
+# Default indicator superset covering current gold strategies. Used when the
+# config doesn't specify indicators and the strategy class doesn't expose a
+# REQUIRED_INDICATORS attr. Harmless extra computation for strategies that
+# don't read these, but saves callers from remembering what each needs.
+_DEFAULT_GOLD_INDICATORS: list[str] = [
+    "donchian_20", "donchian_55", "donchian_120",
+    "atr_14", "atr_20",
+    "adx_14", "adx_20",
+    "ema_20", "ema_50", "ema_200",
+    "rsi_14",
+    "bb_20_2",
+    "obv",
+]
+
+
+def _resolve_indicators(config: DeepBacktestConfig) -> list[str] | None:
+    """Figure out which indicators to precompute. Precedence:
+    1. config.indicators (explicit)
+    2. strategy.REQUIRED_INDICATORS class attr (if defined)
+    3. _DEFAULT_GOLD_INDICATORS (safe superset)
+    Returns None only if the strategy explicitly sets REQUIRED_INDICATORS = []
+    which signals "computes own features inline" (e.g. SwiftAlmaStrategy).
+    """
+    if config.indicators is not None:
+        return config.indicators or None
+
+    try:
+        cls = _resolve_strategy_class(config.strategy)
+        required = getattr(cls, "REQUIRED_INDICATORS", None)
+        if required is not None:
+            return required or None  # empty list → None (no precompute)
+    except Exception:
+        pass
+
+    return _DEFAULT_GOLD_INDICATORS
 
 
 # ── Data loading ─────────────────────────────────────────────────────────
@@ -505,15 +556,16 @@ def _run_cell(
         run_id=run_id,
     )
     strategy = _resolve_strategy(config.strategy, config.strategy_params, timeframe)
+    indicators = _resolve_indicators(config)
 
     try:
-        result = engine.run(
-            strategy, df_sliced,
-            symbol=config.symbol,
-            timeframe=timeframe,
-            leverage=leverage,
-            sub_book=config.sub_book,
+        run_kwargs = dict(
+            symbol=config.symbol, timeframe=timeframe,
+            leverage=leverage, sub_book=config.sub_book,
         )
+        if indicators:
+            run_kwargs["indicators"] = indicators
+        result = engine.run(strategy, df_sliced, **run_kwargs)
     except Exception as e:
         return CellResult(
             window_days=window_days,
@@ -740,6 +792,7 @@ def _phase_3_leverage_validation(
 
     def _run_at(lev: float) -> dict:
         strategy = _resolve_strategy(config.strategy, config.strategy_params, tf)
+        indicators = _resolve_indicators(config)
         engine = LeveragedBacktestEngine(
             initial_institutional_cash=config.initial_cash,
             initial_aggressive_cash=0.0,
@@ -747,10 +800,13 @@ def _phase_3_leverage_validation(
             path_model=ctx.get("m1_path_model") if tf != "1m" else None,
             run_id=f"lev_val_{int(lev)}x",
         )
-        result = engine.run(
-            strategy, df_sliced, symbol=config.symbol, timeframe=tf,
+        run_kwargs = dict(
+            symbol=config.symbol, timeframe=tf,
             leverage=lev, sub_book=config.sub_book,
         )
+        if indicators:
+            run_kwargs["indicators"] = indicators
+        result = engine.run(strategy, df_sliced, **run_kwargs)
         trades = result.trades
         return {
             "lev": lev,
@@ -802,9 +858,14 @@ def _phase_3_leverage_validation(
         print(f"    trades:       {r_lo['n_trades']} / {r_hi['n_trades']}")
         print(f"    final equity: ${r_lo['final_equity']:.2f} / ${r_hi['final_equity']:.2f}")
         print(f"    total P&L:    ${r_lo['total_pnl']:.2f} / ${r_hi['total_pnl']:.2f}")
+        ratio_str = (f"{details['margin_ratio_actual']:.1f}x"
+                     if details.get("margin_ratio_actual") is not None else "n/a")
         print(f"    total margin: ${r_lo['total_margin']:.2f} / ${r_hi['total_margin']:.2f} "
-              f"(ratio: {details['margin_ratio_actual']:.1f}x, expected {details['margin_ratio_expected']:.0f}x)")
-        print(f"  Verdict: {'✓ identical' if hand_passed else '✗ DIFFERS'}")
+              f"(ratio: {ratio_str}, expected {details['margin_ratio_expected']:.0f}x)")
+        note = ""
+        if r_lo["n_trades"] == 0 and r_hi["n_trades"] == 0:
+            note = "  ⚠ zero trades — invariance is trivial (strategy never fired in this window)"
+        print(f"  Verdict: {'✓ identical' if hand_passed else '✗ DIFFERS'}{note}")
         print()
 
     return LeverageValidationResult(
@@ -854,11 +915,14 @@ def _wf_run_fold(
         path_model=m1pm if tf != "1m" else None,
         run_id=run_id,
     )
-    result = engine.run(
-        strategy, fold_df,
+    indicators = _resolve_indicators(config)
+    run_kwargs = dict(
         symbol=config.symbol, timeframe=tf,
         leverage=leverage, sub_book=config.sub_book,
     )
+    if indicators:
+        run_kwargs["indicators"] = indicators
+    result = engine.run(strategy, fold_df, **run_kwargs)
     final_eq = result.metrics["final_institutional_equity"]
     return_pct = (final_eq - config.initial_cash) / config.initial_cash * 100.0
     max_dd = result.metrics["max_dd_pct"]
