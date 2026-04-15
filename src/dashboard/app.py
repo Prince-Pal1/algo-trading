@@ -59,6 +59,52 @@ def _get_conn() -> sqlite3.Connection:
 
 
 # ---------------------------------------------------------------------------
+# Strategies page helpers (task #133 — hierarchical facets tree)
+# ---------------------------------------------------------------------------
+
+
+def _facet_better_than(new: dict, existing: dict | None) -> bool:
+    """Compare two facets under keep-best semantics (local mirror of
+    `storage._is_better_version_metric`).
+
+    Kept inline so the Strategies page doesn't import the storage internals
+    at import time. Same tiebreak order: sane-first → WF Calmar → return_pct.
+    """
+    if existing is None:
+        return True
+    new_sane = bool(new.get("sane"))
+    old_sane = bool(existing.get("sane"))
+    if new_sane != old_sane:
+        return new_sane
+    new_wf = new.get("wf_calmar")
+    old_wf = existing.get("wf_calmar")
+    if new_wf is not None and old_wf is not None:
+        return float(new_wf) > float(old_wf)
+    if new_wf is not None and old_wf is None:
+        return True
+    if new_wf is None and old_wf is not None:
+        return False
+    new_ret = new.get("return_pct")
+    old_ret = existing.get("return_pct")
+    if new_ret is None:
+        return False
+    if old_ret is None:
+        return True
+    return float(new_ret) > float(old_ret)
+
+
+def _format_hero_summary(hero, strategies_by_id) -> str:
+    """Inline formatter for the Layer 2 window dropdown labels."""
+    if not hero:
+        return "(no data)"
+    v, facet = hero
+    parent = strategies_by_id.get(v.strategy_id)
+    name = parent.name if parent else "?"
+    ret = facet.get("return_pct")
+    return f"{name} {ret:+.1f}%" if ret is not None else name
+
+
+# ---------------------------------------------------------------------------
 # Sidebar Navigation
 # ---------------------------------------------------------------------------
 
@@ -383,11 +429,22 @@ elif page == "Validation":
 
 
 # ---------------------------------------------------------------------------
-# Page 6: Strategies — versioned registry (task #122 G.8)
+# Page 6: Strategies — hierarchical registry (task #133 Option 1B)
+# ---------------------------------------------------------------------------
+#
+# Four-layer hierarchy:
+#   Layer 1 (filter)  — fee profile dropdown (only fees with data)
+#   Layer 2 (🏆 hero) — window time-frame hero across ALL strategies
+#   Layer 3 (⭐ hero) — per (strategy × leverage_mode), hero across leverages×tfs
+#   Layer 4 (leaf)    — individual (leverage, candle_tf) rows with vanity flag
+#
+# All hierarchy computation is done in memory from pre-parsed facets_json so
+# page load is O(N_versions) with no N+1 queries. The facets are keep-best
+# maintained at write-time by `record_deep_backtest_result` so the Dashboard
+# is a pure reader — never triggers recomputation.
 # ---------------------------------------------------------------------------
 
 elif page == "Strategies":
-    from dataclasses import asdict
     from src.strategies.storage import (
         list_strategies,
         list_versions,
@@ -396,172 +453,278 @@ elif page == "Strategies":
         _to_absolute,
     )
 
-    st.title("Strategies — versioned registry")
+    st.title("Strategies — hierarchical registry")
     st.caption(
-        "Auto-populated from `run_deep_backtest()`. Each parent strategy → "
-        "its variants (different leverage modes, params, timeframes) → "
-        "max-return cell + walk-forward Calmar + clickable HTML report."
+        "Four-layer view: **fee → window → strategy+mode → leverage×tf**. "
+        "Heroes (🏆 / ⭐) auto-selected by keep-best (sane → WF Calmar → max return). "
+        "Pages are read-only; facets are maintained at write-time by `record_deep_backtest_result`."
     )
 
-    # ── Vanity-trap audit (front-and-center)
-    vanity = query_vanity_traps(db_path=_DB_PATH)
-    if vanity:
-        st.warning(
-            f"⚠️ {len(vanity)} vanity trap(s) detected — DEPLOYABLE versions "
-            f"with sane=False max-return cells. Audit before deploying live."
-        )
-        with st.expander(f"View {len(vanity)} vanity trap(s)"):
-            vanity_rows = [
-                {
-                    "slug": v.version_slug,
-                    "max_return_pct": v.max_return_pct,
-                    "warning": v.max_return_warning,
-                    "verdict": v.verdict,
-                    "report_dir": v.report_dir,
-                }
-                for v in vanity
-            ]
-            st.dataframe(pd.DataFrame(vanity_rows), use_container_width=True, hide_index=True)
-
-    # ── Parent strategy selector
+    # ── Load all data ONCE ─────────────────────────────────────────────────
+    # O(1) query + O(N_versions) in-memory parse. Adding new strategies,
+    # modes, leverages, windows, or fees does not require any re-indexing —
+    # they simply show up as new facet keys and new slug rows.
     strategies = list_strategies(db_path=_DB_PATH)
-    if not strategies:
+    all_versions = list_versions(db_path=_DB_PATH)  # one query, no strategy filter
+
+    if not all_versions:
         st.info(
             "No strategies in storage yet. Run a deep_backtest to auto-populate, "
             "or use `python3 scripts/strategies.py register <name>` to stub one. "
             "Run `python3 scripts/strategies_backfill.py` to import existing reports."
         )
-    else:
-        # Headline table
-        st.subheader("All strategies")
-        rollups = []
-        for s in strategies:
-            versions = list_versions(strategy_name=s.name, db_path=_DB_PATH)
-            best = None
-            for v in versions:
-                if v.max_return_pct is not None:
-                    if best is None or v.max_return_pct > (best.max_return_pct or -1e18):
-                        best = v
-            last_bt = max(
-                (v.last_backtested_at for v in versions if v.last_backtested_at),
-                default="never",
-            )
-            rollups.append({
-                "name": s.name,
-                "family": s.family or "—",
-                "tier": s.tier or "—",
-                "status": s.status,
-                "versions": len(versions),
-                "last_backtested": last_bt[:10] if last_bt != "never" else "never",
-                "best_max_return_pct": best.max_return_pct if best else None,
-                "best_sane": "✓" if (best is None or best.max_return_sane is None or best.max_return_sane) else "⚠",
-            })
-        st.dataframe(pd.DataFrame(rollups), use_container_width=True, hide_index=True)
+        st.stop()
 
-        # ── Strategy detail
-        st.markdown("---")
-        st.subheader("Strategy detail")
-        picked = st.selectbox("Pick a strategy", [s.name for s in strategies])
-        s = next(s for s in strategies if s.name == picked)
+    # Index strategies by id for fast lookup (parent metadata + display name)
+    strategies_by_id = {s.id: s for s in strategies}
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Status", s.status)
-        with col2:
-            st.metric("Family", s.family or "—")
-        with col3:
-            st.metric("Tier", s.tier or "—")
-        if s.description:
-            st.markdown(f"_{s.description}_")
-        if s.markets:
-            st.markdown(f"**Markets:** {', '.join(s.markets)}")
-        if s.leverage_range:
-            st.markdown(f"**Leverage range:** {s.leverage_range[0]:g}–{s.leverage_range[1]:g}x")
-
-        # ── Versions table
-        versions = list_versions(strategy_name=s.name, db_path=_DB_PATH)
-        if not versions:
-            st.info(f"No versions for {s.name}. Run deep_backtest to auto-populate.")
-        else:
-            st.markdown(f"### Versions ({len(versions)})")
-            # Column order prioritizes the human-readable description over
-            # the slug. The slug is the DB key (stable, idempotent) but the
-            # description tells the reader what the variant actually IS.
-            version_rows = []
-            for v in versions:
-                cell = v.max_return_cell or {}
-                version_rows.append({
-                    "description": v.description or f"(no name — {v.version_slug})",
-                    "verdict": v.verdict or "—",
-                    "max_return_pct": v.max_return_pct,
-                    "max_dd_pct": cell.get("maxdd_pct"),
-                    "calmar": cell.get("calmar"),
-                    "wf_calmar": v.wf_continuous_calmar,
-                    "wf_return_pct": v.wf_continuous_return_pct,
-                    "trades": cell.get("trades"),
-                    "sane": "✓" if v.max_return_sane else ("⚠" if v.max_return_sane is False else "—"),
-                    "last_backtested": (v.last_backtested_at or "")[:10],
+    # ── Vanity-trap audit (front-and-center)
+    vanity = query_vanity_traps(db_path=_DB_PATH)
+    if vanity:
+        st.warning(
+            f"⚠️ {len(vanity)} vanity trap(s) — DEPLOYABLE verdicts with "
+            f"sane=False max-return cells. Audit before deploying live."
+        )
+        with st.expander(f"View {len(vanity)} vanity trap(s)"):
+            vanity_rows = [
+                {
                     "slug": v.version_slug,
-                })
-            st.dataframe(pd.DataFrame(version_rows), use_container_width=True, hide_index=True)
-
-            # ── Embedded report viewer
-            st.markdown("### View deep_backtest HTML report")
-            # Picker shows the human description; fall back to slug when None
-            picker_options = [
-                (v.description or v.version_slug) for v in versions
+                    "strategy": strategies_by_id.get(v.strategy_id).name
+                        if strategies_by_id.get(v.strategy_id) else "?",
+                    "max_return_pct": v.max_return_pct,
+                    "warning": v.max_return_warning,
+                    "verdict": v.verdict,
+                }
+                for v in vanity
             ]
-            picked_label = st.selectbox(
-                "Pick a version",
-                picker_options,
-                key=f"version_picker_{s.name}",
-            )
-            v = next(
-                v for v in versions
-                if (v.description or v.version_slug) == picked_label
-            )
-            st.caption(f"slug: `{v.version_slug}`")
-            if v.max_return_warning:
-                st.warning(f"⚠ Max-return cell vanity flag: **{v.max_return_warning}**")
-            if v.verdict_reason:
-                st.caption(f"Verdict reason: {v.verdict_reason}")
+            st.dataframe(pd.DataFrame(vanity_rows), use_container_width=True, hide_index=True)
 
-            if v.report_html_path:
-                abs_html = _to_absolute(v.report_html_path)
-                if abs_html and abs_html.exists():
-                    try:
-                        html_content = abs_html.read_text()
-                        st.components.v1.html(html_content, height=900, scrolling=True)
-                    except Exception as e:
-                        st.error(f"Failed to render HTML: {e}")
-                else:
-                    st.error(f"HTML file not found at {abs_html}")
+    # ── Facets universe: which fees/windows have ANY data? ─────────────────
+    # Walk every version's facets dict once. Build:
+    #   fee_universe:     set of all fee_profile values present anywhere
+    #   window_universe:  {fee_profile: [window_labels sorted by window_days]}
+    #   facet_lookup:     {(fee, window, version_id): facet payload}
+    fee_universe: set[str] = set()
+    window_universe: dict[str, dict[str, int]] = {}  # fee → {window_label: window_days}
+    # facet_lookup: index for fast Layer 2-4 rendering
+    facet_lookup: dict[tuple[str, str], list[tuple[object, dict]]] = {}
+
+    for v in all_versions:
+        for key, facet in (v.facets or {}).items():
+            # key is "{window_label}::{fee_profile}"
+            if "::" not in key:
+                continue
+            window_label, fee_profile = key.split("::", 1)
+            fee_universe.add(fee_profile)
+            window_universe.setdefault(fee_profile, {})[window_label] = int(facet.get("window_days", 0))
+            facet_lookup.setdefault((fee_profile, window_label), []).append((v, facet))
+
+    if not fee_universe:
+        st.info(
+            "Strategy versions exist but none have facets_json yet. "
+            "Run `python3 scripts/strategies_migrate_v6.py --apply` to backfill, "
+            "or re-run a deep_backtest on any version to populate facets."
+        )
+        st.stop()
+
+    # ── LAYER 1 — Fee profile filter ───────────────────────────────────────
+    st.markdown("### 🏷️  Layer 1 — Broker fee profile")
+    fees_sorted = sorted(fee_universe)
+    picked_fee = st.selectbox(
+        "Fee profile (only fees with backtest data shown)",
+        fees_sorted,
+        help=f"{len(fees_sorted)} fee profiles have facets in storage. "
+             f"Pick one to filter the hierarchy below.",
+    )
+
+    # ── LAYER 2 — Window time-frame with 🏆 hero ───────────────────────────
+    windows_for_fee = window_universe.get(picked_fee, {})
+    if not windows_for_fee:
+        st.warning(f"No data for fee profile {picked_fee!r}.")
+        st.stop()
+
+    # Sort windows by window_days so "1mo, 3mo, 6mo, 1y" shows in time order
+    windows_sorted = sorted(windows_for_fee.items(), key=lambda x: x[1])
+    window_labels = [w for w, _ in windows_sorted]
+
+    # Compute the Layer-2 hero for EACH window: best cell across ALL strategies
+    # at this fee × window. This is the 🏆 "best model for this fee+window".
+    window_heroes: dict[str, tuple[object, dict] | None] = {}
+    for w_label in window_labels:
+        bucket = facet_lookup.get((picked_fee, w_label), [])
+        hero: tuple[object, dict] | None = None
+        for v, facet in bucket:
+            if hero is None:
+                hero = (v, facet)
+                continue
+            # Sane-first → WF Calmar → return_pct
+            _, hero_facet = hero
+            if _facet_better_than(facet, hero_facet):
+                hero = (v, facet)
+        window_heroes[w_label] = hero
+
+    st.markdown("### ⏱  Layer 2 — Window time-frame (🏆 = best across all strategies)")
+    picked_window = st.selectbox(
+        "Window",
+        window_labels,
+        format_func=lambda w: (
+            f"{w}  🏆 {_format_hero_summary(window_heroes.get(w), strategies_by_id)}"
+        ),
+    )
+    hero_layer2 = window_heroes.get(picked_window)
+    if hero_layer2:
+        v_hero, f_hero = hero_layer2
+        parent_hero = strategies_by_id.get(v_hero.strategy_id)
+        st.success(
+            f"🏆 **Layer 2 hero** for {picked_fee} × {picked_window}: "
+            f"**{parent_hero.name if parent_hero else '?'}** · "
+            f"{v_hero.description or v_hero.version_slug} → "
+            f"return **{f_hero.get('return_pct'):+.2f}%**, "
+            f"DD {f_hero.get('maxdd_pct'):.1f}%, Calmar {f_hero.get('calmar'):.2f}, "
+            f"{f_hero.get('trades')} trades"
+        )
+
+    # ── LAYER 3 — Strategy + leverage_mode with ⭐ hero ─────────────────────
+    st.markdown("### 📐  Layer 3 — Strategy × leverage mode (⭐ = hero per group)")
+    st.caption(
+        "One row per (strategy, leverage_mode). ⭐ marks the best leverage×tf "
+        "within that group for the selected fee × window."
+    )
+
+    # Group all facets for (picked_fee, picked_window) by (strategy_id, leverage_mode)
+    layer3_groups: dict[tuple[int, str], list[tuple[object, dict]]] = {}
+    for v, facet in facet_lookup.get((picked_fee, picked_window), []):
+        mode = v.leverage_mode or "—"
+        layer3_groups.setdefault((v.strategy_id, mode), []).append((v, facet))
+
+    if not layer3_groups:
+        st.info(f"No versions for {picked_fee} × {picked_window}.")
+    else:
+        # Build rollup rows — one per Layer 3 group, with ⭐ hero metrics
+        layer3_rows = []
+        hero_lookup: dict[tuple[int, str], tuple[object, dict]] = {}
+        for (sid, mode), bucket in layer3_groups.items():
+            hero: tuple[object, dict] | None = None
+            for v, facet in bucket:
+                if hero is None or _facet_better_than(facet, hero[1]):
+                    hero = (v, facet)
+            if hero is None:
+                continue
+            hero_lookup[(sid, mode)] = hero
+            v_star, f_star = hero
+            parent = strategies_by_id.get(sid)
+            layer3_rows.append({
+                "strategy": parent.name if parent else "?",
+                "leverage_mode": mode,
+                "⭐ hero": f"{v_star.description or v_star.version_slug}",
+                "return_pct": f_star.get("return_pct"),
+                "max_dd_pct": f_star.get("maxdd_pct"),
+                "calmar": f_star.get("calmar"),
+                "wf_calmar": f_star.get("wf_calmar"),
+                "trades": f_star.get("trades"),
+                "sane": "✓" if f_star.get("sane") else "⚠",
+                "verdict": f_star.get("verdict") or v_star.verdict or "—",
+            })
+        # Sort rollup by sanity-first (sane=✓ beats ⚠), then return desc
+        layer3_rows.sort(
+            key=lambda r: (r["sane"] != "✓", -(r["return_pct"] or -1e18))
+        )
+        st.dataframe(pd.DataFrame(layer3_rows), use_container_width=True, hide_index=True)
+
+        # ── LAYER 4 — Expand a (strategy × mode) group to see leverage×tf leaves
+        st.markdown("### 🔬  Layer 4 — Leverage × candle timeframe leaves")
+        st.caption(
+            "Pick a (strategy × mode) group to inspect every leaf. "
+            "⚠ flags vanity traps (thin trades, huge DD, or low Calmar)."
+        )
+
+        group_options = [
+            f"{strategies_by_id.get(sid).name if strategies_by_id.get(sid) else '?'} · {mode}"
+            for (sid, mode) in layer3_groups.keys()
+        ]
+        picked_group_label = st.selectbox("Pick a (strategy × mode) group", group_options)
+        picked_idx = group_options.index(picked_group_label)
+        picked_key = list(layer3_groups.keys())[picked_idx]
+        leaves = layer3_groups[picked_key]
+
+        # Render each leaf as a row keyed by (leverage, timeframe)
+        leaf_rows = []
+        for v, facet in leaves:
+            leaf_rows.append({
+                "slug": v.version_slug,
+                "leverage": facet.get("leverage"),
+                "timeframe": facet.get("timeframe"),
+                "return_pct": facet.get("return_pct"),
+                "max_dd_pct": facet.get("maxdd_pct"),
+                "calmar": facet.get("calmar"),
+                "wf_calmar": facet.get("wf_calmar"),
+                "trades": facet.get("trades"),
+                "sane": "✓" if facet.get("sane") else "⚠",
+                "warning": facet.get("warning") or "",
+                "⭐": "⭐" if hero_lookup.get(picked_key) and hero_lookup[picked_key][0].id == v.id else "",
+            })
+        leaf_rows.sort(
+            key=lambda r: (r["sane"] != "✓", -(r["return_pct"] or -1e18))
+        )
+        st.dataframe(pd.DataFrame(leaf_rows), use_container_width=True, hide_index=True)
+
+        # ── Embedded HTML report viewer for the picked leaf ────────────────
+        st.markdown("### View deep_backtest HTML report")
+        leaf_picker_options = [
+            f"{r['slug']}  ({r['⭐']}return {r['return_pct']:+.2f}%)"
+            if r["return_pct"] is not None else r["slug"]
+            for r in leaf_rows
+        ]
+        picked_leaf_label = st.selectbox("Pick a leaf to view its HTML report", leaf_picker_options)
+        picked_leaf_idx = leaf_picker_options.index(picked_leaf_label)
+        v_pick, facet_pick = leaves[picked_leaf_idx]
+        st.caption(f"slug: `{v_pick.version_slug}`  ·  mode: `{v_pick.leverage_mode or '—'}`  ·  baseline L: `{v_pick.baseline_leverage}`")
+        if facet_pick.get("warning"):
+            st.warning(f"⚠ Vanity flag for this leaf: **{facet_pick['warning']}**")
+        if facet_pick.get("verdict_reason") or v_pick.verdict_reason:
+            st.caption(f"Verdict reason: {facet_pick.get('verdict_reason') or v_pick.verdict_reason}")
+
+        # Prefer the facet's report_html_path (travels with the winning cell)
+        # over the version row's top-level path. When keep-best rolls a cell
+        # forward from a prior run, the facet has the right report to show.
+        html_path = facet_pick.get("report_html_path") or v_pick.report_html_path
+        if html_path:
+            abs_html = _to_absolute(html_path)
+            if abs_html and abs_html.exists():
+                try:
+                    html_content = abs_html.read_text()
+                    st.components.v1.html(html_content, height=900, scrolling=True)
+                except Exception as e:
+                    st.error(f"Failed to render HTML: {e}")
             else:
-                st.info("No HTML report path on this version (run deep_backtest with --no-html?)")
+                st.error(f"HTML file not found at {abs_html}")
+        else:
+            st.info("No HTML report path on this facet (run deep_backtest with --no-html?)")
 
-            # ── Run history for this version
-            history = list_version_runs(
-                strategy_name=s.name,
-                version_slug=v.version_slug,
-                limit=50,
-                db_path=_DB_PATH,
-            )
-            if len(history) > 1:
-                with st.expander(f"Run history ({len(history)} runs)"):
-                    st.dataframe(
-                        pd.DataFrame([
-                            {
-                                "run_timestamp": (h.get("run_timestamp") or "")[:19],
-                                "verdict": h.get("verdict"),
-                                "max_return_pct": h.get("max_return_pct"),
-                                "best_calmar": h.get("best_calmar"),
-                                "matrix_n_cells": h.get("matrix_n_cells"),
-                            }
-                            for h in history
-                        ]),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
+        # ── Run history for this version
+        history = list_version_runs(
+            version_id=v_pick.id,
+            limit=50,
+            db_path=_DB_PATH,
+        )
+        if len(history) > 1:
+            with st.expander(f"Run history ({len(history)} runs)"):
+                st.dataframe(
+                    pd.DataFrame([
+                        {
+                            "run_timestamp": (h.get("run_timestamp") or "")[:19],
+                            "verdict": h.get("verdict"),
+                            "max_return_pct": h.get("max_return_pct"),
+                            "best_calmar": h.get("best_calmar"),
+                            "matrix_n_cells": h.get("matrix_n_cells"),
+                        }
+                        for h in history
+                    ]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+
 
 
 # ---------------------------------------------------------------------------

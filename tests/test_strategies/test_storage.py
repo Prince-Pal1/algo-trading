@@ -306,66 +306,69 @@ class TestForeignKeyEnforcement:
 
 
 class TestVersionSlug:
-    def test_slug_idempotent_same_config(self):
-        """Same config called twice → same slug (no collision even when an
-        existing version with identical params is already recorded)."""
+    """Task #133 — pure-triplet slug: `{mode}_L{int(baseline)}_{tf}` only.
+
+    Same `(mode, leverage, tf)` ALWAYS produces the same slug, regardless
+    of params. Re-tuning params updates the same row under keep-best
+    semantics in `record_deep_backtest_result`.
+    """
+
+    def test_slug_pure_triplet_idempotent(self):
+        """Same (mode, leverage, tf) → same slug. params ignored."""
         slug1 = _generate_version_slug(
             leverage_mode="risk_scaled",
             baseline_leverage=10.0,
             timeframe="1h",
-            params={"max_risk_per_trade": 0.02},
-            existing_versions=[],
-        )
-        existing_stored = StoredVersion(
-            strategy_id=1,
-            version_slug=slug1,
-            params={"max_risk_per_trade": 0.02},
         )
         slug2 = _generate_version_slug(
             leverage_mode="risk_scaled",
             baseline_leverage=10.0,
             timeframe="1h",
-            params={"max_risk_per_trade": 0.02},
-            existing_versions=[existing_stored],
         )
-        # Re-running with identical params reuses the base slug (same row).
         assert slug1 == slug2 == "risk_scaled_L10_1h"
 
-    def test_slug_hash_collision_only_when_params_differ(self):
-        """Same (mode, leverage, tf) but DIFFERENT params → base slug already
-        taken by a row with other params, so the new call gets a hash suffix."""
-        base = _generate_version_slug(
+    def test_slug_ignores_params(self):
+        """Same (mode, leverage, tf), DIFFERENT params → SAME slug.
+
+        The pre-v6 behavior appended a 6-char params-hash suffix — that's
+        what created duplicate rows and was the whole reason we rewrote
+        this for task #133. Different params sharing the same triplet MUST
+        land on the same row and be merged under keep-best.
+        """
+        slug_a = _generate_version_slug(
             leverage_mode="risk_scaled",
             baseline_leverage=10.0,
             timeframe="1h",
             params={"max_risk_per_trade": 0.02},
-            existing_versions=[],
         )
-        existing_stored = StoredVersion(
-            strategy_id=1,
-            version_slug=base,
-            params={"max_risk_per_trade": 0.02},  # the first row's params
-        )
-        collision = _generate_version_slug(
+        slug_b = _generate_version_slug(
             leverage_mode="risk_scaled",
             baseline_leverage=10.0,
             timeframe="1h",
             params={"max_risk_per_trade": 0.03},  # different param dict
-            existing_versions=[existing_stored],
         )
-        assert base == "risk_scaled_L10_1h"
-        assert collision.startswith("risk_scaled_L10_1h_")
-        assert len(collision) == len("risk_scaled_L10_1h") + 1 + 6
+        assert slug_a == slug_b == "risk_scaled_L10_1h"
+        # No hash suffix: slug is exactly the pure triplet, nothing more.
+        assert "_" in slug_a
+        assert len(slug_a.split("_")) == 4  # risk_scaled_L10_1h → 4 parts
 
     def test_slug_default_when_no_config(self):
         slug = _generate_version_slug(
             leverage_mode=None,
             baseline_leverage=None,
             timeframe=None,
-            params=None,
-            existing_versions=[],
         )
         assert slug == "default"
+
+    def test_slug_legacy_timeframe_only(self):
+        """Pre-leverage-mode strategies (None mode, None baseline) land as
+        just the timeframe — matches the legacy rows we're about to migrate."""
+        slug = _generate_version_slug(
+            leverage_mode=None,
+            baseline_leverage=None,
+            timeframe="1h",
+        )
+        assert slug == "1h"
 
 
 # ── Max-return cell picker ──────────────────────────────────────────────
@@ -818,3 +821,296 @@ class TestQueryHelpers:
         assert len(traps) == 1
         assert traps[0].version_slug == "v2"
         assert traps[0].max_return_warning == "only 4 trades"
+
+
+# ── Schema v6 — facets_json + keep-best (task #133) ─────────────────────
+
+
+class TestFacetsUpsert:
+    """Task #133 — the hierarchical Strategies page backbone.
+
+    Covers:
+      - _compute_facets_from_matrix groups by (window_label, fee_profile)
+      - _is_better_version_metric tiebreak order (sane → WF → return)
+      - _merge_facets preserves unrelated keys + applies keep-best per key
+      - _top_level_from_facets picks the cross-facet hero correctly
+      - record_deep_backtest_result integration — re-run updates in place
+      - _generate_description produces human-readable labels
+    """
+
+    def test_compute_facets_groups_by_window_and_fee(self):
+        from src.strategies.storage import _compute_facets_from_matrix
+
+        df = _make_matrix_df([
+            _sample_row(window_label="1mo", fee_profile="fee_a", return_pct=5.0, trades=40),
+            _sample_row(window_label="1mo", fee_profile="fee_b", return_pct=8.0, trades=40),
+            _sample_row(window_label="1y", fee_profile="fee_a", return_pct=12.0, trades=40),
+            _sample_row(window_label="1y", fee_profile="fee_b", return_pct=6.0, trades=40),
+        ])
+        facets = _compute_facets_from_matrix(df)
+        assert set(facets.keys()) == {
+            "1mo::fee_a", "1mo::fee_b", "1y::fee_a", "1y::fee_b",
+        }
+        assert facets["1mo::fee_a"]["return_pct"] == 5.0
+        assert facets["1y::fee_a"]["return_pct"] == 12.0
+
+    def test_compute_facets_sane_first_within_group(self):
+        """For the SAME (window, fee), a +8% sane cell must win over
+        a +200% insane (thin-trades) cell. Sanity trumps headline return."""
+        from src.strategies.storage import _compute_facets_from_matrix
+
+        df = _make_matrix_df([
+            # insane: only 4 trades even though +200%
+            _sample_row(return_pct=200.0, trades=4, calmar=1.5, leverage=50),
+            # sane: 40 trades at +8%
+            _sample_row(return_pct=8.0, trades=40, calmar=2.0, leverage=10),
+        ])
+        facets = _compute_facets_from_matrix(df)
+        # Both rows share (3mo, ic_markets_mt4_xauusd_normal) → single key
+        assert len(facets) == 1
+        winner = next(iter(facets.values()))
+        assert winner["return_pct"] == 8.0  # sane beats insane+higher
+        assert winner["trades"] == 40
+        assert winner["sane"] is True
+
+    def test_compute_facets_insane_survives_when_all_insane(self):
+        """Fallback: if EVERY cell in a group is insane, we still pick
+        the max-return one so the UI has something to show."""
+        from src.strategies.storage import _compute_facets_from_matrix
+
+        df = _make_matrix_df([
+            _sample_row(return_pct=50.0, trades=4),  # insane
+            _sample_row(return_pct=200.0, trades=4),  # insane + higher
+        ])
+        facets = _compute_facets_from_matrix(df)
+        winner = next(iter(facets.values()))
+        assert winner["return_pct"] == 200.0  # max among insanes
+        assert winner["sane"] is False
+
+    def test_is_better_version_metric_sane_first(self):
+        from src.strategies.storage import _is_better_version_metric
+
+        sane_low = {"sane": True, "return_pct": 5.0, "wf_calmar": None}
+        insane_high = {"sane": False, "return_pct": 300.0, "wf_calmar": None}
+        assert _is_better_version_metric(sane_low, insane_high) is True
+        assert _is_better_version_metric(insane_high, sane_low) is False
+
+    def test_is_better_version_metric_wf_calmar_beats_return(self):
+        """Both sane. WF Calmar is the tiebreaker BEFORE max_return_pct."""
+        from src.strategies.storage import _is_better_version_metric
+
+        low_ret_high_wf = {"sane": True, "return_pct": 10.0, "wf_calmar": 5.0}
+        high_ret_low_wf = {"sane": True, "return_pct": 50.0, "wf_calmar": 2.0}
+        assert _is_better_version_metric(low_ret_high_wf, high_ret_low_wf) is True
+
+    def test_is_better_version_metric_return_fallback_no_wf(self):
+        """When neither has WF Calmar, fall back to return_pct."""
+        from src.strategies.storage import _is_better_version_metric
+
+        a = {"sane": True, "return_pct": 20.0, "wf_calmar": None}
+        b = {"sane": True, "return_pct": 10.0, "wf_calmar": None}
+        assert _is_better_version_metric(a, b) is True
+
+    def test_is_better_version_metric_wf_presence_wins(self):
+        """A row WITH WF data wins over a row WITHOUT — having OOS truth
+        is strictly more trustworthy than having only in-sample."""
+        from src.strategies.storage import _is_better_version_metric
+
+        with_wf = {"sane": True, "return_pct": 5.0, "wf_calmar": 3.0}
+        without_wf = {"sane": True, "return_pct": 50.0, "wf_calmar": None}
+        assert _is_better_version_metric(with_wf, without_wf) is True
+
+    def test_merge_facets_preserves_unrelated_keys(self):
+        """The CORE keep-best behavior: new facets merge into existing without
+        touching facets for (window, fee) combos the new run didn't touch.
+        This is what lets a monthly re-run accumulate multi-window data on
+        the same row."""
+        from src.strategies.storage import _merge_facets
+
+        existing = {
+            "1mo::fee_a": {"return_pct": 5.0, "sane": True, "wf_calmar": None},
+            "1y::fee_a":  {"return_pct": 20.0, "sane": True, "wf_calmar": None},
+        }
+        new = {
+            "3mo::fee_a": {"return_pct": 10.0, "sane": True, "wf_calmar": None},
+        }
+        merged = _merge_facets(existing, new)
+        # All three keys survive
+        assert set(merged.keys()) == {"1mo::fee_a", "3mo::fee_a", "1y::fee_a"}
+        assert merged["1mo::fee_a"]["return_pct"] == 5.0  # untouched
+        assert merged["1y::fee_a"]["return_pct"] == 20.0   # untouched
+        assert merged["3mo::fee_a"]["return_pct"] == 10.0  # new
+
+    def test_merge_facets_keep_best_on_overlap(self):
+        """Overlap on (window, fee) → keep-best wins. A worse-params re-run
+        on the same cell does NOT overwrite the good result."""
+        from src.strategies.storage import _merge_facets
+
+        existing = {
+            "1mo::fee_a": {"return_pct": 50.0, "sane": True, "wf_calmar": None},
+        }
+        new = {
+            "1mo::fee_a": {"return_pct": 10.0, "sane": True, "wf_calmar": None},
+        }
+        merged = _merge_facets(existing, new)
+        assert merged["1mo::fee_a"]["return_pct"] == 50.0  # existing won
+
+    def test_merge_facets_sane_overrides_higher_return(self):
+        """Sane-first applies at merge time too."""
+        from src.strategies.storage import _merge_facets
+
+        existing = {
+            "1mo::fee_a": {"return_pct": 300.0, "sane": False, "wf_calmar": None},
+        }
+        new = {
+            "1mo::fee_a": {"return_pct": 20.0, "sane": True, "wf_calmar": None},
+        }
+        merged = _merge_facets(existing, new)
+        assert merged["1mo::fee_a"]["return_pct"] == 20.0
+        assert merged["1mo::fee_a"]["sane"] is True
+
+    def test_top_level_from_facets_picks_hero_across_windows(self):
+        """Cross-(window,fee) hero for the top-level columns."""
+        from src.strategies.storage import _top_level_from_facets
+
+        facets = {
+            "1mo::fee_a": {
+                "return_pct": 5.0, "sane": True, "wf_calmar": None,
+                "window_days": 30, "window_label": "1mo",
+                "timeframe": "1h", "leverage": 1.0, "fee_profile": "fee_a",
+                "trades": 40, "maxdd_pct": 2.0, "calmar": 2.0,
+                "sharpe": 1.0, "win_rate": 55, "profit_factor": 1.3,
+                "verdict": "NEEDS_WF",
+            },
+            "1y::fee_a": {
+                "return_pct": 50.0, "sane": True, "wf_calmar": None,
+                "window_days": 365, "window_label": "1y",
+                "timeframe": "1h", "leverage": 10.0, "fee_profile": "fee_a",
+                "trades": 120, "maxdd_pct": 5.0, "calmar": 10.0,
+                "sharpe": 2.0, "win_rate": 58, "profit_factor": 1.8,
+                "verdict": "DEPLOYABLE",
+            },
+        }
+        top = _top_level_from_facets(facets)
+        assert top["max_return_pct"] == 50.0
+        assert top["max_return_cell"]["window_label"] == "1y"
+        assert top["verdict"] == "DEPLOYABLE"  # hero cell's verdict travels
+
+    def test_top_level_from_facets_empty_returns_empty(self):
+        from src.strategies.storage import _top_level_from_facets
+        assert _top_level_from_facets({}) == {}
+
+
+# ── Auto-description generator (task #133) ──────────────────────────────
+
+
+class TestAutoDescription:
+    def test_full_triplet(self):
+        from src.strategies.storage import _generate_description
+        assert _generate_description("margin_capped", 10.0, "1h") == "Margin Capped @ L10 · 1h"
+        assert _generate_description("risk_scaled", 15.0, "5m") == "Risk Scaled @ L15 · 5m"
+        assert _generate_description("kelly_fractional", 20.0, "15m") == "Kelly Fractional @ L20 · 15m"
+
+    def test_legacy_tf_only(self):
+        from src.strategies.storage import _generate_description
+        assert _generate_description(None, None, "1h") == "1h"
+        assert _generate_description(None, None, "5m") == "5m"
+
+    def test_all_none_default(self):
+        from src.strategies.storage import _generate_description
+        assert _generate_description(None, None, None) == "default"
+
+
+# ── record_deep_backtest_result re-run keep-best integration ────────────
+
+
+class TestRecordDeepBacktestFacets:
+    """End-to-end: run the real `record_deep_backtest_result` twice with
+    different windows and verify the facets accumulate under keep-best.
+    Uses a `tmp_path` DB so the test is hermetic."""
+
+    def _make_result(self, *, window_label: str, window_days: int,
+                     return_pct: float, trades: int = 40,
+                     fee_profile: str = "ic_markets_mt4_xauusd_normal",
+                     verdict: str = "DEPLOYABLE", leverage: float = 10.0,
+                     timeframe: str = "1h") -> _FakeResult:
+        """Build a fake DeepBacktestResult with one matrix cell."""
+        df = _make_matrix_df([
+            _sample_row(
+                window_label=window_label, window_days=window_days,
+                fee_profile=fee_profile, return_pct=return_pct,
+                trades=trades, leverage=leverage, timeframe=timeframe,
+                calmar=2.0, maxdd_pct=5.0,
+            ),
+        ])
+        return _FakeResult(
+            config=_FakeConfig(
+                leverage_mode=_FakeLeverageMode(value="margin_capped"),
+                baseline_leverage=leverage,
+                timeframes=[timeframe],
+            ),
+            matrix_df=df,
+            matrix=[_FakeCellResult()],
+            best_cell=_FakeCellResult(),
+            report_dir=Path("/tmp/report_dummy"),
+            verdict=verdict,
+            verdict_reason="smoke",
+        )
+
+    def test_first_run_populates_facets(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        result = self._make_result(window_label="1mo", window_days=30, return_pct=12.0)
+        record_deep_backtest_result("test_strat", result, db_path=db)
+
+        v = get_version("test_strat", "margin_capped_L10_1h", db_path=db)
+        assert v is not None
+        assert "1mo::ic_markets_mt4_xauusd_normal" in v.facets
+        assert v.facets["1mo::ic_markets_mt4_xauusd_normal"]["return_pct"] == 12.0
+        assert v.description == "Margin Capped @ L10 · 1h"  # auto-generated
+        assert v.max_return_pct == 12.0
+
+    def test_second_run_different_window_accumulates(self, tmp_path):
+        """The SINGLE row acquires a second facet key when re-run with a
+        different window. This is the cross-window accumulation pattern."""
+        db = str(tmp_path / "t.db")
+        # First run: 1mo
+        result1 = self._make_result(window_label="1mo", window_days=30, return_pct=12.0)
+        record_deep_backtest_result("test_strat", result1, db_path=db)
+        # Second run: 1y (same slug, different window)
+        result2 = self._make_result(window_label="1y", window_days=365, return_pct=50.0)
+        record_deep_backtest_result("test_strat", result2, db_path=db)
+
+        v = get_version("test_strat", "margin_capped_L10_1h", db_path=db)
+        assert set(v.facets.keys()) == {
+            "1mo::ic_markets_mt4_xauusd_normal",
+            "1y::ic_markets_mt4_xauusd_normal",
+        }
+        # Both cells preserved; top-level hero is the 1y cell
+        assert v.max_return_pct == 50.0
+        assert v.max_return_cell["window_label"] == "1y"
+
+    def test_rerun_same_window_keeps_best(self, tmp_path):
+        """Re-running the SAME (slug, window, fee) with a LOWER return does
+        NOT overwrite — keep-best preserves the original cell."""
+        db = str(tmp_path / "t.db")
+        r1 = self._make_result(window_label="1mo", window_days=30, return_pct=50.0)
+        record_deep_backtest_result("test_strat", r1, db_path=db)
+        r2 = self._make_result(window_label="1mo", window_days=30, return_pct=10.0)
+        record_deep_backtest_result("test_strat", r2, db_path=db)
+
+        v = get_version("test_strat", "margin_capped_L10_1h", db_path=db)
+        # The better cell (50%) survived
+        assert v.facets["1mo::ic_markets_mt4_xauusd_normal"]["return_pct"] == 50.0
+        assert v.max_return_pct == 50.0
+
+    def test_slug_is_pure_triplet_no_hash(self, tmp_path):
+        """Task #133 — slug is pure `{mode}_L{int(L)}_{tf}` with no hash."""
+        db = str(tmp_path / "t.db")
+        r1 = self._make_result(window_label="1mo", window_days=30, return_pct=12.0)
+        record_deep_backtest_result("test_strat", r1, db_path=db)
+
+        versions = list_versions(strategy_name="test_strat", db_path=db)
+        assert len(versions) == 1
+        assert versions[0].version_slug == "margin_capped_L10_1h"
+        # No hash suffix — the slug has exactly 4 parts joined by "_"
+        assert len(versions[0].version_slug.split("_")) == 4

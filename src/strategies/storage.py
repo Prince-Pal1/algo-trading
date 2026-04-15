@@ -39,7 +39,6 @@ Public API:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sqlite3
@@ -76,7 +75,12 @@ _DEFAULT_DB_PATH = "data/trades.db"
 #   v3 (task #121, 2026-04-15): add strategies.killed_graveyard_id FK
 #   v4 (task #124, 2026-04-15): add strategy_versions.backtest_run_id FK
 #   v5 (task #123, 2026-04-15): add strategy_version_runs append-only history table
-_SCHEMA_VERSION = 5
+#   v6 (task #133, 2026-04-15): add strategy_versions.facets_json — per-(window,fee)
+#                               best-cell cache keyed by "{window_label}::{fee_profile}".
+#                               Unlocks the hierarchical Strategies page (Layer 1 fee
+#                               filter → Layer 2 window hero → Layer 3 mode hero → Layer 4
+#                               leverage×tf leaf) without N-way joins on every page load.
+_SCHEMA_VERSION = 6
 
 # Sanity thresholds for the max-return cell — a cell failing these flags is a
 # vanity trap (thin trade count, huge DD, or Calmar too weak). The future UI
@@ -241,11 +245,40 @@ def _migration_v5(conn: sqlite3.Connection) -> None:
         """)
 
 
+def _migration_v6(conn: sqlite3.Connection) -> None:
+    """v5 → v6: Per-(window,fee) facets cache (task #133).
+
+    Adds a `facets_json` TEXT column to `strategy_versions`. The column stores
+    a flat dict keyed by `"{window_label}::{fee_profile}"` where each value is
+    the best-cell payload (return_pct, trades, maxdd_pct, calmar, sharpe,
+    sane, warning, updated_at) selected from the matrix_df for that cell
+    group. Enables the hierarchical Strategies page to render:
+
+        Layer 1 (filter)  — fee profile dropdown
+        Layer 2 (🏆 hero)  — window time-frame, picked across all strategies
+        Layer 3 (⭐ hero)  — strategy + leverage_mode, picked across leverage×tf
+        Layer 4 (leaf)    — (leverage, candle_tf) rows with vanity warnings
+
+    Design rationale:
+        - Flat key structure so adding a new window or fee profile is a plain
+          dict insert — zero schema churn.
+        - Values embed `sane` + `warning` so the UI renders vanity badges
+          without re-computing from matrix_df on every page load.
+        - `updated_at` per-facet tracks keep-best provenance across re-runs.
+
+    Backwards-compat: existing rows get NULL, which `_parse_json(s, {})`
+    turns into an empty dict on read. Old code paths are unaffected.
+    """
+    if not _column_exists(conn, "strategy_versions", "facets_json"):
+        conn.execute("ALTER TABLE strategy_versions ADD COLUMN facets_json TEXT")
+
+
 _MIGRATIONS: dict[int, "callable"] = {
     2: _migration_v2,
     3: _migration_v3,
     4: _migration_v4,
     5: _migration_v5,
+    6: _migration_v6,
 }
 
 
@@ -339,6 +372,13 @@ class StoredVersion:
     # Schema v4: nullable link to backtest_runs. Populated by Stage 2 code
     # that has scripts/backtest.py run also capture into storage.
     backtest_run_id: int | None = None
+    # Schema v6 (task #133): per-(window,fee) facets cache for the
+    # hierarchical Strategies page. Flat dict keyed by
+    # `"{window_label}::{fee_profile}"`. Empty dict when the row has never
+    # seen a deep_backtest run (parent metadata-only rows from CLI register).
+    # Each value is a dict with {return_pct, maxdd_pct, calmar, trades, sane,
+    # warning, updated_at, ...}.
+    facets: dict[str, dict] = field(default_factory=dict)
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -519,6 +559,8 @@ def _version_to_row(v: StoredVersion) -> dict:
         "wf_profitable_folds": v.wf_profitable_folds,
         # Schema v4 — optional FK to backtest_runs
         "backtest_run_id": v.backtest_run_id,
+        # Schema v6 — per-(window,fee) facets cache
+        "facets_json": json.dumps(v.facets) if v.facets else None,
     }
 
 
@@ -560,6 +602,7 @@ def _row_to_version(row: sqlite3.Row) -> StoredVersion:
         wf_n_folds=_opt("wf_n_folds"),
         wf_profitable_folds=_opt("wf_profitable_folds"),
         backtest_run_id=_opt("backtest_run_id"),
+        facets=_parse_json(_opt("facets_json"), {}) or {},
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -568,66 +611,289 @@ def _row_to_version(row: sqlite3.Row) -> StoredVersion:
 # ── Version slug generation ─────────────────────────────────────────────
 
 
-def _params_hash(params: dict | None) -> str:
-    """Canonical 6-char sha1 of a params dict. Order-independent."""
-    return hashlib.sha1(
-        json.dumps(params or {}, sort_keys=True).encode()
-    ).hexdigest()[:6]
-
-
 def _generate_version_slug(
     leverage_mode: str | None,
     baseline_leverage: float | None,
     timeframe: str | None,
-    params: dict | None,
-    existing_versions: list["StoredVersion"],
+    params: dict | None = None,  # kept for API compat (unused)
+    existing_versions: list["StoredVersion"] | None = None,  # kept for API compat (unused)
 ) -> str:
-    """Deterministic slug with param-aware collision handling.
+    """Deterministic pure-triplet slug: `{mode}_L{int(baseline)}_{tf}`.
 
-    Base slug: `{mode}_L{int(baseline)}_{tf}` (e.g., `risk_scaled_L10_1h`).
+    Task #133 (2026-04-15): pure triplet — no params-hash suffix. Same
+    `(mode, leverage, tf)` → same slug → upsert-in-place. Re-tuning params
+    updates the same row (with keep-best semantics applied to top-level
+    metrics) instead of spawning a new hashed variant.
 
-    Idempotency contract:
-      - Same (mode, leverage, tf, params) → same slug → UPSERTs same row.
-      - Same (mode, leverage, tf) but different params → appends a 6-char
-        sha1(params) hash to the base slug to distinguish variants.
-      - A previously-hashed version with matching params gets reused.
+    Rationale: Prince explicitly asked for "no duplicates by window". The
+    former hash-suffix design (v1) created one row per params-hash, which
+    turned a single `deep_backtest` run with a few tweaks into an
+    ever-growing forest of near-duplicate slugs cluttering the Strategies
+    page. The pure-triplet design keeps the storage key aligned with the
+    dimensions the user actually thinks in: "margin_capped at L10 on 1h".
 
-    This means re-running `deep_backtest donchian_gold --leverage-mode
-    risk_scaled` with identical params hits the same row every time;
-    re-tuning params creates a new row with a distinct hash suffix.
+    Examples:
+        - `margin_capped_L10_1h`
+        - `invariant_L15_5m`
+        - `risk_scaled_L20_15m`
+        - `kelly_fractional_L10_30m`
+        - `1h` (pre-leverage-mode legacy; mode+leverage None)
+
+    The `params` and `existing_versions` kwargs are preserved for backwards
+    compatibility with earlier call sites and tests. They are ignored.
     """
-    parts = []
+    parts: list[str] = []
     if leverage_mode:
         parts.append(leverage_mode)
     if baseline_leverage is not None:
         parts.append(f"L{int(baseline_leverage)}")
     if timeframe:
         parts.append(timeframe)
-    base = "_".join(parts) if parts else "default"
+    return "_".join(parts) if parts else "default"
 
-    new_hash = _params_hash(params)
 
-    # Build a map of existing {slug: stored_params} for lookup
-    existing_by_slug: dict[str, dict | None] = {
-        v.version_slug: v.params for v in existing_versions
+def _generate_description(
+    leverage_mode: str | None,
+    baseline_leverage: float | None,
+    timeframe: str | None,
+) -> str:
+    """Human-readable version description auto-generated from config triplet.
+
+    Examples:
+        - `("margin_capped", 10, "1h")` → `"Margin Capped @ L10 · 1h"`
+        - `("invariant", 1, "5m")`      → `"Invariant @ L1 · 5m"`
+        - `("risk_scaled", 15, "15m")`  → `"Risk Scaled @ L15 · 15m"`
+        - `(None, None, "1h")`          → `"1h"`  (legacy / pre-leverage-mode)
+
+    Task #133: replaces the former docstring-derived description so version
+    rows always have a meaningful human label regardless of whether the
+    strategy class had a useful __doc__ first line.
+    """
+    if not leverage_mode and baseline_leverage is None and timeframe:
+        return timeframe
+    mode_label = (leverage_mode or "").replace("_", " ").title()
+    lev_label = f"L{int(baseline_leverage)}" if baseline_leverage is not None else ""
+    tf_label = timeframe or ""
+
+    pieces: list[str] = []
+    if mode_label:
+        pieces.append(mode_label)
+    if lev_label:
+        pieces.append(f"@ {lev_label}")
+    if tf_label:
+        pieces.append(f"· {tf_label}")
+    return " ".join(pieces) if pieces else "default"
+
+
+# ── Keep-best metric comparator + facets upsert (schema v6) ─────────────
+
+
+def _is_better_version_metric(new: dict, existing: dict | None) -> bool:
+    """Return True when `new` should replace `existing` under keep-best.
+
+    Tiebreak order (task #133, answered question 4 = (a) sane-first):
+        1. SANE wins over non-sane. A sane cell is ALWAYS preferred over an
+           insane one regardless of headline return, because an insane cell
+           with +340% on 4 trades and 89% DD is a vanity trap — shipping it
+           to the Strategies hero slot would mislead.
+        2. WF Calmar (continuous) wins when both rows have it. Walk-forward
+           is the OOS truth; in-sample return is marketing.
+        3. max_return_pct breaks the tie when neither WF Calmar is available
+           (or both are None). This is the explicit user-ask metric.
+
+    Both arguments are facet dicts (per-(window,fee) payloads). `existing`
+    may be None (first write for this key) — always True.
+    """
+    if existing is None:
+        return True
+
+    new_sane = bool(new.get("sane"))
+    old_sane = bool(existing.get("sane"))
+    if new_sane != old_sane:
+        return new_sane  # sane beats non-sane regardless of return
+
+    new_wf = new.get("wf_calmar")
+    old_wf = existing.get("wf_calmar")
+    if new_wf is not None and old_wf is not None:
+        return float(new_wf) > float(old_wf)
+    if new_wf is not None and old_wf is None:
+        return True  # WF data is strictly more trustworthy than no-WF
+    if new_wf is None and old_wf is not None:
+        return False
+
+    new_ret = new.get("return_pct")
+    old_ret = existing.get("return_pct")
+    if new_ret is None:
+        return False
+    if old_ret is None:
+        return True
+    return float(new_ret) > float(old_ret)
+
+
+def _compute_facets_from_matrix(
+    matrix_df: Any,
+    *,
+    wf_calmar: float | None = None,
+    verdict: str | None = None,
+    verdict_reason: str | None = None,
+    report_dir: str | None = None,
+    report_html_path: str | None = None,
+    ts: str | None = None,
+) -> dict[str, dict]:
+    """Group matrix rows by `(window_label, fee_profile)`, pick best-sane cell.
+
+    Produces the facets dict that gets merged into existing `facets_json` by
+    `_merge_facets`. Each facet value encodes everything the dashboard needs
+    to render a Layer 4 leaf + Layer 2/3 hero picks:
+
+        {
+            "window_days": int,
+            "window_label": str,
+            "fee_profile": str,
+            "trades": int,
+            "return_pct": float,
+            "maxdd_pct": float,
+            "calmar": float,
+            "sharpe": float,
+            "win_rate": float,
+            "profit_factor": float,
+            "sane": bool,
+            "warning": str,              # empty when sane
+            "wf_calmar": float | None,   # denormalized from DeepBacktestResult
+            "updated_at": str,           # ISO timestamp of the write
+        }
+
+    Sanity wins over headline return within each group: we prefer a 12% sane
+    cell over a 340% vanity cell for the SAME (window, fee). If ALL cells in
+    a group are insane, we still pick the max-return one so the UI has
+    something to show (with the warning badge surfacing the risk).
+    """
+    # Lazy-import the sanity helper to avoid any circular dependency risk.
+    from src.backtest.deep_backtest import _is_max_return_sane
+
+    if matrix_df is None or getattr(matrix_df, "empty", True):
+        return {}
+
+    ts = ts or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    facets: dict[str, dict] = {}
+
+    # Drop all-NaN return rows (engine error cells)
+    clean = matrix_df.dropna(subset=["return_pct"])
+    if clean.empty:
+        return {}
+
+    # Group by (window_label, fee_profile) — the two dimensions that anchor
+    # the hierarchical Strategies page. Leverage and timeframe are INSIDE
+    # the group because they distinguish Layer 4 leaves.
+    grouped = clean.groupby(["window_label", "fee_profile"])
+    for (window_label, fee_profile), grp in grouped:
+        # Sort by sanity-first then return: the top row is the keep-best
+        # winner for this (window, fee) group.
+        rows = [dict(r._asdict()) if hasattr(r, "_asdict") else dict(r)
+                for _, r in grp.iterrows()]
+        best_row: dict | None = None
+        for r in rows:
+            candidate = {
+                "window_days": int(r["window_days"]),
+                "window_label": str(r["window_label"]),
+                "fee_profile": str(r["fee_profile"]),
+                "timeframe": str(r["timeframe"]),
+                "leverage": float(r["leverage"]),
+                "trades": int(r["trades"]),
+                "return_pct": float(r["return_pct"]),
+                "maxdd_pct": float(r["maxdd_pct"]),
+                "calmar": float(r["calmar"]),
+                "sharpe": float(r["sharpe"]),
+                "win_rate": float(r["win_rate"]),
+                "profit_factor": float(r["profit_factor"]),
+            }
+            sane_flag, warning = _is_max_return_sane(candidate)
+            candidate["sane"] = sane_flag
+            candidate["warning"] = warning or ""
+            candidate["wf_calmar"] = wf_calmar
+            # Facet provenance — carries the run-level context of the cell
+            # so the top-level hero picker never drifts from the cell's
+            # original verdict/report when a later worse-params re-run
+            # overwrites the row with stale context.
+            candidate["verdict"] = verdict
+            candidate["verdict_reason"] = verdict_reason
+            candidate["report_dir"] = report_dir
+            candidate["report_html_path"] = report_html_path
+            candidate["updated_at"] = ts
+            if _is_better_version_metric(candidate, best_row):
+                best_row = candidate
+        if best_row is not None:
+            key = f"{window_label}::{fee_profile}"
+            facets[key] = best_row
+
+    return facets
+
+
+def _merge_facets(
+    existing: dict[str, dict],
+    new: dict[str, dict],
+) -> dict[str, dict]:
+    """Merge new facets into existing under keep-best semantics (per key).
+
+    Non-destructive: keys present only in `existing` survive untouched.
+    Keys present only in `new` get added. Keys in both get compared via
+    `_is_better_version_metric` and the winner is kept.
+
+    This is the core "same config re-run updates in place, with keep-best"
+    behavior that task #133 MUST preserve.
+    """
+    merged: dict[str, dict] = dict(existing or {})
+    for key, new_facet in (new or {}).items():
+        old_facet = merged.get(key)
+        if _is_better_version_metric(new_facet, old_facet):
+            merged[key] = new_facet
+    return merged
+
+
+def _top_level_from_facets(facets: dict[str, dict]) -> dict[str, Any]:
+    """Pick the hero facet across ALL windows+fees to populate top-level metrics.
+
+    Returns a dict with keys suitable for splatting into a StoredVersion
+    update: max_return_pct, max_return_cell, max_return_sane,
+    max_return_warning, best_calmar, best_calmar_cell,
+    best_calmar_return_pct.
+
+    Sanity-first + WF-Calmar-first + max-return-fallback, same as
+    `_is_better_version_metric`. This function is the SINGLE call site for
+    "given a facets dict, which cell is the overall winner?". The dashboard
+    reads top-level columns directly (no JSON parsing) for the headline
+    rollup, so the write path populates them here.
+    """
+    if not facets:
+        return {}
+    hero: dict | None = None
+    for facet in facets.values():
+        if _is_better_version_metric(facet, hero):
+            hero = facet
+    if hero is None:
+        return {}
+    return {
+        "max_return_pct": hero.get("return_pct"),
+        "max_return_cell": {
+            k: hero[k]
+            for k in ("window_days", "window_label", "timeframe", "leverage",
+                      "fee_profile", "trades", "return_pct", "maxdd_pct",
+                      "calmar", "sharpe", "win_rate", "profit_factor")
+            if k in hero
+        },
+        "max_return_sane": hero.get("sane"),
+        "max_return_warning": hero.get("warning") or None,
+        "best_calmar": hero.get("calmar"),
+        "best_calmar_return_pct": hero.get("return_pct"),
+        # Hero-cell provenance — verdict + report paths come from the
+        # winning cell's original run, not the latest re-run. This keeps
+        # keep-best semantics end-to-end: if a later worse-params run
+        # overwrites the row, the kept facet's verdict survives.
+        "verdict": hero.get("verdict"),
+        "verdict_reason": hero.get("verdict_reason"),
+        "report_dir": hero.get("report_dir"),
+        "report_html_path": hero.get("report_html_path"),
     }
-
-    # Case 1: base slug doesn't exist yet → use it directly
-    if base not in existing_by_slug:
-        return base
-
-    # Case 2: base slug exists. Compare params.
-    existing_params = existing_by_slug[base]
-    if _params_hash(existing_params) == new_hash:
-        # Same params as the existing base-slug row → reuse (idempotent re-run)
-        return base
-
-    # Case 3: base slug exists with different params. Try the hashed variant.
-    hashed_slug = f"{base}_{new_hash}"
-    # Idempotent re-check: if a hashed variant with matching params exists, reuse.
-    if hashed_slug in existing_by_slug and _params_hash(existing_by_slug[hashed_slug]) == new_hash:
-        return hashed_slug
-    return hashed_slug
 
 
 # ── Public API — upsert ─────────────────────────────────────────────────
@@ -728,7 +994,7 @@ def upsert_version(
                     best_calmar_cell_json,
                     wf_continuous_return_pct, wf_continuous_dd_pct,
                     wf_continuous_calmar, wf_gate_passed, wf_n_folds,
-                    wf_profitable_folds, backtest_run_id
+                    wf_profitable_folds, backtest_run_id, facets_json
                 ) VALUES (
                     :strategy_id, :version_slug, :description, :params_json,
                     :leverage_mode, :baseline_leverage, :timeframe, :tags_json,
@@ -739,7 +1005,7 @@ def upsert_version(
                     :best_calmar_cell_json,
                     :wf_continuous_return_pct, :wf_continuous_dd_pct,
                     :wf_continuous_calmar, :wf_gate_passed, :wf_n_folds,
-                    :wf_profitable_folds, :backtest_run_id
+                    :wf_profitable_folds, :backtest_run_id, :facets_json
                 )
                 ON CONFLICT (strategy_id, version_slug) DO UPDATE SET
                     description            = COALESCE(excluded.description, description),
@@ -769,6 +1035,7 @@ def upsert_version(
                     wf_n_folds               = COALESCE(excluded.wf_n_folds, wf_n_folds),
                     wf_profitable_folds      = COALESCE(excluded.wf_profitable_folds, wf_profitable_folds),
                     backtest_run_id          = COALESCE(excluded.backtest_run_id, backtest_run_id),
+                    facets_json              = COALESCE(excluded.facets_json, facets_json),
                     updated_at             = datetime('now')
                 """,
                 row,
@@ -1094,26 +1361,37 @@ def record_deep_backtest_result(
     Called by `run_deep_backtest()` after `write_report()`. Wrapped in a
     try/except at the call site so storage failures never break the pipeline.
 
-    The version row captures:
-      - the max-return cell from the matrix (user's explicit G.8 ask)
-      - the existing best-Calmar cell (for completeness)
-      - the verdict + verdict_reason
-      - relative paths to the report_dir, index.html, summary.json
+    Task #133 rewrite — facets-aware, keep-best, pure-triplet slug:
+
+      1. Resolve `(leverage_mode, baseline_leverage, timeframe)` from the
+         config. These form the pure-triplet slug — same config re-run hits
+         the same row every time.
+      2. Compute a new facets dict from `result.matrix_df`, grouped by
+         `(window_label, fee_profile)`, sanity-first + return-ranked within
+         each group. Each facet embeds `wf_calmar` (from DeepBacktestResult.
+         walk_forward.continuous_calmar) so the Strategies hero picker has
+         OOS truth available without a second query.
+      3. Read the existing row (if any) and merge facets under keep-best:
+         sane-first → WF Calmar → max_return_pct. Keys present only in
+         existing survive untouched (cross-window persistence across re-runs).
+      4. Pick top-level hero across all (window,fee) facets to populate
+         `max_return_pct`, `max_return_cell`, etc., using the SAME comparator
+         so the top-level and facets payloads are always consistent.
+      5. Auto-generate description from the triplet
+         (`"Margin Capped @ L10 · 1h"`) replacing the former docstring-derived
+         description which was often empty or stale.
+      6. Write. Append a run history row to `strategy_version_runs`.
+
+    The facets merge is monotonic across re-runs: a single row accumulates
+    one facet per (window, fee) cell the user has ever tested against it,
+    always holding the best result across runs. This is the "organised" +
+    "new heroes without hindering backtesting" behavior Prince explicitly
+    asked for — the write path itself runs a full hero recompute and the
+    Dashboard just reads the precomputed columns.
 
     Returns (strategy_id, version_id).
     """
-    # Lazy-import to break any potential circular reference.
-    from src.backtest.deep_backtest import _compute_max_return_cell, _is_max_return_sane
-
     strategy_name, inst = _resolve_strategy(strategy)
-
-    # Extract description from the first line of the strategy's docstring, if
-    # any — prevents DB/docstring drift (Rule 1: single source of truth).
-    description = None
-    if inst is not None and getattr(inst, "__doc__", None):
-        doc = (type(inst).__doc__ or "").strip()
-        if doc:
-            description = doc.split("\n", 1)[0].strip()
 
     base_class = type(inst).__name__ if inst is not None else None
     tier = None
@@ -1129,10 +1407,19 @@ def record_deep_backtest_result(
         except Exception:
             lev_range = None
 
+    # Parent description: still prefer the strategy __doc__ first line so
+    # families surfaced on the rollup table retain their human-written
+    # summary. Per-version description comes from the triplet (below).
+    parent_description = None
+    if inst is not None and getattr(inst, "__doc__", None):
+        doc = (type(inst).__doc__ or "").strip()
+        if doc:
+            parent_description = doc.split("\n", 1)[0].strip()
+
     parent = StoredStrategy(
         name=strategy_name,
         display_name=strategy_name,
-        description=description,
+        description=parent_description,
         base_class=base_class,
         tier=tier,
         markets=markets,
@@ -1141,25 +1428,6 @@ def record_deep_backtest_result(
         status="researching",
     )
     strategy_id = upsert_strategy(parent, db_path=db_path)
-
-    # Max-return cell + sanity flag from the matrix DataFrame.
-    max_cell = _compute_max_return_cell(getattr(result, "matrix_df", None))
-    sane, warning = _is_max_return_sane(max_cell)
-
-    # Best-Calmar cell — use the existing DeepBacktestResult.best_cell so we
-    # keep feature parity with the verdict logic.
-    best_calmar_cell = None
-    best_calmar_val = None
-    best_calmar_return_pct = None
-    bc = getattr(result, "best_cell", None)
-    if bc is not None:
-        try:
-            from dataclasses import asdict as _asdict
-            best_calmar_cell = _asdict(bc)
-        except Exception:
-            best_calmar_cell = None
-        best_calmar_val = getattr(bc, "calmar", None)
-        best_calmar_return_pct = getattr(bc, "return_pct", None)
 
     # Config-level fields for slug generation + version metadata.
     config = getattr(result, "config", None)
@@ -1177,37 +1445,8 @@ def record_deep_backtest_result(
             timeframe = tfs[0]
         params = getattr(config, "strategy_params", None)
 
-    # Determine the slug. Honor `config.version_slug` if set (task #120
-    # `--version-slug` CLI override). Otherwise auto-generate from
-    # (mode, leverage, tf, params) with collision fallback.
-    existing = list_versions(strategy_name=strategy_name, db_path=db_path)
-    explicit_slug = getattr(config, "version_slug", None) if config is not None else None
-    if explicit_slug:
-        slug = explicit_slug
-    else:
-        slug = _generate_version_slug(
-            leverage_mode=lev_mode_val,
-            baseline_leverage=baseline_leverage,
-            timeframe=timeframe,
-            params=params,
-            existing_versions=existing,
-        )
-
-    # Paths — store relative to repo root.
-    report_dir = getattr(result, "report_dir", None)
-    report_dir_rel = _to_relative(report_dir) if report_dir is not None else None
-    html_path_rel = None
-    summary_path_rel = None
-    if report_dir is not None:
-        report_dir_path = Path(report_dir)
-        html_path = report_dir_path / "index.html"
-        summary_path = report_dir_path / "summary.json"
-        if html_path.exists():
-            html_path_rel = _to_relative(html_path)
-        if summary_path.exists():
-            summary_path_rel = _to_relative(summary_path)
-
-    # Walk-forward denormalization (schema v2).
+    # Walk-forward denormalization (schema v2) — computed first so it can
+    # flow into the facets as `wf_calmar`.
     wf = getattr(result, "walk_forward", None)
     wf_ret = wf_dd = wf_calmar = None
     wf_gate = wf_nf = wf_prof = None
@@ -1220,33 +1459,108 @@ def record_deep_backtest_result(
         wf_nf = getattr(wf, "n_folds", None)
         wf_prof = getattr(wf, "profitable_folds", None)
 
+    # Determine the slug. Honor `config.version_slug` if set (task #120
+    # `--version-slug` CLI override). Otherwise auto-generate from the pure
+    # triplet — no params hash, no collision fallback.
+    explicit_slug = getattr(config, "version_slug", None) if config is not None else None
+    if explicit_slug:
+        slug = explicit_slug
+    else:
+        slug = _generate_version_slug(
+            leverage_mode=lev_mode_val,
+            baseline_leverage=baseline_leverage,
+            timeframe=timeframe,
+        )
+
+    # Auto-generated description from the triplet. Always set — overwrites
+    # any previous description on re-run (semantic is stable by design).
+    description = _generate_description(
+        leverage_mode=lev_mode_val,
+        baseline_leverage=baseline_leverage,
+        timeframe=timeframe,
+    )
+
+    # Read the existing version row (if any) to merge facets under keep-best.
+    # First-write path: `existing_version` is None, existing_facets is {}.
+    existing_version = get_version(
+        strategy_name=strategy_name,
+        version_slug=slug,
+        db_path=db_path,
+    )
+    existing_facets: dict[str, dict] = (
+        existing_version.facets if existing_version is not None else {}
+    )
+
+    # Paths (current run) — store relative to repo root. Embedded in each
+    # facet so the hero cell's report_html_path travels with the winning cell.
+    current_report_dir = getattr(result, "report_dir", None)
+    current_report_dir_rel = _to_relative(current_report_dir) if current_report_dir is not None else None
+    current_html_path_rel = None
+    current_summary_path_rel = None
+    if current_report_dir is not None:
+        _rdp = Path(current_report_dir)
+        _hp = _rdp / "index.html"
+        _sp = _rdp / "summary.json"
+        if _hp.exists():
+            current_html_path_rel = _to_relative(_hp)
+        if _sp.exists():
+            current_summary_path_rel = _to_relative(_sp)
+
+    # Compute new facets from matrix_df — each facet is stamped with the
+    # CURRENT run's verdict + report paths. When keep-best later picks a
+    # cell from a previous run, that cell's original verdict + report
+    # travel with it via `_top_level_from_facets`.
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    current_verdict = getattr(result, "verdict", None)
+    current_verdict_reason = getattr(result, "verdict_reason", None)
+    new_facets = _compute_facets_from_matrix(
+        getattr(result, "matrix_df", None),
+        wf_calmar=wf_calmar,
+        verdict=current_verdict,
+        verdict_reason=current_verdict_reason,
+        report_dir=current_report_dir_rel,
+        report_html_path=current_html_path_rel,
+        ts=ts,
+    )
+
+    # Keep-best merge: per (window, fee), pick the better facet.
+    merged_facets = _merge_facets(existing_facets, new_facets)
+
+    # Top-level hero across the merged facets (sane-first → WF → return).
+    # verdict + report paths come from the winning cell's provenance, so a
+    # later worse-params re-run does NOT stomp the good row with stale
+    # verdict or a broken report path.
+    top_level = _top_level_from_facets(merged_facets)
+
     version = StoredVersion(
         strategy_id=strategy_id,
         version_slug=slug,
+        description=description,
         params=params,
         leverage_mode=lev_mode_val,
         baseline_leverage=baseline_leverage,
         timeframe=timeframe,
-        last_backtested_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        report_dir=report_dir_rel,
-        report_html_path=html_path_rel,
-        summary_json_path=summary_path_rel,
-        verdict=getattr(result, "verdict", None),
-        verdict_reason=getattr(result, "verdict_reason", None),
+        last_backtested_at=ts,
+        report_dir=top_level.get("report_dir") or current_report_dir_rel,
+        report_html_path=top_level.get("report_html_path") or current_html_path_rel,
+        summary_json_path=current_summary_path_rel,
+        verdict=top_level.get("verdict") or current_verdict,
+        verdict_reason=top_level.get("verdict_reason") or current_verdict_reason,
         matrix_n_cells=len(getattr(result, "matrix", []) or []),
-        max_return_pct=max_cell.get("return_pct") if max_cell else None,
-        max_return_cell=max_cell or None,
-        max_return_sane=sane if max_cell else None,
-        max_return_warning=warning or None,
-        best_calmar=best_calmar_val,
-        best_calmar_return_pct=best_calmar_return_pct,
-        best_calmar_cell=best_calmar_cell,
+        max_return_pct=top_level.get("max_return_pct"),
+        max_return_cell=top_level.get("max_return_cell"),
+        max_return_sane=top_level.get("max_return_sane"),
+        max_return_warning=top_level.get("max_return_warning"),
+        best_calmar=top_level.get("best_calmar"),
+        best_calmar_return_pct=top_level.get("best_calmar_return_pct"),
+        best_calmar_cell=top_level.get("max_return_cell"),
         wf_continuous_return_pct=wf_ret,
         wf_continuous_dd_pct=wf_dd,
         wf_continuous_calmar=wf_calmar,
         wf_gate_passed=wf_gate,
         wf_n_folds=wf_nf,
         wf_profitable_folds=wf_prof,
+        facets=merged_facets,
     )
     version_id = upsert_version(version, db_path=db_path)
 
