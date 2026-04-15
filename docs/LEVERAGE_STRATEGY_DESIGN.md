@@ -294,7 +294,31 @@ As of 2026-04-15 (task #114):
 - ✅ VOL_TARGETED mode — `LeverageMode.VOL_TARGETED` passthrough (strategy's own vol scalar handles sizing in `vol_momentum_gold`)
 - ✅ **RISK_SCALED mode — task #114** — `_apply_leverage_mode()` transforms `max_risk_per_trade` to `base × (L / baseline_leverage)`. Linear return amplification demonstrated: donchian_gold L=10 → +21.62%, L=20 → +45.87% (2.12× linear, 8 trades each).
 - ✅ **KELLY_FRACTIONAL mode — task #114** — Computes `f* = (b×p - q) / b` from `kelly_win_rate` + `kelly_payoff_ratio`, multiplies by `kelly_fraction` (default 0.5 = half-Kelly). **Hard-capped at 0.25 absolute risk_pct** to prevent full-Kelly blowups (§4.1 of the research report).
-- ❌ DRAWDOWN_BUDGETED mode — **deferred**. Requires per-bar equity-curve state that doesn't fit the single-pass matrix model. Can be added when the framework gets per-bar hooks.
+- ❌ DRAWDOWN_BUDGETED mode — **deferred (task #128 architectural blocker recorded 2026-04-15)**. See §7.1 below.
+
+### §7.1 — DRAWDOWN_BUDGETED — architectural blocker (task #128)
+
+The mode would scale `risk_pct` based on **realized portfolio drawdown** from the rolling peak: when DD approaches a configured budget (e.g., 20%), shrink position size to lengthen the recovery runway. This is the most powerful capital-protection sizing rule in the prop-firm playbook (Tradeify, FTMO, Alpha Capital all enforce variants).
+
+**Why it's blocked from the current matrix model:**
+
+The existing `_apply_leverage_mode()` in `src/backtest/deep_backtest.py` runs **once at strategy construction time** — it transforms `strategy_params["max_risk_per_trade"]` BEFORE the engine starts processing bars. RISK_SCALED and KELLY_FRACTIONAL fit cleanly into this hook because they're "static" computations: they don't depend on observed equity. DRAWDOWN_BUDGETED is the opposite — `risk_pct(t)` depends on `equity(t)` from the engine, which doesn't exist at construction time and isn't surfaced to strategies between bars.
+
+**What's needed (the unblock work):**
+
+1. **Engine equity sampling hook**: `LeveragedBacktestEngine` needs to expose a callback like `on_bar_close(equity, peak_equity, drawdown_pct) → None` that fires on every bar. Strategies subscribe to it via a new `BaseStrategy.on_equity_update()` method.
+2. **Dynamic re-sizing in `BaseStrategy`**: a base-class helper `_compute_dd_scaled_risk_pct(current_dd, budget_pct, alarm_pct, base_risk_pct) → float` that strategies call inside their signal handler before sizing.
+3. **A new `DrawdownBudgetedSizer` mixin** that wraps any existing strategy and re-routes its `position_size()` through the dd-aware computation.
+4. **DeepBacktestConfig fields**: `dd_budget_pct: float`, `dd_alarm_pct: float`, `dd_min_size_floor: float` (the minimum % of base sizing the strategy will scale down to).
+5. **Phase 2.5 validation**: a hand-trace assertion that DRAWDOWN_BUDGETED at L=10 with budget=20%, alarm=10% produces sizing that drops to ~50% of base when simulated DD = 10%.
+
+**Why we're not doing it now:**
+
+- It's a multi-day engine refactor with cascading changes through `BaseStrategy`, the leveraged engine, all 3 gold strategy classes, and the Phase 2.5 validator
+- The current alternatives (RISK_SCALED + Phase 2.5 hard limits + manual stop-out) cover the same risk-management goal in 90% of cases
+- The engine refactor would surface the same hook API needed for **task #78 (G.6 ML adaptive leverage governor)** which is also Phase 5 work — bundling them makes more sense than building the engine hook for one consumer first
+
+**Tracking**: task #128 stays `pending` until the engine equity-sampling hook lands. When that hook is built, DRAWDOWN_BUDGETED implementation becomes a 200-LOC follow-up against the existing `_apply_leverage_mode` shape. **Do not** add `DRAWDOWN_BUDGETED` to the `LeverageMode` enum until the engine hook is ready — adding it half-implemented would break the Phase 2.5 zero-tolerance contract.
 
 The feature ships with an **interactive TUI** (`src/backtest/deep_backtest_interactive.py`) that prompts the user to tick-select windows / timeframes / fees / leverages / leverage modes via `questionary` before the backtest runs. Falls back to CLI-flag behavior when `questionary` isn't available or stdout isn't a TTY. Multi-mode runs write to separate report directories.
 

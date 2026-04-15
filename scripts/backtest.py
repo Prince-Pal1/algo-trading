@@ -35,7 +35,36 @@ from src.utils.types import Signal, SignalAction
 
 
 # ---------------------------------------------------------------------------
-# Strategy Registry — maps catalog IDs to (factory, indicators)
+# CLI Backtest Presets — maps preset IDs to (factory, indicators)
+# ---------------------------------------------------------------------------
+#
+# DESIGN NOTE (task #125 G.8 consolidation, 2026-04-15):
+# This module has TWO related-but-distinct registries:
+#
+#   src/strategies/router.py::STRATEGY_REGISTRY (canonical class registry)
+#     dict[str, type[BaseStrategy]]
+#     Maps strategy KEYS to BaseStrategy CLASSES. Used by the engine, by
+#     ConfigRouter, and by deep_backtest for class-name lookup. Strategies
+#     register themselves at module import time via `register_strategy()`.
+#
+#   scripts/backtest.py::BACKTEST_PRESETS (this module — CLI preset library)
+#     dict[str, dict]
+#     Maps PRESET IDs (e.g., "bb_rsi_mr_opt", "bb_rsi_mr_vpin") to
+#     {"factory": lambda tf: <fully-configured strategy instance>,
+#      "indicators": [list of indicator keys to precompute]}
+#     A "preset" is a single strategy CLASS pre-configured with a specific
+#     parameter combination. Multiple presets can wrap the same class
+#     (bb_rsi_mr, bb_rsi_mr_opt, bb_rsi_mr_vpin all use BBRSIMeanRevStrategy).
+#
+# Why the two are NOT merged: they serve different abstractions. The router
+# registry answers "what STRATEGY CLASSES exist?". The CLI presets answer
+# "what FULLY-PARAMETERIZED variants does the unified backtest CLI support?".
+# Merging them would either lose the parameter sets (if collapsed to classes)
+# or push fully-configured factory lambdas into router.py (which the engine
+# doesn't need and shouldn't import).
+#
+# `STRATEGY_REGISTRY` is kept as a backward-compat alias of `BACKTEST_PRESETS`
+# below for legacy importers (scripts/gold_backtest.py).
 # ---------------------------------------------------------------------------
 
 class SMACrossoverStrategy(BaseStrategy):
@@ -63,7 +92,7 @@ class SMACrossoverStrategy(BaseStrategy):
         return None
 
 
-STRATEGY_REGISTRY: dict[str, dict] = {
+BACKTEST_PRESETS: dict[str, dict] = {
     "sma_crossover": {
         "factory": lambda tf: SMACrossoverStrategy(timeframe=tf),
         "indicators": ["sma_10", "sma_20"],
@@ -185,6 +214,15 @@ STRATEGY_REGISTRY: dict[str, dict] = {
         "indicators": [],
     },
 }
+
+
+# Backward-compat alias — see DESIGN NOTE above. Legacy importers
+# (scripts/gold_backtest.py) import `STRATEGY_REGISTRY` from this module.
+# New code should reference `BACKTEST_PRESETS` directly. This alias is NOT
+# the same thing as `src/strategies/router.py::STRATEGY_REGISTRY`, which is
+# the canonical class registry — see the comment block above the BACKTEST_PRESETS
+# definition for the disambiguation.
+STRATEGY_REGISTRY = BACKTEST_PRESETS
 
 
 # ---------------------------------------------------------------------------

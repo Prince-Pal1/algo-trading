@@ -197,6 +197,12 @@ class DeepBacktestConfig:
     generate_html: bool = True
     generate_heatmaps: bool = True
 
+    # Strategy storage (task #120 G.8) — when set, the storage auto-capture
+    # hook uses this exact slug instead of the auto-generated
+    # `{mode}_L{int(baseline)}_{tf}` (+ optional hash). Useful for naming
+    # variants explicitly (e.g., "donchian_gold_optimized_v2").
+    version_slug: str | None = None
+
     # Misc
     progress: bool = True              # print phase progress
     fail_fast: bool = True             # abort on phase errors

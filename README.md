@@ -693,9 +693,10 @@ Both servers are registered in `~/.claude.json` under `mcpServers`. Claude picks
 
 ## Tested & proven
 
-**Test suite:** 1233 tests passing on `feat/gold-refactor`. Includes:
+**Test suite:** 1276 tests passing on `feat/gold-refactor`. Includes:
 
 - 50 deep_backtest framework tests (task #112 + #114 + #115 + #79)
+- 43 strategy storage tests (task #117 + #118-#130 follow-up sweep)
 - 7 leverage invariance tests (task #110)
 - 20 TV parity tests (task #104)
 - 11 M3S leverage tests (task #67)

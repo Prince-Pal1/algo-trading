@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -48,8 +49,34 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+
+def _resolve_default_db() -> str:
+    """Read the default DB path with env-var override.
+
+    Tests set `ALGO_STRATEGY_DB` (typically via conftest.py autouse fixture)
+    to route test writes to an isolated tmp DB, preventing pollution of the
+    real `data/trades.db` when the deep_backtest auto-capture hook fires
+    inside a test run.
+    """
+    return os.environ.get("ALGO_STRATEGY_DB", "data/trades.db")
+
+
+# Default db path resolved at call time so tests that set ALGO_STRATEGY_DB
+# in a pytest fixture are honored without needing to pass db_path to every
+# helper explicitly. Functions that accept db_path as a kwarg default to this
+# function's return value via `or _resolve_default_db()`.
 _DEFAULT_DB_PATH = "data/trades.db"
-_SCHEMA_VERSION = 1
+# Bump this constant when adding any ALTER TABLE migration. The `_apply_migrations`
+# runner checks `PRAGMA user_version` and runs the delta from the current stored
+# version up to _SCHEMA_VERSION, committing after each step.
+#
+# Schema history:
+#   v1 (task #117, 2026-04-15): initial strategies + strategy_versions tables
+#   v2 (task #119, 2026-04-15): add wf_* walk-forward denormalized columns
+#   v3 (task #121, 2026-04-15): add strategies.killed_graveyard_id FK
+#   v4 (task #124, 2026-04-15): add strategy_versions.backtest_run_id FK
+#   v5 (task #123, 2026-04-15): add strategy_version_runs append-only history table
+_SCHEMA_VERSION = 5
 
 # Sanity thresholds for the max-return cell — a cell failing these flags is a
 # vanity trap (thin trade count, huge DD, or Calmar too weak). The future UI
@@ -113,6 +140,137 @@ CREATE INDEX IF NOT EXISTS idx_strategies_status  ON strategies(status);
 """
 
 
+# ── Migration registry ───────────────────────────────────────────────────
+#
+# Each migration takes an open connection and runs the delta from the prior
+# version. Keyed by TARGET version (e.g., `2` means "take us from v1 to v2").
+# Migrations are idempotent-safe by design — they use `ALTER TABLE ... ADD
+# COLUMN` which SQLite tolerates across repeat runs via _column_exists checks.
+#
+# Rule: new migrations NEVER modify or delete existing columns in-place. SQLite
+# ALTER TABLE has strict limitations (no DROP COLUMN until 3.35, no TYPE
+# change). For destructive changes, create a new-named column + backfill +
+# leave the old column for a release before dropping. Forward-compat first.
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == column for r in rows)
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _migration_v2(conn: sqlite3.Connection) -> None:
+    """v1 → v2: Walk-forward denormalization (task #119).
+
+    Denormalizes the walk_forward.continuous_* metrics onto strategy_versions
+    so the future Streamlit page can sort/filter by WF Calmar without re-reading
+    each summary.json off disk. Three new columns.
+    """
+    if not _column_exists(conn, "strategy_versions", "wf_continuous_return_pct"):
+        conn.execute("ALTER TABLE strategy_versions ADD COLUMN wf_continuous_return_pct REAL")
+    if not _column_exists(conn, "strategy_versions", "wf_continuous_dd_pct"):
+        conn.execute("ALTER TABLE strategy_versions ADD COLUMN wf_continuous_dd_pct REAL")
+    if not _column_exists(conn, "strategy_versions", "wf_continuous_calmar"):
+        conn.execute("ALTER TABLE strategy_versions ADD COLUMN wf_continuous_calmar REAL")
+    if not _column_exists(conn, "strategy_versions", "wf_gate_passed"):
+        conn.execute("ALTER TABLE strategy_versions ADD COLUMN wf_gate_passed TEXT")
+    if not _column_exists(conn, "strategy_versions", "wf_n_folds"):
+        conn.execute("ALTER TABLE strategy_versions ADD COLUMN wf_n_folds INTEGER")
+    if not _column_exists(conn, "strategy_versions", "wf_profitable_folds"):
+        conn.execute("ALTER TABLE strategy_versions ADD COLUMN wf_profitable_folds INTEGER")
+
+
+def _migration_v3(conn: sqlite3.Connection) -> None:
+    """v2 → v3: Graveyard linkage (task #121).
+
+    Adds a nullable FK from strategies to strategy_graveyard. When a strategy
+    is killed, `kill_strategy()` flips status to 'killed' and sets this FK so
+    the Streamlit page can cross-link parent rows to their obituary without
+    a second query.
+    """
+    if not _column_exists(conn, "strategies", "killed_graveyard_id"):
+        conn.execute("ALTER TABLE strategies ADD COLUMN killed_graveyard_id INTEGER")
+
+
+def _migration_v4(conn: sqlite3.Connection) -> None:
+    """v3 → v4: Link strategy_versions to backtest_runs (task #124).
+
+    Adds a nullable FK from strategy_versions to the existing backtest_runs
+    table. Populated by Stage 2 code that has strategies.py register also
+    capture into ResultStore. MVP leaves this NULL; the column exists so the
+    future Streamlit page can deep-link a version to the individual-run
+    equity curve + trade ledger in the existing dashboard.
+    """
+    if not _column_exists(conn, "strategy_versions", "backtest_run_id"):
+        conn.execute("ALTER TABLE strategy_versions ADD COLUMN backtest_run_id INTEGER")
+
+
+def _migration_v5(conn: sqlite3.Connection) -> None:
+    """v4 → v5: Append-only strategy_version_runs history table (task #123).
+
+    One row per `run_deep_backtest()` call. Lets the Streamlit page show "3
+    runs on this version over the past month" + detect regressions ("version
+    X regressed from +140% to +12% between runs"). The `strategy_versions`
+    row still holds the latest snapshot; this table holds the history.
+    """
+    if not _table_exists(conn, "strategy_version_runs"):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS strategy_version_runs (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                version_id        INTEGER NOT NULL REFERENCES strategy_versions(id),
+                run_timestamp     TEXT NOT NULL,
+                report_dir        TEXT,
+                report_html_path  TEXT,
+                summary_json_path TEXT,
+                verdict           TEXT,
+                max_return_pct    REAL,
+                max_return_sane   INTEGER,
+                best_calmar       REAL,
+                matrix_n_cells    INTEGER,
+                created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_runs_version ON strategy_version_runs(version_id);
+            CREATE INDEX IF NOT EXISTS idx_runs_timestamp ON strategy_version_runs(run_timestamp);
+        """)
+
+
+_MIGRATIONS: dict[int, "callable"] = {
+    2: _migration_v2,
+    3: _migration_v3,
+    4: _migration_v4,
+    5: _migration_v5,
+}
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """Run pending migrations up to `_SCHEMA_VERSION`.
+
+    Reads `PRAGMA user_version` (SQLite's per-db integer), runs every
+    migration whose key is > current, and bumps `user_version` after each.
+    Idempotent: re-running after a full migration is a no-op.
+    """
+    current = conn.execute("PRAGMA user_version").fetchone()[0]
+    for version in sorted(_MIGRATIONS.keys()):
+        if version > current:
+            _MIGRATIONS[version](conn)
+            conn.execute(f"PRAGMA user_version = {version}")
+            conn.commit()
+            current = version
+    # Even if no migrations ran, ensure user_version reflects the current
+    # schema version so a v1 DB that was created before migrations existed
+    # gets stamped.
+    if current < _SCHEMA_VERSION:
+        conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+        conn.commit()
+
+
 # ── Dataclasses ─────────────────────────────────────────────────────────
 
 
@@ -132,6 +290,9 @@ class StoredStrategy:
     leverage_range: list[float] | None = None
     status: str = "researching"
     tags: list[str] = field(default_factory=list)
+    # Schema v3: graveyard linkage. Populated by `kill_strategy()` when a
+    # strategy lands in the graveyard. None for living strategies.
+    killed_graveyard_id: int | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -167,6 +328,17 @@ class StoredVersion:
     best_calmar: float | None = None
     best_calmar_return_pct: float | None = None
     best_calmar_cell: dict | None = None
+    # Schema v2: walk-forward denormalization. Populated from
+    # result.walk_forward.continuous_* when WF ran for this backtest.
+    wf_continuous_return_pct: float | None = None
+    wf_continuous_dd_pct: float | None = None
+    wf_continuous_calmar: float | None = None
+    wf_gate_passed: str | None = None
+    wf_n_folds: int | None = None
+    wf_profitable_folds: int | None = None
+    # Schema v4: nullable link to backtest_runs. Populated by Stage 2 code
+    # that has scripts/backtest.py run also capture into storage.
+    backtest_run_id: int | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -174,8 +346,12 @@ class StoredVersion:
 # ── Connection management ───────────────────────────────────────────────
 
 
-def _connect(db_path: str) -> sqlite3.Connection:
+def _connect(db_path: str | None = None) -> sqlite3.Connection:
     """Open an SQLite connection with WAL + FK pragmas + schema install.
+
+    If `db_path` is None, reads `ALGO_STRATEGY_DB` env var (tests set this via
+    conftest.py to route writes to a tmp DB), falling back to the module
+    default "data/trades.db".
 
     Mirrors `graveyard._connect` shape but layers in production-grade pragmas
     the graveyard punts on:
@@ -183,6 +359,8 @@ def _connect(db_path: str) -> sqlite3.Connection:
         writes mid-run and the dashboard holds readers on the same file.
       - foreign_keys=ON enforces the strategy_versions.strategy_id FK.
     """
+    if db_path is None:
+        db_path = _resolve_default_db()
     if db_path != ":memory:":
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
@@ -195,6 +373,9 @@ def _connect(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.executescript(_STORAGE_SCHEMA)
     conn.commit()
+    # Apply any pending ALTER TABLE migrations to bring the schema up to
+    # _SCHEMA_VERSION. Idempotent — safe to call on every connect.
+    _apply_migrations(conn)
     return conn
 
 
@@ -279,10 +460,12 @@ def _strategy_to_row(s: StoredStrategy) -> dict:
         "leverage_range_json": json.dumps(s.leverage_range) if s.leverage_range else None,
         "status": s.status,
         "tags_json": json.dumps(s.tags) if s.tags else None,
+        "killed_graveyard_id": s.killed_graveyard_id,
     }
 
 
 def _row_to_strategy(row: sqlite3.Row) -> StoredStrategy:
+    keys = set(row.keys())
     return StoredStrategy(
         id=row["id"],
         name=row["name"],
@@ -297,6 +480,7 @@ def _row_to_strategy(row: sqlite3.Row) -> StoredStrategy:
         leverage_range=_parse_json(row["leverage_range_json"], None),
         status=row["status"],
         tags=_parse_json(row["tags_json"], []),
+        killed_graveyard_id=row["killed_graveyard_id"] if "killed_graveyard_id" in keys else None,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -326,11 +510,25 @@ def _version_to_row(v: StoredVersion) -> dict:
         "best_calmar": v.best_calmar,
         "best_calmar_return_pct": v.best_calmar_return_pct,
         "best_calmar_cell_json": json.dumps(v.best_calmar_cell) if v.best_calmar_cell else None,
+        # Schema v2 — WF denormalization
+        "wf_continuous_return_pct": v.wf_continuous_return_pct,
+        "wf_continuous_dd_pct": v.wf_continuous_dd_pct,
+        "wf_continuous_calmar": v.wf_continuous_calmar,
+        "wf_gate_passed": v.wf_gate_passed,
+        "wf_n_folds": v.wf_n_folds,
+        "wf_profitable_folds": v.wf_profitable_folds,
+        # Schema v4 — optional FK to backtest_runs
+        "backtest_run_id": v.backtest_run_id,
     }
 
 
 def _row_to_version(row: sqlite3.Row) -> StoredVersion:
-    sane_int = row["max_return_sane"]
+    keys = set(row.keys())
+
+    def _opt(col: str, default: Any = None) -> Any:
+        return row[col] if col in keys else default
+
+    sane_int = _opt("max_return_sane")
     return StoredVersion(
         id=row["id"],
         strategy_id=row["strategy_id"],
@@ -355,6 +553,13 @@ def _row_to_version(row: sqlite3.Row) -> StoredVersion:
         best_calmar=row["best_calmar"],
         best_calmar_return_pct=row["best_calmar_return_pct"],
         best_calmar_cell=_parse_json(row["best_calmar_cell_json"], None),
+        wf_continuous_return_pct=_opt("wf_continuous_return_pct"),
+        wf_continuous_dd_pct=_opt("wf_continuous_dd_pct"),
+        wf_continuous_calmar=_opt("wf_continuous_calmar"),
+        wf_gate_passed=_opt("wf_gate_passed"),
+        wf_n_folds=_opt("wf_n_folds"),
+        wf_profitable_folds=_opt("wf_profitable_folds"),
+        backtest_run_id=_opt("backtest_run_id"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -431,7 +636,7 @@ def _generate_version_slug(
 def upsert_strategy(
     stored: StoredStrategy,
     *,
-    db_path: str = _DEFAULT_DB_PATH,
+    db_path: str | None = None,
 ) -> int:
     """INSERT-or-UPDATE a parent strategy row. Idempotent on `name`.
 
@@ -452,11 +657,11 @@ def upsert_strategy(
                 INSERT INTO strategies (
                     name, display_name, description, family, category, tier,
                     base_class, markets_json, default_timeframe,
-                    leverage_range_json, status, tags_json
+                    leverage_range_json, status, tags_json, killed_graveyard_id
                 ) VALUES (
                     :name, :display_name, :description, :family, :category, :tier,
                     :base_class, :markets_json, :default_timeframe,
-                    :leverage_range_json, :status, :tags_json
+                    :leverage_range_json, :status, :tags_json, :killed_graveyard_id
                 )
                 ON CONFLICT (name) DO UPDATE SET
                     display_name        = COALESCE(excluded.display_name, display_name),
@@ -470,6 +675,7 @@ def upsert_strategy(
                     leverage_range_json = COALESCE(excluded.leverage_range_json, leverage_range_json),
                     status              = COALESCE(excluded.status, status),
                     tags_json           = COALESCE(excluded.tags_json, tags_json),
+                    killed_graveyard_id = COALESCE(excluded.killed_graveyard_id, killed_graveyard_id),
                     updated_at          = datetime('now')
                 """,
                 row,
@@ -492,7 +698,7 @@ def upsert_strategy(
 def upsert_version(
     stored: StoredVersion,
     *,
-    db_path: str = _DEFAULT_DB_PATH,
+    db_path: str | None = None,
 ) -> int:
     """INSERT-or-UPDATE a version row. Idempotent on (strategy_id, version_slug).
 
@@ -519,7 +725,10 @@ def upsert_version(
                     summary_json_path, verdict, verdict_reason, matrix_n_cells,
                     max_return_pct, max_return_cell_json, max_return_sane,
                     max_return_warning, best_calmar, best_calmar_return_pct,
-                    best_calmar_cell_json
+                    best_calmar_cell_json,
+                    wf_continuous_return_pct, wf_continuous_dd_pct,
+                    wf_continuous_calmar, wf_gate_passed, wf_n_folds,
+                    wf_profitable_folds, backtest_run_id
                 ) VALUES (
                     :strategy_id, :version_slug, :description, :params_json,
                     :leverage_mode, :baseline_leverage, :timeframe, :tags_json,
@@ -527,7 +736,10 @@ def upsert_version(
                     :summary_json_path, :verdict, :verdict_reason, :matrix_n_cells,
                     :max_return_pct, :max_return_cell_json, :max_return_sane,
                     :max_return_warning, :best_calmar, :best_calmar_return_pct,
-                    :best_calmar_cell_json
+                    :best_calmar_cell_json,
+                    :wf_continuous_return_pct, :wf_continuous_dd_pct,
+                    :wf_continuous_calmar, :wf_gate_passed, :wf_n_folds,
+                    :wf_profitable_folds, :backtest_run_id
                 )
                 ON CONFLICT (strategy_id, version_slug) DO UPDATE SET
                     description            = COALESCE(excluded.description, description),
@@ -550,6 +762,13 @@ def upsert_version(
                     best_calmar            = COALESCE(excluded.best_calmar, best_calmar),
                     best_calmar_return_pct = COALESCE(excluded.best_calmar_return_pct, best_calmar_return_pct),
                     best_calmar_cell_json  = COALESCE(excluded.best_calmar_cell_json, best_calmar_cell_json),
+                    wf_continuous_return_pct = COALESCE(excluded.wf_continuous_return_pct, wf_continuous_return_pct),
+                    wf_continuous_dd_pct     = COALESCE(excluded.wf_continuous_dd_pct, wf_continuous_dd_pct),
+                    wf_continuous_calmar     = COALESCE(excluded.wf_continuous_calmar, wf_continuous_calmar),
+                    wf_gate_passed           = COALESCE(excluded.wf_gate_passed, wf_gate_passed),
+                    wf_n_folds               = COALESCE(excluded.wf_n_folds, wf_n_folds),
+                    wf_profitable_folds      = COALESCE(excluded.wf_profitable_folds, wf_profitable_folds),
+                    backtest_run_id          = COALESCE(excluded.backtest_run_id, backtest_run_id),
                     updated_at             = datetime('now')
                 """,
                 row,
@@ -573,7 +792,7 @@ def upsert_version(
 def get_strategy(
     name: str,
     *,
-    db_path: str = _DEFAULT_DB_PATH,
+    db_path: str | None = None,
 ) -> StoredStrategy | None:
     conn = _connect(db_path)
     try:
@@ -589,7 +808,7 @@ def get_version(
     strategy_name: str,
     version_slug: str,
     *,
-    db_path: str = _DEFAULT_DB_PATH,
+    db_path: str | None = None,
 ) -> StoredVersion | None:
     conn = _connect(db_path)
     try:
@@ -610,7 +829,7 @@ def list_strategies(
     *,
     status: str | None = None,
     family: str | None = None,
-    db_path: str = _DEFAULT_DB_PATH,
+    db_path: str | None = None,
 ) -> list[StoredStrategy]:
     conn = _connect(db_path)
     try:
@@ -632,11 +851,167 @@ def list_strategies(
         conn.close()
 
 
+def list_version_runs(
+    *,
+    version_id: int | None = None,
+    strategy_name: str | None = None,
+    version_slug: str | None = None,
+    limit: int | None = None,
+    db_path: str | None = None,
+) -> list[dict]:
+    """Read history rows from `strategy_version_runs` (schema v5).
+
+    Filters: specific version_id, OR (strategy_name, version_slug) pair for
+    lookup by name. Returns dicts (not a dataclass — history rows are
+    append-only audit records, not mutable entities).
+    """
+    conn = _connect(db_path)
+    try:
+        where: list[str] = []
+        params: list[Any] = []
+        sql = (
+            "SELECT r.*, s.name AS strategy_name, v.version_slug "
+            "FROM strategy_version_runs r "
+            "JOIN strategy_versions v ON v.id = r.version_id "
+            "JOIN strategies s ON s.id = v.strategy_id"
+        )
+        if version_id is not None:
+            where.append("r.version_id = ?")
+            params.append(version_id)
+        if strategy_name is not None:
+            where.append("s.name = ?")
+            params.append(strategy_name)
+        if version_slug is not None:
+            where.append("v.version_slug = ?")
+            params.append(version_slug)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY r.run_timestamp DESC, r.id DESC"
+        if limit is not None:
+            sql += f" LIMIT {int(limit)}"
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def query_best_by_max_return(
+    *,
+    verdict: str | None = None,
+    limit: int = 10,
+    db_path: str | None = None,
+) -> list[StoredVersion]:
+    """JSON1 helper (task #129) — rank all versions by max_return_pct.
+
+    Optional filter by verdict (e.g., verdict='DEPLOYABLE' for "best among
+    deployable candidates"). Returns the top N sorted descending.
+    """
+    conn = _connect(db_path)
+    try:
+        sql = (
+            "SELECT v.* FROM strategy_versions v "
+            "JOIN strategies s ON s.id = v.strategy_id "
+            "WHERE v.max_return_pct IS NOT NULL"
+        )
+        params: list[Any] = []
+        if verdict is not None:
+            sql += " AND v.verdict = ?"
+            params.append(verdict)
+        sql += f" ORDER BY v.max_return_pct DESC LIMIT {int(limit)}"
+        return [_row_to_version(r) for r in conn.execute(sql, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def query_deployable_by_calmar(
+    *,
+    use_wf_calmar: bool = True,
+    limit: int = 10,
+    db_path: str | None = None,
+) -> list[StoredVersion]:
+    """JSON1 helper (task #129) — DEPLOYABLE versions sorted by Calmar.
+
+    If `use_wf_calmar` (default), sorts by `wf_continuous_calmar` (the OOS
+    metric that matters for deployment). Falls back to `best_calmar` (matrix
+    best) when no WF was run.
+    """
+    calmar_col = "wf_continuous_calmar" if use_wf_calmar else "best_calmar"
+    conn = _connect(db_path)
+    try:
+        sql = (
+            f"SELECT v.* FROM strategy_versions v "
+            f"WHERE v.verdict = 'DEPLOYABLE' AND v.{calmar_col} IS NOT NULL "
+            f"ORDER BY v.{calmar_col} DESC LIMIT {int(limit)}"
+        )
+        return [_row_to_version(r) for r in conn.execute(sql).fetchall()]
+    finally:
+        conn.close()
+
+
+def query_vanity_traps(
+    *,
+    db_path: str | None = None,
+) -> list[StoredVersion]:
+    """JSON1 helper (task #129) — vanity-trap detector.
+
+    Returns versions where the max-return cell fails the sanity flag but the
+    verdict is still DEPLOYABLE. These are cells where the headline number
+    (+340% return) is driven by a thin trade count, huge drawdown, or low
+    Calmar — a misleading "win" that would embarrass us on live capital.
+
+    Use to audit the strategy storage for suspicious DEPLOYABLE verdicts
+    before promoting anything to paper trading.
+    """
+    conn = _connect(db_path)
+    try:
+        sql = (
+            "SELECT v.* FROM strategy_versions v "
+            "WHERE v.max_return_sane = 0 "
+            "  AND v.verdict = 'DEPLOYABLE' "
+            "ORDER BY v.max_return_pct DESC"
+        )
+        return [_row_to_version(r) for r in conn.execute(sql).fetchall()]
+    finally:
+        conn.close()
+
+
+def kill_strategy(
+    name: str,
+    graveyard_id: int,
+    *,
+    db_path: str | None = None,
+) -> None:
+    """Flip a strategy row to status='killed' + set `killed_graveyard_id` FK.
+
+    Decoupled from `graveyard.record_kill()` so the two modules remain
+    independent. Call this from a script or the strategies CLI after landing
+    a row in the graveyard. No-op if the strategy doesn't exist (creates
+    nothing — use `upsert_strategy` first if needed).
+    """
+    conn = _connect(db_path)
+    try:
+        def _do():
+            conn.execute(
+                """
+                UPDATE strategies
+                SET status = 'killed',
+                    killed_graveyard_id = ?,
+                    updated_at = datetime('now')
+                WHERE name = ?
+                """,
+                (graveyard_id, name),
+            )
+            conn.commit()
+
+        _retry_on_busy(_do)
+    finally:
+        conn.close()
+
+
 def list_versions(
     *,
     strategy_name: str | None = None,
     verdict: str | None = None,
-    db_path: str = _DEFAULT_DB_PATH,
+    db_path: str | None = None,
 ) -> list[StoredVersion]:
     conn = _connect(db_path)
     try:
@@ -712,7 +1087,7 @@ def record_deep_backtest_result(
     strategy: Any,
     result: Any,
     *,
-    db_path: str = _DEFAULT_DB_PATH,
+    db_path: str | None = None,
 ) -> tuple[int, int]:
     """Upsert a parent strategy row + a version row for one deep_backtest run.
 
@@ -802,17 +1177,21 @@ def record_deep_backtest_result(
             timeframe = tfs[0]
         params = getattr(config, "strategy_params", None)
 
-    # Determine the slug after checking collisions against existing versions.
-    # Pass full version records so the slug generator can compare params
-    # and reuse the same slug on idempotent re-runs.
+    # Determine the slug. Honor `config.version_slug` if set (task #120
+    # `--version-slug` CLI override). Otherwise auto-generate from
+    # (mode, leverage, tf, params) with collision fallback.
     existing = list_versions(strategy_name=strategy_name, db_path=db_path)
-    slug = _generate_version_slug(
-        leverage_mode=lev_mode_val,
-        baseline_leverage=baseline_leverage,
-        timeframe=timeframe,
-        params=params,
-        existing_versions=existing,
-    )
+    explicit_slug = getattr(config, "version_slug", None) if config is not None else None
+    if explicit_slug:
+        slug = explicit_slug
+    else:
+        slug = _generate_version_slug(
+            leverage_mode=lev_mode_val,
+            baseline_leverage=baseline_leverage,
+            timeframe=timeframe,
+            params=params,
+            existing_versions=existing,
+        )
 
     # Paths — store relative to repo root.
     report_dir = getattr(result, "report_dir", None)
@@ -827,6 +1206,19 @@ def record_deep_backtest_result(
             html_path_rel = _to_relative(html_path)
         if summary_path.exists():
             summary_path_rel = _to_relative(summary_path)
+
+    # Walk-forward denormalization (schema v2).
+    wf = getattr(result, "walk_forward", None)
+    wf_ret = wf_dd = wf_calmar = None
+    wf_gate = wf_nf = wf_prof = None
+    if wf is not None:
+        wf_ret = getattr(wf, "continuous_return_pct", None)
+        wf_dd = getattr(wf, "continuous_dd_pct", None)
+        wf_calmar = getattr(wf, "continuous_calmar", None)
+        gp = getattr(wf, "continuous_gate_passed", None)
+        wf_gate = str(gp) if gp is not None else None
+        wf_nf = getattr(wf, "n_folds", None)
+        wf_prof = getattr(wf, "profitable_folds", None)
 
     version = StoredVersion(
         strategy_id=strategy_id,
@@ -849,6 +1241,71 @@ def record_deep_backtest_result(
         best_calmar=best_calmar_val,
         best_calmar_return_pct=best_calmar_return_pct,
         best_calmar_cell=best_calmar_cell,
+        wf_continuous_return_pct=wf_ret,
+        wf_continuous_dd_pct=wf_dd,
+        wf_continuous_calmar=wf_calmar,
+        wf_gate_passed=wf_gate,
+        wf_n_folds=wf_nf,
+        wf_profitable_folds=wf_prof,
     )
     version_id = upsert_version(version, db_path=db_path)
+
+    # Schema v5: append-only run history
+    _append_version_run(
+        version_id=version_id,
+        version=version,
+        db_path=db_path,
+    )
+
     return strategy_id, version_id
+
+
+def _append_version_run(
+    *,
+    version_id: int,
+    version: StoredVersion,
+    db_path: str | None = None,
+) -> int:
+    """Append one row to `strategy_version_runs` — the history table (schema v5).
+
+    Called inside `record_deep_backtest_result` after the version row UPSERT.
+    Each call creates a new row (no dedup) so the history table is a true
+    append-only audit log of "every deep_backtest run that ever completed for
+    this version".
+
+    Returns the new row id.
+    """
+    conn = _connect(db_path)
+    try:
+        def _do_insert():
+            cur = conn.execute(
+                """
+                INSERT INTO strategy_version_runs (
+                    version_id, run_timestamp, report_dir, report_html_path,
+                    summary_json_path, verdict, max_return_pct, max_return_sane,
+                    best_calmar, matrix_n_cells
+                ) VALUES (
+                    :version_id, :run_timestamp, :report_dir, :report_html_path,
+                    :summary_json_path, :verdict, :max_return_pct, :max_return_sane,
+                    :best_calmar, :matrix_n_cells
+                )
+                """,
+                {
+                    "version_id": version_id,
+                    "run_timestamp": version.last_backtested_at,
+                    "report_dir": version.report_dir,
+                    "report_html_path": version.report_html_path,
+                    "summary_json_path": version.summary_json_path,
+                    "verdict": version.verdict,
+                    "max_return_pct": version.max_return_pct,
+                    "max_return_sane": int(version.max_return_sane) if version.max_return_sane is not None else None,
+                    "best_calmar": version.best_calmar,
+                    "matrix_n_cells": version.matrix_n_cells,
+                },
+            )
+            conn.commit()
+            return cur.lastrowid or 0
+
+        return _retry_on_busy(_do_insert) or 0
+    finally:
+        conn.close()

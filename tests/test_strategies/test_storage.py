@@ -26,6 +26,7 @@ import pytest
 
 from src.backtest.deep_backtest import _compute_max_return_cell, _is_max_return_sane
 from src.strategies.storage import (
+    _SCHEMA_VERSION,
     StoredStrategy,
     StoredVersion,
     _connect,
@@ -33,8 +34,13 @@ from src.strategies.storage import (
     _retry_on_busy,
     get_strategy,
     get_version,
+    kill_strategy,
     list_strategies,
+    list_version_runs,
     list_versions,
+    query_best_by_max_return,
+    query_deployable_by_calmar,
+    query_vanity_traps,
     record_deep_backtest_result,
     upsert_strategy,
     upsert_version,
@@ -85,6 +91,18 @@ class _FakeLeverageMode:
 
 
 @dataclass
+class _FakeWalkForward:
+    """Minimal stand-in for WalkForwardSummary — just the continuous fields
+    the storage layer denormalizes."""
+    continuous_return_pct: float = 50.0
+    continuous_dd_pct: float = 8.0
+    continuous_calmar: float = 12.0
+    continuous_gate_passed: bool = True
+    n_folds: int = 6
+    profitable_folds: int = 5
+
+
+@dataclass
 class _FakeResult:
     config: _FakeConfig
     matrix_df: pd.DataFrame
@@ -93,6 +111,7 @@ class _FakeResult:
     report_dir: Path
     verdict: str = "NEEDS_WF"
     verdict_reason: str = "smoke test"
+    walk_forward: _FakeWalkForward | None = None
 
 
 def _make_matrix_df(rows: list[dict]) -> pd.DataFrame:
@@ -531,3 +550,271 @@ class TestRetryOnBusy:
         with pytest.raises(sqlite3.OperationalError, match="syntax"):
             _retry_on_busy(fn, attempts=3, backoff_ms=1)
         assert calls["n"] == 1  # no retries
+
+
+# ── Schema migrations (v2 → v5, tasks #119/#121/#124/#123) ──────────────
+
+
+class TestSchemaMigrations:
+    def test_pragma_user_version_stamped_after_connect(self, tmp_path):
+        """Fresh connect against an empty file stamps user_version to the
+        current _SCHEMA_VERSION so subsequent connects see a fully-migrated DB."""
+        db = str(tmp_path / "t.db")
+        conn = _connect(db)
+        try:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            assert version == _SCHEMA_VERSION
+        finally:
+            conn.close()
+
+    def test_migrations_idempotent_across_reconnects(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        _connect(db).close()
+        _connect(db).close()
+        # Schema + user_version should still be valid
+        conn = _connect(db)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
+        finally:
+            conn.close()
+
+    def test_v2_wf_columns_present(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        conn = _connect(db)
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(strategy_versions)").fetchall()}
+            for c in (
+                "wf_continuous_return_pct",
+                "wf_continuous_dd_pct",
+                "wf_continuous_calmar",
+                "wf_gate_passed",
+                "wf_n_folds",
+                "wf_profitable_folds",
+            ):
+                assert c in cols, f"expected {c} column"
+        finally:
+            conn.close()
+
+    def test_v3_killed_graveyard_id_column_present(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        conn = _connect(db)
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(strategies)").fetchall()}
+            assert "killed_graveyard_id" in cols
+        finally:
+            conn.close()
+
+    def test_v4_backtest_run_id_column_present(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        conn = _connect(db)
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(strategy_versions)").fetchall()}
+            assert "backtest_run_id" in cols
+        finally:
+            conn.close()
+
+    def test_v5_history_table_exists(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        conn = _connect(db)
+        try:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_version_runs'"
+            ).fetchone()
+            assert row is not None
+        finally:
+            conn.close()
+
+
+# ── Walk-forward denormalization (task #119) ────────────────────────────
+
+
+class TestWalkForwardDenormalization:
+    def _make_result_with_wf(self, tmp_path):
+        df = _make_matrix_df([_sample_row(return_pct=8.0, leverage=10)])
+        wf = _FakeWalkForward(
+            continuous_return_pct=142.3,
+            continuous_dd_pct=9.4,
+            continuous_calmar=11.7,
+            continuous_gate_passed=True,
+            n_folds=6,
+            profitable_folds=5,
+        )
+        return _FakeResult(
+            config=_FakeConfig(leverage_mode=_FakeLeverageMode("risk_scaled")),
+            matrix_df=df,
+            matrix=[1],
+            best_cell=_FakeCellResult(return_pct=8.0, leverage=10, calmar=13.3),
+            report_dir=tmp_path,
+            walk_forward=wf,
+        )
+
+    def test_wf_fields_populated_when_walk_forward_present(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        result = self._make_result_with_wf(tmp_path)
+        record_deep_backtest_result("wf_test_strat", result, db_path=db)
+        version = get_version("wf_test_strat", "risk_scaled_L10_1h", db_path=db)
+        assert version.wf_continuous_return_pct == 142.3
+        assert version.wf_continuous_dd_pct == 9.4
+        assert version.wf_continuous_calmar == 11.7
+        assert version.wf_gate_passed == "True"
+        assert version.wf_n_folds == 6
+        assert version.wf_profitable_folds == 5
+
+    def test_wf_fields_none_when_no_walk_forward(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        df = _make_matrix_df([_sample_row(return_pct=8.0, leverage=10)])
+        result = _FakeResult(
+            config=_FakeConfig(leverage_mode=_FakeLeverageMode("risk_scaled")),
+            matrix_df=df,
+            matrix=[1],
+            best_cell=_FakeCellResult(),
+            report_dir=tmp_path,
+            walk_forward=None,  # explicitly no WF
+        )
+        record_deep_backtest_result("no_wf_strat", result, db_path=db)
+        version = get_version("no_wf_strat", "risk_scaled_L10_1h", db_path=db)
+        assert version.wf_continuous_return_pct is None
+        assert version.wf_continuous_calmar is None
+        assert version.wf_gate_passed is None
+
+
+# ── Version-run history table (task #123) ──────────────────────────────
+
+
+class TestVersionRunHistory:
+    def test_each_record_call_appends_run_row(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        df = _make_matrix_df([_sample_row(return_pct=5.0)])
+        result = _FakeResult(
+            config=_FakeConfig(leverage_mode=_FakeLeverageMode("risk_scaled")),
+            matrix_df=df,
+            matrix=[1],
+            best_cell=_FakeCellResult(),
+            report_dir=tmp_path,
+        )
+        record_deep_backtest_result("hist_strat", result, db_path=db)
+        record_deep_backtest_result("hist_strat", result, db_path=db)
+        record_deep_backtest_result("hist_strat", result, db_path=db)
+
+        # Three runs should produce three history rows even though
+        # strategy_versions has a single row (idempotent UPSERT).
+        runs = list_version_runs(strategy_name="hist_strat", db_path=db)
+        assert len(runs) == 3
+        assert all(r["verdict"] == "NEEDS_WF" for r in runs)
+        versions = list_versions(strategy_name="hist_strat", db_path=db)
+        assert len(versions) == 1
+
+    def test_history_ordered_by_timestamp_desc(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        df = _make_matrix_df([_sample_row(return_pct=5.0)])
+        result = _FakeResult(
+            config=_FakeConfig(leverage_mode=_FakeLeverageMode("risk_scaled")),
+            matrix_df=df, matrix=[1],
+            best_cell=_FakeCellResult(),
+            report_dir=tmp_path,
+        )
+        record_deep_backtest_result("hist_strat", result, db_path=db)
+        record_deep_backtest_result("hist_strat", result, db_path=db)
+        runs = list_version_runs(strategy_name="hist_strat", db_path=db)
+        # Most recent first (both have same timestamp in fast test; id DESC tiebreaks)
+        assert runs[0]["id"] >= runs[1]["id"]
+
+
+# ── Graveyard linkage (task #121) ───────────────────────────────────────
+
+
+class TestKillStrategy:
+    def test_kill_sets_status_and_fk(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        upsert_strategy(StoredStrategy(name="dead_strat"), db_path=db)
+        kill_strategy("dead_strat", graveyard_id=42, db_path=db)
+        s = get_strategy("dead_strat", db_path=db)
+        assert s.status == "killed"
+        assert s.killed_graveyard_id == 42
+
+    def test_kill_nonexistent_is_noop(self, tmp_path):
+        """No-op when strategy doesn't exist — silently does nothing."""
+        db = str(tmp_path / "t.db")
+        kill_strategy("ghost_strat", graveyard_id=1, db_path=db)
+        assert get_strategy("ghost_strat", db_path=db) is None
+
+    def test_kill_preserves_other_fields(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        upsert_strategy(
+            StoredStrategy(name="dead_strat", description="notes", family="momentum"),
+            db_path=db,
+        )
+        kill_strategy("dead_strat", graveyard_id=5, db_path=db)
+        s = get_strategy("dead_strat", db_path=db)
+        assert s.description == "notes"
+        assert s.family == "momentum"
+        assert s.status == "killed"
+
+
+# ── JSON1 query helpers (task #129) ─────────────────────────────────────
+
+
+class TestQueryHelpers:
+    def _seed(self, db: str):
+        sid = upsert_strategy(StoredStrategy(name="foo"), db_path=db)
+        upsert_version(StoredVersion(
+            strategy_id=sid, version_slug="v1",
+            verdict="DEPLOYABLE", max_return_pct=50.0,
+            max_return_sane=True, best_calmar=10.0,
+            wf_continuous_calmar=8.0,
+        ), db_path=db)
+        upsert_version(StoredVersion(
+            strategy_id=sid, version_slug="v2",
+            verdict="DEPLOYABLE", max_return_pct=340.0,
+            max_return_sane=False, max_return_warning="only 4 trades",
+            best_calmar=0.1, wf_continuous_calmar=0.2,
+        ), db_path=db)
+        upsert_version(StoredVersion(
+            strategy_id=sid, version_slug="v3",
+            verdict="FAILED", max_return_pct=200.0,
+            max_return_sane=False,
+        ), db_path=db)
+
+    def test_query_best_by_max_return_orders_descending(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        self._seed(db)
+        results = query_best_by_max_return(db_path=db)
+        # v2 (+340%) → v3 (+200%) → v1 (+50%)
+        slugs = [v.version_slug for v in results]
+        assert slugs == ["v2", "v3", "v1"]
+
+    def test_query_best_by_max_return_verdict_filter(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        self._seed(db)
+        results = query_best_by_max_return(verdict="DEPLOYABLE", db_path=db)
+        slugs = [v.version_slug for v in results]
+        assert slugs == ["v2", "v1"]  # v3 is FAILED, excluded
+
+    def test_query_deployable_by_calmar_uses_wf_by_default(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        self._seed(db)
+        results = query_deployable_by_calmar(db_path=db)
+        # By WF Calmar: v1 (8.0) > v2 (0.2). v3 is FAILED.
+        slugs = [v.version_slug for v in results]
+        assert slugs == ["v1", "v2"]
+
+    def test_query_deployable_by_calmar_falls_back_to_best_calmar(self, tmp_path):
+        db = str(tmp_path / "t.db")
+        self._seed(db)
+        results = query_deployable_by_calmar(use_wf_calmar=False, db_path=db)
+        slugs = [v.version_slug for v in results]
+        assert slugs == ["v1", "v2"]  # best_calmar: 10.0 > 0.1
+
+    def test_query_vanity_traps_finds_unsafe_deployable(self, tmp_path):
+        """The critical safety query: DEPLOYABLE verdict with sane=False
+        max-return cell. These are the 'looks-great-but-actually-fragile'
+        misreads we need to audit before promoting to live capital."""
+        db = str(tmp_path / "t.db")
+        self._seed(db)
+        traps = query_vanity_traps(db_path=db)
+        # Only v2: DEPLOYABLE + max_return_sane=False (warning: "only 4 trades")
+        # v1 is DEPLOYABLE but sane=True → NOT a trap
+        # v3 is sane=False but FAILED → not a trap (already rejected)
+        assert len(traps) == 1
+        assert traps[0].version_slug == "v2"
+        assert traps[0].max_return_warning == "only 4 trades"

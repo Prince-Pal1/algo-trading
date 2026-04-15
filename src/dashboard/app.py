@@ -6,11 +6,14 @@ Usage:
     python -m scripts.dashboard
 
 Pages:
-    1. Catalog Browser — Browse all strategies, filter, sort
+    1. Backtest Runs — Browse all individual runs from result_store
     2. Strategy Deep Dive — Select a run → full metrics + charts
-    3. Compare Strategies — Side-by-side comparison of runs
-    4. Run Backtest — Run a strategy and see results live
-    5. Validation Dashboard — Protocol results overview
+    3. Compare Runs — Side-by-side comparison of runs
+    4. Imported Strategies — IR + generated code preview
+    5. Validation — Protocol overview
+    6. Strategies — Versioned registry from src/strategies/storage.py (task #122).
+       Per parent → click → see all version variants + max-return cell + verdict +
+       embedded HTML report viewer.
 """
 
 from __future__ import annotations
@@ -62,7 +65,14 @@ def _get_conn() -> sqlite3.Connection:
 st.sidebar.title("Algo Trading")
 page = st.sidebar.radio(
     "Navigation",
-    ["Backtest Runs", "Strategy Deep Dive", "Compare Runs", "Imported Strategies", "Validation"],
+    [
+        "Backtest Runs",
+        "Strategy Deep Dive",
+        "Compare Runs",
+        "Imported Strategies",
+        "Validation",
+        "Strategies",
+    ],
     index=0,
 )
 
@@ -369,3 +379,173 @@ elif page == "Validation":
     ])
 
     st.dataframe(protocols, use_container_width=True, hide_index=True)
+
+
+# ---------------------------------------------------------------------------
+# Page 6: Strategies — versioned registry (task #122 G.8)
+# ---------------------------------------------------------------------------
+
+elif page == "Strategies":
+    from dataclasses import asdict
+    from src.strategies.storage import (
+        list_strategies,
+        list_versions,
+        list_version_runs,
+        query_vanity_traps,
+        _to_absolute,
+    )
+
+    st.title("Strategies — versioned registry")
+    st.caption(
+        "Auto-populated from `run_deep_backtest()`. Each parent strategy → "
+        "its variants (different leverage modes, params, timeframes) → "
+        "max-return cell + walk-forward Calmar + clickable HTML report."
+    )
+
+    # ── Vanity-trap audit (front-and-center)
+    vanity = query_vanity_traps(db_path=_DB_PATH)
+    if vanity:
+        st.warning(
+            f"⚠️ {len(vanity)} vanity trap(s) detected — DEPLOYABLE versions "
+            f"with sane=False max-return cells. Audit before deploying live."
+        )
+        with st.expander(f"View {len(vanity)} vanity trap(s)"):
+            vanity_rows = [
+                {
+                    "slug": v.version_slug,
+                    "max_return_pct": v.max_return_pct,
+                    "warning": v.max_return_warning,
+                    "verdict": v.verdict,
+                    "report_dir": v.report_dir,
+                }
+                for v in vanity
+            ]
+            st.dataframe(pd.DataFrame(vanity_rows), use_container_width=True, hide_index=True)
+
+    # ── Parent strategy selector
+    strategies = list_strategies(db_path=_DB_PATH)
+    if not strategies:
+        st.info(
+            "No strategies in storage yet. Run a deep_backtest to auto-populate, "
+            "or use `python3 scripts/strategies.py register <name>` to stub one. "
+            "Run `python3 scripts/strategies_backfill.py` to import existing reports."
+        )
+    else:
+        # Headline table
+        st.subheader("All strategies")
+        rollups = []
+        for s in strategies:
+            versions = list_versions(strategy_name=s.name, db_path=_DB_PATH)
+            best = None
+            for v in versions:
+                if v.max_return_pct is not None:
+                    if best is None or v.max_return_pct > (best.max_return_pct or -1e18):
+                        best = v
+            last_bt = max(
+                (v.last_backtested_at for v in versions if v.last_backtested_at),
+                default="never",
+            )
+            rollups.append({
+                "name": s.name,
+                "family": s.family or "—",
+                "tier": s.tier or "—",
+                "status": s.status,
+                "versions": len(versions),
+                "last_backtested": last_bt[:10] if last_bt != "never" else "never",
+                "best_max_return_pct": best.max_return_pct if best else None,
+                "best_sane": "✓" if (best is None or best.max_return_sane is None or best.max_return_sane) else "⚠",
+            })
+        st.dataframe(pd.DataFrame(rollups), use_container_width=True, hide_index=True)
+
+        # ── Strategy detail
+        st.markdown("---")
+        st.subheader("Strategy detail")
+        picked = st.selectbox("Pick a strategy", [s.name for s in strategies])
+        s = next(s for s in strategies if s.name == picked)
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Status", s.status)
+        with col2:
+            st.metric("Family", s.family or "—")
+        with col3:
+            st.metric("Tier", s.tier or "—")
+        if s.description:
+            st.markdown(f"_{s.description}_")
+        if s.markets:
+            st.markdown(f"**Markets:** {', '.join(s.markets)}")
+        if s.leverage_range:
+            st.markdown(f"**Leverage range:** {s.leverage_range[0]:g}–{s.leverage_range[1]:g}x")
+
+        # ── Versions table
+        versions = list_versions(strategy_name=s.name, db_path=_DB_PATH)
+        if not versions:
+            st.info(f"No versions for {s.name}. Run deep_backtest to auto-populate.")
+        else:
+            st.markdown(f"### Versions ({len(versions)})")
+            version_rows = []
+            for v in versions:
+                cell = v.max_return_cell or {}
+                version_rows.append({
+                    "slug": v.version_slug,
+                    "verdict": v.verdict or "—",
+                    "max_return_pct": v.max_return_pct,
+                    "max_dd_pct": cell.get("maxdd_pct"),
+                    "calmar": cell.get("calmar"),
+                    "wf_calmar": v.wf_continuous_calmar,
+                    "wf_return_pct": v.wf_continuous_return_pct,
+                    "trades": cell.get("trades"),
+                    "sane": "✓" if v.max_return_sane else ("⚠" if v.max_return_sane is False else "—"),
+                    "last_backtested": (v.last_backtested_at or "")[:10],
+                })
+            st.dataframe(pd.DataFrame(version_rows), use_container_width=True, hide_index=True)
+
+            # ── Embedded report viewer
+            st.markdown("### View deep_backtest HTML report")
+            picked_slug = st.selectbox(
+                "Pick a version",
+                [v.version_slug for v in versions],
+                key=f"version_picker_{s.name}",
+            )
+            v = next(v for v in versions if v.version_slug == picked_slug)
+            if v.max_return_warning:
+                st.warning(f"⚠ Max-return cell vanity flag: **{v.max_return_warning}**")
+            if v.verdict_reason:
+                st.caption(f"Verdict reason: {v.verdict_reason}")
+
+            if v.report_html_path:
+                abs_html = _to_absolute(v.report_html_path)
+                if abs_html and abs_html.exists():
+                    try:
+                        html_content = abs_html.read_text()
+                        st.components.v1.html(html_content, height=900, scrolling=True)
+                    except Exception as e:
+                        st.error(f"Failed to render HTML: {e}")
+                else:
+                    st.error(f"HTML file not found at {abs_html}")
+            else:
+                st.info("No HTML report path on this version (run deep_backtest with --no-html?)")
+
+            # ── Run history for this version
+            history = list_version_runs(
+                strategy_name=s.name,
+                version_slug=picked_slug,
+                limit=50,
+                db_path=_DB_PATH,
+            )
+            if len(history) > 1:
+                with st.expander(f"Run history ({len(history)} runs)"):
+                    st.dataframe(
+                        pd.DataFrame([
+                            {
+                                "run_timestamp": (h.get("run_timestamp") or "")[:19],
+                                "verdict": h.get("verdict"),
+                                "max_return_pct": h.get("max_return_pct"),
+                                "best_calmar": h.get("best_calmar"),
+                                "matrix_n_cells": h.get("matrix_n_cells"),
+                            }
+                            for h in history
+                        ]),
+                        use_container_width=True,
+                        hide_index=True,
+                    )

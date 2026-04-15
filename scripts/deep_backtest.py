@@ -163,6 +163,11 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--risk-pct-param", default="max_risk_per_trade",
                    help="Strategy kwarg that holds risk_pct (default: max_risk_per_trade)")
 
+    # Strategy storage (task #120)
+    p.add_argument("--version-slug", default=None,
+                   help="Explicit slug for the strategy_versions row "
+                        "(default: auto-generated as {mode}_L{baseline}_{tf})")
+
     # Interactive TUI
     p.add_argument("--non-interactive", "-y", action="store_true",
                    help="Skip all interactive prompts, use defaults for unspecified dimensions")
@@ -237,6 +242,7 @@ def _build_fallback_config(args: argparse.Namespace) -> DeepBacktestConfig:
         generate_pdf=not args.no_pdf,
         generate_heatmaps=not args.no_heatmaps,
         progress=not args.quiet,
+        version_slug=getattr(args, "version_slug", None),
     )
 
 
