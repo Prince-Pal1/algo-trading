@@ -276,16 +276,18 @@ See the full research report at [`reports/leverage_strategy_research_2026-04-15.
 
 ## 7. Implementation status
 
-As of 2026-04-15:
+As of 2026-04-15 (task #114):
 
-- ✅ INVARIANT mode (inherent in engine, no code needed)
-- ✅ MARGIN_CAPPED mode (inherent in engine, no code needed)
-- ✅ VOL_TARGETED mode (implemented in `vol_momentum_gold` strategy)
-- ❌ RISK_SCALED mode — **pending Step 2 plan** (task #113 follow-up)
-- ❌ KELLY_FRACTIONAL mode — **pending Step 2 plan** (task #113 follow-up)
-- ❌ DRAWDOWN_BUDGETED mode — partially in `Compounder.target_leverage`; full implementation **pending Step 2 plan**
+- ✅ INVARIANT mode — `LeverageMode.INVARIANT` passthrough in `src/backtest/deep_backtest.py`
+- ✅ MARGIN_CAPPED mode — `LeverageMode.MARGIN_CAPPED` (default, preserves pre-task-#114 behavior)
+- ✅ VOL_TARGETED mode — `LeverageMode.VOL_TARGETED` passthrough (strategy's own vol scalar handles sizing in `vol_momentum_gold`)
+- ✅ **RISK_SCALED mode — task #114** — `_apply_leverage_mode()` transforms `max_risk_per_trade` to `base × (L / baseline_leverage)`. Linear return amplification demonstrated: donchian_gold L=10 → +21.62%, L=20 → +45.87% (2.12× linear, 8 trades each).
+- ✅ **KELLY_FRACTIONAL mode — task #114** — Computes `f* = (b×p - q) / b` from `kelly_win_rate` + `kelly_payoff_ratio`, multiplies by `kelly_fraction` (default 0.5 = half-Kelly). **Hard-capped at 0.25 absolute risk_pct** to prevent full-Kelly blowups (§4.1 of the research report).
+- ❌ DRAWDOWN_BUDGETED mode — **deferred**. Requires per-bar equity-curve state that doesn't fit the single-pass matrix model. Can be added when the framework gets per-bar hooks.
 
-The Step 2 plan will add the `LeverageMode` enum to `src/backtest/deep_backtest.py` along with `_apply_leverage_mode()` transform, mode-aware Phase 2 sanity checks, mode-aware verdict gates, and CLI flags. See the research report §8 for the full implementation checklist.
+The feature ships with an **interactive TUI** (`src/backtest/deep_backtest_interactive.py`) that prompts the user to tick-select windows / timeframes / fees / leverages / leverage modes via `questionary` before the backtest runs. Falls back to CLI-flag behavior when `questionary` isn't available or stdout isn't a TTY. Multi-mode runs write to separate report directories.
+
+Invocation: `PYTHONPATH=. python3 scripts/deep_backtest.py <strategy>` (fully interactive) or with `--non-interactive` + explicit flags for CI use.
 
 ---
 

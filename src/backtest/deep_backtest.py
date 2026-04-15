@@ -40,6 +40,7 @@ import math
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
@@ -66,8 +67,40 @@ DATA_1H = DATA_DIR / "XAUUSD_1h.parquet"
 WINDOW_LABELS: dict[int, str] = {
     7: "1w", 14: "2w", 30: "1mo", 60: "2mo",
     90: "3mo", 120: "4mo", 180: "6mo", 270: "9mo",
-    365: "1y", 540: "18mo", 730: "2y",
+    365: "1y", 540: "18mo", 730: "2y", 1460: "4y",
 }
+
+
+# ── Leverage modes ───────────────────────────────────────────────────────
+
+
+class LeverageMode(str, Enum):
+    """How a strategy's position sizing interacts with the engine leverage parameter.
+
+    See `docs/LEVERAGE_STRATEGY_DESIGN.md` for the decision flowchart and
+    `reports/leverage_strategy_research_2026-04-15.md` (task #113) for the
+    full math and case studies.
+
+    Modes:
+        INVARIANT        — risk_pct == sl_pct (notional = equity, L is passive)
+        MARGIN_CAPPED    — risk_pct > sl_pct (notional fixed, L gates margin).
+                           Default — preserves pre-task-#114 behavior.
+        VOL_TARGETED     — risk_pct scales with strategy's own vol scalar
+        RISK_SCALED      — risk_pct = base × (L / baseline_L). NEW. Linear
+                           return amplification with leverage.
+        KELLY_FRACTIONAL — risk_pct = kelly_fraction × f*. NEW. Formula-driven
+                           sizing from historical win_rate + payoff_ratio,
+                           hard-capped at 0.25 to prevent full-Kelly blowups.
+
+    DRAWDOWN_BUDGETED is deferred (requires per-bar equity-curve state that
+    the single-pass matrix model doesn't support).
+    """
+
+    INVARIANT = "invariant"
+    MARGIN_CAPPED = "margin_capped"
+    VOL_TARGETED = "vol_targeted"
+    RISK_SCALED = "risk_scaled"
+    KELLY_FRACTIONAL = "kelly_fractional"
 
 
 # ── Configuration ────────────────────────────────────────────────────────
@@ -135,6 +168,27 @@ class DeepBacktestConfig:
 
     # Leverage validation (auto-triggered if matrix shows P&L invariance)
     leverage_validation_enabled: bool = True
+
+    # --- Leverage mode (task #114) -----------------------------------------
+    # How position sizing interacts with the engine leverage parameter.
+    # Default is MARGIN_CAPPED which preserves pre-task-#114 behavior for
+    # all currently-registered strategies. See docs/LEVERAGE_STRATEGY_DESIGN.md.
+    leverage_mode: LeverageMode = LeverageMode.MARGIN_CAPPED
+    # RISK_SCALED only: baseline leverage at which the strategy was tuned.
+    # risk_pct(L) = base_risk_pct × (L / baseline_leverage).
+    baseline_leverage: float = 10.0
+    # KELLY_FRACTIONAL only: Kelly fraction multiplier. 0.5 = half-Kelly
+    # (industry standard), 0.25 = quarter-Kelly (safety-first). Result is
+    # still hard-capped at 0.25 absolute risk_pct to prevent full-Kelly blowups.
+    kelly_fraction: float = 0.5
+    # KELLY_FRACTIONAL only: historical OOS win rate in [0, 1]. Required.
+    kelly_win_rate: float | None = None
+    # KELLY_FRACTIONAL only: avg_win / avg_loss ratio. Required.
+    kelly_payoff_ratio: float | None = None
+    # Name of the strategy kwarg that holds risk_pct. Default matches all
+    # 3 registered gold strategies. Override for strategies with a different
+    # risk parameter name.
+    risk_pct_param_name: str = "max_risk_per_trade"
 
     # Output / report
     out_dir: Path | None = None        # default reports/deep_backtest_<strategy>_<date>/
@@ -341,15 +395,105 @@ def _resolve_indicators(config: DeepBacktestConfig) -> list[str] | None:
     return _DEFAULT_GOLD_INDICATORS
 
 
+# ── Leverage mode transform (task #114) ─────────────────────────────────
+
+# Hard cap on any Kelly-derived risk_pct. Full Kelly produces 20-80% DDs
+# routinely (see research report §4.1). Capping at 0.25 absolute prevents
+# the "computed f* was huge" footgun. This is a safety floor, not a policy
+# knob — do not expose it as config.
+_KELLY_HARD_CAP: float = 0.25
+
+
+def _apply_leverage_mode(config: DeepBacktestConfig, leverage: float) -> dict[str, Any]:
+    """Transform strategy_params based on config.leverage_mode.
+
+    Returns a NEW dict (does NOT mutate config.strategy_params). The returned
+    dict is the strategy_params override that should be passed to
+    `_resolve_strategy(config.strategy, <overridden_params>, timeframe)` when
+    running a single cell at this leverage.
+
+    Semantics per mode:
+
+        INVARIANT / MARGIN_CAPPED / VOL_TARGETED — passthrough. The strategy's
+            own sizing is preserved; leverage only affects margin footprint.
+
+        RISK_SCALED — risk_pct = base × (leverage / baseline_leverage).
+            Linearly amplifies position size with leverage. At L == baseline,
+            matches the base. At 2× baseline, doubles position size.
+
+        KELLY_FRACTIONAL — risk_pct = min(0.25, kelly_fraction × f*) where
+            f* = (b × p - q) / b, p = kelly_win_rate, b = kelly_payoff_ratio.
+            Fixed across leverages (Kelly formula determines size, engine
+            leverage is a margin gate only). Hard-capped at 0.25.
+
+    Raises ValueError for KELLY_FRACTIONAL without priors.
+    """
+    mode = config.leverage_mode
+    params = dict(config.strategy_params)  # shallow copy — never mutate input
+
+    # Passthrough modes — no transform
+    if mode in (LeverageMode.INVARIANT,
+                LeverageMode.MARGIN_CAPPED,
+                LeverageMode.VOL_TARGETED):
+        return params
+
+    param_name = config.risk_pct_param_name
+
+    # Determine the base risk_pct. Prefer explicit config override; fall back
+    # to the strategy class's constructor default if not overridden.
+    if param_name in params:
+        base_risk_pct = float(params[param_name])
+    else:
+        base_risk_pct = 0.01  # ultimate fallback
+        try:
+            cls = _resolve_strategy_class(config.strategy)
+            sig = inspect.signature(cls.__init__)
+            default_param = sig.parameters.get(param_name)
+            if (default_param is not None
+                    and default_param.default is not inspect.Parameter.empty):
+                base_risk_pct = float(default_param.default)
+        except Exception:
+            pass
+
+    if mode == LeverageMode.RISK_SCALED:
+        baseline = max(float(config.baseline_leverage), 1.0)
+        scaled = base_risk_pct * (float(leverage) / baseline)
+        params[param_name] = scaled
+        return params
+
+    if mode == LeverageMode.KELLY_FRACTIONAL:
+        if config.kelly_win_rate is None or config.kelly_payoff_ratio is None:
+            raise ValueError(
+                "KELLY_FRACTIONAL mode requires config.kelly_win_rate and "
+                "config.kelly_payoff_ratio (from OOS historical stats). "
+                "See reports/leverage_strategy_research_2026-04-15.md §2.5."
+            )
+        p = float(config.kelly_win_rate)
+        b = float(config.kelly_payoff_ratio)
+        q = 1.0 - p
+        f_star = max(0.0, (b * p - q) / b) if b > 0 else 0.0
+        scaled = min(_KELLY_HARD_CAP, float(config.kelly_fraction) * f_star)
+        params[param_name] = scaled
+        return params
+
+    # Unknown / future mode — passthrough
+    return params
+
+
 # ── Data loading ─────────────────────────────────────────────────────────
 
 
-def _resample_5m_to_15m(df_m5: pd.DataFrame) -> pd.DataFrame:
-    """Resample M5 OHLCV to M15 (matches swift_full_matrix + walk_forward_swift_alma)."""
-    df = df_m5.copy()
-    df["dt_idx"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-    df = df.set_index("dt_idx")
-    rs = df.resample("15min", origin="epoch").agg({
+def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    """Generic OHLCV resampler. Anchors to the UTC epoch so runs are
+    deterministic and naturally drops market-closed periods (weekends for
+    gold) via the `dropna()` call.
+
+    `rule` is a pandas offset alias ("15min", "30min", "4h", "1D", ...).
+    """
+    work = df.copy()
+    work["dt_idx"] = pd.to_datetime(work["timestamp"], unit="ms", utc=True)
+    work = work.set_index("dt_idx")
+    rs = work.resample(rule, origin="epoch").agg({
         "timestamp": "first", "open": "first", "high": "max",
         "low": "min", "close": "last", "volume": "sum",
     }).dropna()
@@ -358,9 +502,36 @@ def _resample_5m_to_15m(df_m5: pd.DataFrame) -> pd.DataFrame:
     return rs
 
 
+def _resample_5m_to_15m(df_m5: pd.DataFrame) -> pd.DataFrame:
+    """Resample M5 OHLCV to M15 (historical name — kept as alias)."""
+    return _resample_ohlcv(df_m5, "15min")
+
+
+def _resample_5m_to_30m(df_m5: pd.DataFrame) -> pd.DataFrame:
+    """Resample M5 OHLCV to M30 (task #114)."""
+    return _resample_ohlcv(df_m5, "30min")
+
+
+def _resample_1h_to_4h(df_1h: pd.DataFrame) -> pd.DataFrame:
+    """Resample 1h OHLCV to 4h (task #114)."""
+    return _resample_ohlcv(df_1h, "4h")
+
+
+def _resample_1h_to_1d(df_1h: pd.DataFrame) -> pd.DataFrame:
+    """Resample 1h OHLCV to 1d (task #114).
+
+    Uses `1D` with UTC epoch anchor. Gold closes on weekends so dropna()
+    naturally removes non-trading days.
+    """
+    return _resample_ohlcv(df_1h, "1D")
+
+
 def _load_timeframe(timeframe: str, symbol: str) -> pd.DataFrame:
     """Load OHLCV data for a (symbol, timeframe). XAUUSD-focused for Phase G;
-    extend this table as new symbols get data files."""
+    extend this table as new symbols get data files.
+
+    Supported timeframes: 1m, 5m, 15m, 30m, 1h, 4h, 1d (task #114 extended).
+    """
     if symbol != "XAUUSD":
         raise NotImplementedError(
             f"deep_backtest currently only supports XAUUSD; got {symbol}. "
@@ -373,13 +544,43 @@ def _load_timeframe(timeframe: str, symbol: str) -> pd.DataFrame:
         df = pd.read_parquet(DATA_M5)
     elif timeframe == "15m":
         return _resample_5m_to_15m(pd.read_parquet(DATA_M5))
+    elif timeframe == "30m":
+        return _resample_5m_to_30m(pd.read_parquet(DATA_M5))
     elif timeframe == "1h":
         df = pd.read_parquet(DATA_1H)
+    elif timeframe == "4h":
+        return _resample_1h_to_4h(pd.read_parquet(DATA_1H))
+    elif timeframe == "1d":
+        return _resample_1h_to_1d(pd.read_parquet(DATA_1H))
     else:
-        raise ValueError(f"Unsupported timeframe: {timeframe}")
+        raise ValueError(
+            f"Unsupported timeframe: {timeframe}. "
+            "Supported: 1m, 5m, 15m, 30m, 1h, 4h, 1d"
+        )
 
     df["dt"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     return df.reset_index(drop=True)
+
+
+def _check_window_availability(
+    window_days: int, timeframe: str = "1h", symbol: str = "XAUUSD",
+) -> tuple[bool, str]:
+    """Check if `window_days` of history is available for (timeframe, symbol).
+
+    Used by the interactive TUI to grey out unavailable window selections.
+    Returns (available, reason). `reason` is empty when available, or a
+    short human-readable explanation when not.
+    """
+    try:
+        df = _load_timeframe(timeframe, symbol)
+        if len(df) == 0:
+            return False, f"no {timeframe} data available"
+        total_days = (df["dt"].iloc[-1] - df["dt"].iloc[0]).days
+        if window_days > total_days:
+            return False, f"need {window_days}d, have only {total_days}d of {timeframe} data"
+        return True, ""
+    except Exception as e:
+        return False, f"load failed: {type(e).__name__}: {e}"
 
 
 def _slice_window(df: pd.DataFrame, window_days: int, warmup_bars: int) -> pd.DataFrame:
@@ -518,12 +719,17 @@ def _sharpe_from_equity(curve: list[float], periods_per_year: float) -> float:
 
 def _periods_per_year_for_tf(timeframe: str) -> float:
     """Approximate bars-per-year for Sharpe annualization. XAUUSD closes
-    on weekends, so we use 120 trading hours/week × 52 weeks as the base."""
+    on weekends, so we use 120 trading hours/week × 52 weeks as the base.
+    Task #114: added 30m, 4h, 1d timeframes.
+    """
     mapping = {
         "1m": 120 * 60 * 52,        # 374,400
         "5m": 120 * 12 * 52,        #  74,880
         "15m": 120 * 4 * 52,        #  24,960
+        "30m": 120 * 2 * 52,        #  12,480
         "1h": 120 * 52,             #   6,240
+        "4h": 30 * 52,              #   1,560  (30 × 4h bars/week)
+        "1d": 5 * 52,                #     260  (5 trading days/week)
     }
     return float(mapping.get(timeframe, 24_960))
 
@@ -555,7 +761,13 @@ def _run_cell(
         path_model=path_model,
         run_id=run_id,
     )
-    strategy = _resolve_strategy(config.strategy, config.strategy_params, timeframe)
+    # Apply leverage_mode transform (task #114) to strategy_params BEFORE
+    # instantiating the strategy. For RISK_SCALED / KELLY_FRACTIONAL this
+    # modifies max_risk_per_trade so the strategy's emitted signal.risk_pct
+    # reflects the chosen sizing mode. For passthrough modes (INVARIANT /
+    # MARGIN_CAPPED / VOL_TARGETED), returns config.strategy_params unchanged.
+    mode_adjusted_params = _apply_leverage_mode(config, leverage)
+    strategy = _resolve_strategy(config.strategy, mode_adjusted_params, timeframe)
     indicators = _resolve_indicators(config)
 
     try:
@@ -708,6 +920,38 @@ def _phase_2_sanity_checks(
         "all_invariant": lev_variant_triplets == 0 and lev_invariant_triplets > 0,
     }
 
+    # 3b. Mode-aware assertions (task #114)
+    # For RISK_SCALED, expect return_pct to correlate linearly with leverage
+    # within each (window, tf, fee) triplet. For KELLY_FRACTIONAL, expect
+    # invariance (Kelly determines size, leverage is just margin).
+    mode = config.leverage_mode
+    if mode == LeverageMode.RISK_SCALED:
+        linearity_scores: list[float] = []
+        if len(df) > 0 and "return_pct" in df.columns:
+            for (_, _, _), sub in df.groupby(["window_days", "timeframe", "fee_profile"]):
+                if len(sub) < 3:
+                    continue
+                sub_sorted = sub.sort_values("leverage")
+                xs = sub_sorted["leverage"].to_numpy()
+                ys = sub_sorted["return_pct"].to_numpy()
+                if xs.std() > 0 and ys.std() > 0:
+                    r = float(((xs - xs.mean()) * (ys - ys.mean())).sum() /
+                              (len(xs) * xs.std() * ys.std()))
+                    linearity_scores.append(r)
+        findings["risk_scaled_linearity"] = {
+            "mean_pearson_r": (sum(linearity_scores) / len(linearity_scores)
+                               if linearity_scores else 0.0),
+            "n_triplets_scored": len(linearity_scores),
+            "passes_linearity": (
+                (sum(1 for r in linearity_scores if r >= 0.5)
+                 / max(1, len(linearity_scores))) >= 0.5
+                if linearity_scores else False
+            ),
+        }
+    elif mode == LeverageMode.KELLY_FRACTIONAL:
+        # Kelly sets risk_pct independently of leverage → should be invariant
+        findings["kelly_expects_invariance"] = findings["leverage_invariance"]["all_invariant"]
+
     # 4. Cost/margin sanity
     if non_zero_cells:
         max_cost_pct = max(c.cost_pct_of_margin for c in non_zero_cells)
@@ -772,6 +1016,14 @@ def _phase_3_leverage_validation(
         return None
     if not sanity.get("leverage_invariance", {}).get("all_invariant", False):
         return None
+    # For RISK_SCALED mode, invariance would mean the scaling failed — which
+    # we detect via the linearity sanity check instead. Don't run the Phase 3
+    # hand-trace here; it would incorrectly explain invariance as "correct
+    # behavior for risk-based sizing" when it's actually a symptom.
+    # For KELLY_FRACTIONAL, invariance IS expected (Kelly sets size), but the
+    # hand-trace still passes trivially — skip to avoid noise in the report.
+    if config.leverage_mode in (LeverageMode.RISK_SCALED, LeverageMode.KELLY_FRACTIONAL):
+        return None
 
     if config.progress:
         print("=" * 80)
@@ -791,7 +1043,10 @@ def _phase_3_leverage_validation(
     df_sliced = _slice_window(df, wd, config.warmup_bars)
 
     def _run_at(lev: float) -> dict:
-        strategy = _resolve_strategy(config.strategy, config.strategy_params, tf)
+        # Apply leverage_mode transform (task #114) so the hand-trace uses
+        # the same risk_pct scaling the matrix cells used.
+        mode_adjusted_params = _apply_leverage_mode(config, lev)
+        strategy = _resolve_strategy(config.strategy, mode_adjusted_params, tf)
         indicators = _resolve_indicators(config)
         engine = LeveragedBacktestEngine(
             initial_institutional_cash=config.initial_cash,
@@ -906,7 +1161,13 @@ def _wf_run_fold(
     params: dict[str, Any],
     run_id: str,
 ) -> dict:
-    merged_params = {**config.strategy_params, **params}
+    # Apply leverage_mode transform (task #114) to the base strategy_params
+    # FIRST, then layer per-fold retune params on top. Order matters: WF
+    # retune param grids should override the mode's risk_pct scaling when
+    # both are present (user explicitly grid-searching risk_pct overrides
+    # the mode transform).
+    mode_adjusted_base = _apply_leverage_mode(config, leverage)
+    merged_params = {**mode_adjusted_base, **params}
     strategy = _resolve_strategy(config.strategy, merged_params, tf)
     engine = LeveragedBacktestEngine(
         initial_institutional_cash=config.initial_cash,
@@ -1154,6 +1415,14 @@ def _phase_5_verdict(
     """Produce a concise verdict string based on all prior phases.
 
     Returns (verdict_label, reason_text).
+
+    Mode-aware gating (task #114):
+        INVARIANT / MARGIN_CAPPED — Calmar ≥ wf_gate_calmar (default 0.5)
+        VOL_TARGETED              — Calmar ≥ 1.0 (stricter, signal-edge bias)
+        RISK_SCALED               — return-biased: Calmar ≥ 0.3 AND annualized
+                                    return ≥ 100%/yr (accepts higher variance)
+        KELLY_FRACTIONAL          — growth-biased: Calmar ≥ 0.5 AND ann. return
+                                    ≥ 50%/yr
     """
     if sanity.get("error_cells", 0) > 0 and not sanity.get("best_cell"):
         return "FAILED", f"{sanity['error_cells']} matrix cells errored and no profitable cell found"
@@ -1162,33 +1431,54 @@ def _phase_5_verdict(
         return "RESEARCH_ONLY", "No profitable cell in the matrix"
 
     best = sanity["best_cell"]
+    mode = config.leverage_mode
 
-    # If WF ran, the continuous-run gate is authoritative
-    if wf is not None:
-        if wf.continuous_gate_passed:
-            return "DEPLOYABLE", (
-                f"Best cell {best['window']} × {best['timeframe']} × {int(best['leverage'])}x × "
-                f"{best['fee_profile']} passes; "
-                f"WF continuous Calmar {wf.continuous_calmar:+.3f} ≥ gate {config.wf_gate_calmar}"
-            )
-        elif wf.gate_per_fold_passed and wf.continuous_calmar < config.wf_gate_calmar:
-            return "RESEARCH_ONLY", (
-                f"Matrix best cell looks good ({best['return_pct']:+.1f}% / Calmar {best['calmar']:.2f}) "
-                f"but walk-forward continuous run fails the gate "
-                f"(Calmar {wf.continuous_calmar:+.3f} < {config.wf_gate_calmar}). "
-                f"Per-fold mean {wf.mean_calmar:+.3f} ± {wf.std_calmar:.3f} technically passes but "
-                f"is likely inflated by fold outliers. Best cell was a favorable window."
-            )
-        else:
-            return "RESEARCH_ONLY", (
-                f"Walk-forward failed both per-fold ({wf.mean_calmar:+.3f}) and continuous "
-                f"({wf.continuous_calmar:+.3f}) gates. Strategy is not deployment-ready."
-            )
+    if wf is None:
+        return "NEEDS_WF", (
+            f"[mode={mode.value}] Matrix best cell: {best['return_pct']:+.1f}% / "
+            f"Calmar {best['calmar']:.2f}. Walk-forward validation not run; "
+            f"cannot confirm OOS robustness."
+        )
 
-    # No WF — matrix-only verdict
-    return "NEEDS_WF", (
-        f"Matrix best cell: {best['return_pct']:+.1f}% / Calmar {best['calmar']:.2f}. "
-        f"Walk-forward validation not run; cannot confirm OOS robustness."
+    # Annualized return estimate from per-fold mean return × (365 / fold_days)
+    ann_return = wf.mean_return_pct * (365.0 / max(1, wf.fold_days))
+
+    # Mode-aware gate selection
+    if mode == LeverageMode.RISK_SCALED:
+        passes = wf.continuous_calmar >= 0.3 and ann_return >= 100.0
+        gate_desc = "Calmar ≥ 0.3 AND annualized return ≥ 100%/yr (return-biased)"
+    elif mode == LeverageMode.KELLY_FRACTIONAL:
+        passes = wf.continuous_calmar >= 0.5 and ann_return >= 50.0
+        gate_desc = "Calmar ≥ 0.5 AND annualized return ≥ 50%/yr (growth-biased)"
+    elif mode == LeverageMode.VOL_TARGETED:
+        passes = wf.continuous_calmar >= 1.0
+        gate_desc = "Calmar ≥ 1.0 (vol-targeted requires stronger signal edge)"
+    else:  # INVARIANT, MARGIN_CAPPED
+        passes = wf.continuous_calmar >= config.wf_gate_calmar
+        gate_desc = f"Calmar ≥ {config.wf_gate_calmar}"
+
+    if passes:
+        return "DEPLOYABLE", (
+            f"[mode={mode.value}] Best cell {best['window']} × {best['timeframe']} × "
+            f"{int(best['leverage'])}x × {best['fee_profile']}; "
+            f"WF continuous Calmar {wf.continuous_calmar:+.3f}, ann return {ann_return:+.1f}%/yr. "
+            f"Gate: {gate_desc}."
+        )
+
+    if wf.gate_per_fold_passed and not passes:
+        return "RESEARCH_ONLY", (
+            f"[mode={mode.value}] Matrix best cell looks good "
+            f"({best['return_pct']:+.1f}% / Calmar {best['calmar']:.2f}) but walk-forward "
+            f"continuous run fails the gate (Calmar {wf.continuous_calmar:+.3f}, "
+            f"ann return {ann_return:+.1f}%/yr). Gate: {gate_desc}. "
+            f"Per-fold mean {wf.mean_calmar:+.3f} ± {wf.std_calmar:.3f} technically "
+            f"passes but is likely inflated by fold outliers."
+        )
+
+    return "RESEARCH_ONLY", (
+        f"[mode={mode.value}] Walk-forward failed ({gate_desc}). Continuous Calmar "
+        f"{wf.continuous_calmar:+.3f}, per-fold mean {wf.mean_calmar:+.3f}, "
+        f"ann return {ann_return:+.1f}%/yr. Strategy is not deployment-ready."
     )
 
 

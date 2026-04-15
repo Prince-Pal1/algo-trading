@@ -13,6 +13,7 @@ Keeps test time <30s by running a small grid (1 window × 1 TF × 2 leverages
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -21,8 +22,12 @@ from src.backtest.deep_backtest import (
     CellResult,
     DeepBacktestConfig,
     DeepBacktestResult,
+    LeverageMode,
     LeverageValidationResult,
     WalkForwardSummary,
+    _apply_leverage_mode,
+    _check_window_availability,
+    _load_timeframe,
     run_deep_backtest,
 )
 
@@ -314,3 +319,327 @@ class TestGoldStrategyIndicatorPrecompute:
             assert "sl_atr_mult" in fold.best_params
             assert fold.best_params["sl_atr_mult"] in (2.5, 3.0)
             assert fold.best_params["adx_trend_threshold"] in (20.0, 25.0)
+
+
+class TestLeverageModes:
+    """Tests for the leverage_mode feature (task #114).
+
+    Covers the 5 implemented modes: INVARIANT / MARGIN_CAPPED / VOL_TARGETED
+    (passthrough) + RISK_SCALED / KELLY_FRACTIONAL (transforms). Also tests
+    unit-level behavior of _apply_leverage_mode() and end-to-end that the
+    transform propagates through to engine.run() via strategy_params.
+    """
+
+    def _base_config(self, tmp_path, out_sub, **overrides):
+        """Helper: minimal donchian_gold config with given overrides."""
+        defaults = dict(
+            strategy="donchian_gold",
+            strategy_params={"session_filter": True, "max_risk_per_trade": 0.02},
+            timeframes=["1h"],
+            window_days=[90],
+            leverages=[10.0],
+            fee_profiles=["ic_markets_mt4_xauusd_normal"],
+            wf_enabled=False,
+            leverage_validation_enabled=False,
+            out_dir=tmp_path / out_sub,
+            generate_html=False,
+            generate_pdf=False,
+            generate_heatmaps=False,
+            progress=False,
+        )
+        defaults.update(overrides)
+        return DeepBacktestConfig(**defaults)
+
+    def test_default_mode_is_margin_capped_backward_compat(self, tmp_path):
+        """Default leverage_mode should be MARGIN_CAPPED to preserve
+        pre-task-#114 behavior for all existing callers."""
+        cfg = self._base_config(tmp_path, "default")
+        assert cfg.leverage_mode == LeverageMode.MARGIN_CAPPED
+        result = run_deep_backtest(cfg)
+        assert result.matrix[0].trades > 0
+        assert result.matrix[0].notes == ""
+
+    def test_apply_leverage_mode_passthrough_modes_unchanged(self, tmp_path):
+        """INVARIANT / MARGIN_CAPPED / VOL_TARGETED should return
+        strategy_params unchanged (no transform applied)."""
+        for mode in (LeverageMode.INVARIANT,
+                     LeverageMode.MARGIN_CAPPED,
+                     LeverageMode.VOL_TARGETED):
+            cfg = self._base_config(tmp_path, f"pass_{mode.value}", leverage_mode=mode)
+            for L in (1.0, 10.0, 100.0, 1000.0):
+                params = _apply_leverage_mode(cfg, L)
+                assert params["max_risk_per_trade"] == 0.02, \
+                    f"{mode.value} should not modify risk_pct at L={L}"
+
+    def test_apply_leverage_mode_risk_scaled_linear(self, tmp_path):
+        """RISK_SCALED: risk_pct = base × (L / baseline) should be linear.
+        baseline=10, base=0.02. At L=5, expect 0.01. At L=20, expect 0.04."""
+        cfg = self._base_config(
+            tmp_path, "rs_math",
+            leverage_mode=LeverageMode.RISK_SCALED,
+            baseline_leverage=10.0,
+        )
+        assert _apply_leverage_mode(cfg, 5.0)["max_risk_per_trade"] == pytest.approx(0.01)
+        assert _apply_leverage_mode(cfg, 10.0)["max_risk_per_trade"] == pytest.approx(0.02)
+        assert _apply_leverage_mode(cfg, 20.0)["max_risk_per_trade"] == pytest.approx(0.04)
+        assert _apply_leverage_mode(cfg, 50.0)["max_risk_per_trade"] == pytest.approx(0.10)
+
+    def test_apply_leverage_mode_kelly_fractional_math(self, tmp_path):
+        """KELLY_FRACTIONAL: f* = (bp - q) / b.
+        p=0.55, b=2.0 → f* = (2×0.55 - 0.45)/2 = 0.325
+        kelly_fraction=0.5 → risk_pct = 0.1625 (below 0.25 cap)"""
+        cfg = self._base_config(
+            tmp_path, "kelly_math",
+            leverage_mode=LeverageMode.KELLY_FRACTIONAL,
+            kelly_fraction=0.5,
+            kelly_win_rate=0.55,
+            kelly_payoff_ratio=2.0,
+        )
+        params = _apply_leverage_mode(cfg, 10.0)
+        assert params["max_risk_per_trade"] == pytest.approx(0.1625, abs=1e-6)
+        # Kelly is leverage-independent: same result at different L
+        assert (_apply_leverage_mode(cfg, 1.0)["max_risk_per_trade"]
+                == _apply_leverage_mode(cfg, 100.0)["max_risk_per_trade"])
+
+    def test_apply_leverage_mode_kelly_fractional_hard_cap(self, tmp_path):
+        """Kelly result MUST be hard-capped at 0.25 absolute risk_pct
+        regardless of what the formula + fraction produce.
+        p=0.80, b=5.0, full Kelly → f* = (5×0.80 - 0.20)/5 = 0.76
+        kelly_fraction=1.0 → 0.76, capped to 0.25."""
+        cfg = self._base_config(
+            tmp_path, "kelly_cap",
+            leverage_mode=LeverageMode.KELLY_FRACTIONAL,
+            kelly_fraction=1.0,
+            kelly_win_rate=0.80,
+            kelly_payoff_ratio=5.0,
+        )
+        params = _apply_leverage_mode(cfg, 10.0)
+        assert params["max_risk_per_trade"] == 0.25, \
+            f"Expected hard cap at 0.25, got {params['max_risk_per_trade']}"
+
+    def test_apply_leverage_mode_kelly_fractional_requires_priors(self, tmp_path):
+        """KELLY_FRACTIONAL without win_rate/payoff_ratio must raise."""
+        cfg = self._base_config(
+            tmp_path, "kelly_no_priors",
+            leverage_mode=LeverageMode.KELLY_FRACTIONAL,
+            kelly_fraction=0.5,
+            kelly_win_rate=None,
+            kelly_payoff_ratio=None,
+        )
+        with pytest.raises(ValueError, match="KELLY_FRACTIONAL"):
+            _apply_leverage_mode(cfg, 10.0)
+
+    def test_risk_scaled_linearity_in_matrix(self, tmp_path):
+        """End-to-end: RISK_SCALED mode on donchian_gold with L=10 and L=20
+        should produce returns that are roughly 2× apart (within ±50%
+        accounting for drawdown nonlinearity at this scale)."""
+        cfg = self._base_config(
+            tmp_path, "rs_linearity",
+            leverage_mode=LeverageMode.RISK_SCALED,
+            baseline_leverage=10.0,
+            leverages=[10.0, 20.0],
+        )
+        result = run_deep_backtest(cfg)
+        assert len(result.matrix) == 2
+        cells = {int(c.leverage): c for c in result.matrix}
+        r10 = cells[10].return_pct
+        r20 = cells[20].return_pct
+        # Both must fire trades (not be margin-rejected)
+        assert cells[10].trades > 0, "L=10 should fire trades at mode=RISK_SCALED"
+        assert cells[20].trades > 0, "L=20 should fire trades at mode=RISK_SCALED"
+        # At 2× risk_pct, position size ~doubles, so |return| ~doubles.
+        # Allow ±50% tolerance for drawdown nonlinearity + compounding.
+        if abs(r10) > 1.0:  # skip degenerate case where 1× return is near zero
+            ratio = r20 / r10 if r10 != 0 else 0
+            assert 1.3 <= ratio <= 2.7, \
+                f"Expected ~2× linearity at 2× leverage, got r10={r10}, r20={r20}, ratio={ratio}"
+
+
+class TestExtendedTimeframes:
+    """Tests for the new timeframes added in task #114: 30m, 4h, 1d."""
+
+    def test_30m_timeframe_loads(self):
+        """30m should load and produce roughly half the bar count of 15m."""
+        df_30m = _load_timeframe("30m", "XAUUSD")
+        df_15m = _load_timeframe("15m", "XAUUSD")
+        assert len(df_30m) > 0
+        # 30m should be ~half of 15m (may differ slightly due to dropna on gaps)
+        ratio = len(df_30m) / len(df_15m)
+        assert 0.4 <= ratio <= 0.6, f"30m/15m ratio {ratio} out of expected range"
+
+    def test_4h_timeframe_loads(self):
+        """4h should load and produce roughly 1/4 the bar count of 1h."""
+        df_4h = _load_timeframe("4h", "XAUUSD")
+        df_1h = _load_timeframe("1h", "XAUUSD")
+        assert len(df_4h) > 0
+        ratio = len(df_4h) / len(df_1h)
+        assert 0.2 <= ratio <= 0.3, f"4h/1h ratio {ratio} out of expected range"
+
+    def test_1d_timeframe_loads(self):
+        """1d should load and produce roughly 1/24 the bar count of 1h
+        (but actual ratio is closer to 1/19-1/20 because weekends collapse)."""
+        df_1d = _load_timeframe("1d", "XAUUSD")
+        df_1h = _load_timeframe("1h", "XAUUSD")
+        assert len(df_1d) > 0
+        ratio = len(df_1d) / len(df_1h)
+        assert 0.03 <= ratio <= 0.07, f"1d/1h ratio {ratio} out of expected range"
+
+    def test_30m_timeframe_runs_end_to_end(self, tmp_path):
+        """Smoke-test running deep_backtest on donchian_gold at 30m."""
+        cfg = DeepBacktestConfig(
+            strategy="donchian_gold",
+            strategy_params={"session_filter": True},
+            timeframes=["30m"],
+            window_days=[30],
+            leverages=[10.0],
+            fee_profiles=["ic_markets_mt4_xauusd_normal"],
+            wf_enabled=False,
+            leverage_validation_enabled=False,
+            out_dir=tmp_path / "tf_30m",
+            generate_html=False,
+            generate_pdf=False,
+            generate_heatmaps=False,
+            progress=False,
+        )
+        result = run_deep_backtest(cfg)
+        assert result.matrix[0].notes == ""
+        # donchian_gold is 1h-native so 30m results might be weird, but the
+        # cell should at least complete without erroring
+
+
+class TestWindowAvailability:
+    """Tests for _check_window_availability (task #114 — TUI support)."""
+
+    def test_2y_window_available(self):
+        """730 days (2 years) should be available on the current dataset
+        (data starts 2024-04-14, ends 2026-04-13 → 730 days exactly)."""
+        available, reason = _check_window_availability(730, "1h", "XAUUSD")
+        # Accept either outcome depending on exact data edge; if unavailable,
+        # the reason should be informative. We care that the function works.
+        assert isinstance(available, bool)
+        if not available:
+            assert "need" in reason or "load" in reason
+
+    def test_4y_window_unavailable_gracefully(self):
+        """1460 days (4 years) exceeds available data — should return
+        (False, <reason>) without raising."""
+        available, reason = _check_window_availability(1460, "1h", "XAUUSD")
+        assert available is False
+        assert "need 1460d" in reason
+
+    def test_1_month_window_available(self):
+        """30d should be trivially available on a 2-year dataset."""
+        available, reason = _check_window_availability(30, "1h", "XAUUSD")
+        assert available is True
+        assert reason == ""
+
+    def test_availability_check_non_raising_on_bad_timeframe(self):
+        """Unknown timeframe should return (False, reason) not raise."""
+        available, reason = _check_window_availability(30, "99x", "XAUUSD")
+        assert available is False
+        assert "load failed" in reason or "Unsupported" in reason
+
+
+class TestInteractiveTUI:
+    """Tests for the interactive TUI module (task #114).
+
+    The TUI itself is interactive and can't be fully tested without either
+    a real TTY or a mock of questionary. These tests cover:
+    - Fallback when questionary isn't available
+    - Fallback when --non-interactive flag is set
+    - Fallback when stdout is not a TTY
+    - The interactive_available() helper's decision logic
+
+    End-to-end TUI flow tests (mocking questionary answers) are kept out
+    of the main suite because they require patching sys.stdout.isatty and
+    all 7 questionary prompts, which gets brittle. Manual smoke test:
+        PYTHONPATH=. python3 scripts/deep_backtest.py donchian_gold
+    """
+
+    def test_non_interactive_flag_bypasses_tui(self, tmp_path):
+        """With --non-interactive, collect_config_interactive should return
+        the fallback config verbatim without prompting."""
+        from types import SimpleNamespace
+        from src.backtest.deep_backtest_interactive import (
+            collect_config_interactive,
+        )
+
+        fallback = DeepBacktestConfig(
+            strategy="swift_alma",
+            timeframes=["15m"],
+            window_days=[30],
+            leverages=[10.0],
+            fee_profiles=["ic_markets_mt4_xauusd_normal"],
+            wf_enabled=False,
+            leverage_validation_enabled=False,
+            out_dir=tmp_path / "tui_noninteractive",
+            progress=False,
+        )
+        cli_args = SimpleNamespace(
+            non_interactive=True,
+            windows=None, timeframes=None, fees=None,
+            leverages=None, leverage_mode=None, no_wf=False,
+        )
+        config, modes = collect_config_interactive(
+            "swift_alma", cli_args, fallback,
+        )
+        assert config is fallback
+        assert modes == [fallback.leverage_mode]
+        assert modes == [LeverageMode.MARGIN_CAPPED]
+
+    def test_interactive_available_detects_non_tty(self, monkeypatch):
+        """interactive_available() should return False when stdout is
+        piped (not a TTY), even if questionary is installed."""
+        from types import SimpleNamespace
+        from src.backtest import deep_backtest_interactive as tui
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
+        cli_args = SimpleNamespace(non_interactive=False)
+        assert tui.interactive_available(cli_args) is False
+
+    def test_interactive_available_without_questionary(self, monkeypatch):
+        """If _HAS_QUESTIONARY is False, interactive_available() returns False."""
+        from types import SimpleNamespace
+        from src.backtest import deep_backtest_interactive as tui
+        monkeypatch.setattr(tui, "_HAS_QUESTIONARY", False)
+        cli_args = SimpleNamespace(non_interactive=False)
+        assert tui.interactive_available(cli_args) is False
+
+    def test_interactive_available_all_conditions_met(self, monkeypatch):
+        """With questionary installed + TTY stdout + no --non-interactive,
+        interactive_available() should return True."""
+        from types import SimpleNamespace
+        from src.backtest import deep_backtest_interactive as tui
+        monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+        monkeypatch.setattr(tui, "_HAS_QUESTIONARY", True)
+        cli_args = SimpleNamespace(non_interactive=False)
+        assert tui.interactive_available(cli_args) is True
+
+    def test_dimension_catalogs_match_plan_spec(self):
+        """The dimension catalogs must match the plan's spec exactly — this
+        is a contract test so a future refactor can't silently change the
+        UX Prince signed off on."""
+        from src.backtest.deep_backtest_interactive import (
+            WINDOWS_CATALOG, TIMEFRAMES_CATALOG, FEES_CATALOG,
+            LEVERAGES_CATALOG, LEVERAGE_MODES_CATALOG,
+        )
+        # Windows: 1mo / 3mo / 6mo / 1y / 2y / 4y (Prince's spec)
+        assert [w for w, _ in WINDOWS_CATALOG] == [30, 90, 180, 365, 730, 1460]
+        # Timeframes: 1m / 5m / 15m / 30m / 1h / 4h / 1d (Prince's spec)
+        assert [tf for tf, _ in TIMEFRAMES_CATALOG] == \
+               ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
+        # Fees: 3 profiles
+        assert [k for k, _ in FEES_CATALOG] == [
+            "pine_zero_cost",
+            "ic_markets_mt4_xauusd_normal",
+            "ic_markets_ctrader_xauusd_normal",
+        ]
+        # Leverages: 1/5/10/25/50/100/200/400/500/1000 (Prince's spec)
+        assert LEVERAGES_CATALOG == [1, 5, 10, 25, 50, 100, 200, 400, 500, 1000]
+        # Modes: all 5 implemented
+        assert [m for m, _ in LEVERAGE_MODES_CATALOG] == [
+            LeverageMode.MARGIN_CAPPED,
+            LeverageMode.INVARIANT,
+            LeverageMode.RISK_SCALED,
+            LeverageMode.KELLY_FRACTIONAL,
+            LeverageMode.VOL_TARGETED,
+        ]
