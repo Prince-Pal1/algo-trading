@@ -782,6 +782,8 @@ elif page == "Run Deep Backtest":
 
     # ── Run button + live log stream ─────────────────────────────────
     if st.button("🚀 Run Deep Backtest", type="primary", disabled=not can_run):
+        import time as _time  # local import to avoid shadowing at module scope
+
         # Build the CLI args we would pass to scripts/deep_backtest.py.
         # We use `--non-interactive` to skip the TUI since the browser is the UI.
         # Multi-mode runs are handled by passing multiple --leverage-mode flags
@@ -792,6 +794,13 @@ elif page == "Run Deep Backtest":
         results_log = st.empty()
         status_placeholder = st.empty()
         log_buffer: list[str] = []
+
+        # Throttle UI updates: st.code() repaints + websocket round-trip cost
+        # ~50-100ms per call. A deep_backtest emits ~500 log lines; without
+        # throttling that's ~30-60s of pure rendering overhead on top of the
+        # ~10-15s actual pipeline. Batch updates to at most 2 per second.
+        UI_UPDATE_INTERVAL_S = 0.5
+        LOG_DISPLAY_TAIL = 200  # keep last N lines in view
 
         # Extra args shared across modes
         base_cmd_tail = [
@@ -825,9 +834,12 @@ elif page == "Run Deep Backtest":
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
 
         total_modes = len(modes_list)
+        overall_start = _time.time()
         for mode_idx, mode in enumerate(modes_list, start=1):
+            mode_start = _time.time()
             status_placeholder.markdown(
-                f"**Running mode {mode_idx}/{total_modes}:** `{mode.value}` — {strategy}"
+                f"**Running mode {mode_idx}/{total_modes}:** `{mode.value}` — {strategy} "
+                f"(overall elapsed: {_time.time() - overall_start:.1f}s)"
             )
             cmd = [
                 sys.executable,
@@ -837,7 +849,7 @@ elif page == "Run Deep Backtest":
             ] + base_cmd_tail
 
             log_buffer.append(f"\n{'=' * 70}\n$ {' '.join(cmd)}\n{'=' * 70}\n")
-            results_log.code("".join(log_buffer), language="bash")
+            results_log.code("".join(log_buffer[-LOG_DISPLAY_TAIL:]), language="bash")
 
             proc = subprocess.Popen(
                 cmd,
@@ -849,12 +861,30 @@ elif page == "Run Deep Backtest":
                 bufsize=1,
             )
             assert proc.stdout is not None
+
+            # Throttled log streaming: accumulate lines into log_buffer but
+            # only push to Streamlit at most UI_UPDATE_INTERVAL_S seconds
+            # apart. Without this, st.code() repaints on every line cost
+            # ~50-100ms × ~500 lines = 25-50s of pure UI overhead per mode.
+            last_ui_push = _time.time()
             for line in proc.stdout:
                 log_buffer.append(line)
-                # Cap the log display to the last ~200 lines to keep Streamlit responsive
-                display = "".join(log_buffer[-200:])
-                results_log.code(display, language="bash")
+                now = _time.time()
+                if now - last_ui_push >= UI_UPDATE_INTERVAL_S:
+                    display = "".join(log_buffer[-LOG_DISPLAY_TAIL:])
+                    results_log.code(display, language="bash")
+                    status_placeholder.markdown(
+                        f"**Running mode {mode_idx}/{total_modes}:** `{mode.value}` — {strategy} "
+                        f"(mode elapsed: {now - mode_start:.1f}s, "
+                        f"overall: {now - overall_start:.1f}s)"
+                    )
+                    last_ui_push = now
             proc.wait()
+
+            # Final flush — make sure the last lines are visible after the
+            # subprocess exits even if they arrived inside a throttle window.
+            display = "".join(log_buffer[-LOG_DISPLAY_TAIL:])
+            results_log.code(display, language="bash")
 
             # scripts/deep_backtest.py uses exit codes as verdict signals:
             #   0 = DEPLOYABLE
