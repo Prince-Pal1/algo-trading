@@ -1,8 +1,10 @@
 # Algo Trading — Roadmap & Phase Status
 
-**Last updated:** 2026-04-14 (Gold Phase G.2 + G.5b COMPLETE on feat/gold-refactor worktree; ready for merge to main 2026-04-17)
-**Current phase:** Phase G (Gold Leveraged Stack) on branch `feat/gold-refactor` @ `/Users/prince/algo-trading-gold`. All G.2 sub-phases shipped + G.2h parallel sprint + G.5 validation + Tier 5 obituaries + G.5b M1 path model upgrade. 982 tests passing. Main branch (3b-2 M3S shadow + 3c meta-labeling shadow) is untouched and still running the 4-day clock toward the 2026-04-16 cron promotion. Watchdog data-staleness patch cherry-picked from main to gold.
-**Next action:** Wait for Day 4 sprint cron to complete 2026-04-17 ~09:30, then rebase feat/gold-refactor on main, run the full test suite, merge. Dry-run merge-prep on 2026-04-14 flagged 2 expected doc conflicts (ROADMAP.md + STATE.md — both branches legitimately edited different sections; ARCHITECTURE.md auto-merges). Post-merge: tight-SL scalper strategies can now use M1PathModel (from G.5b) when the aggressive sub-book is reopened.
+**Last updated:** 2026-04-14 (post-merge: feat/gold-refactor → main. Brings 44 commits including SWIFT Pine port, cost model recalibration, fee profile registry, walk-forward re-runs, + parallel main automation forensic audit from earlier today)
+**Current phase:** TWO parallel work streams now both on main:
+- **3b-2 M3S** + **3c meta-labeling** in shadow mode (continuing from session 22 day 1) — validation layer, promotion scripts, libomp+LightGBM, feature enrichment 15→24 keys, project_status aggregator shipped. 4 meta-label LR models trained on 2,819 harvested rows. M3S shadow clock day 1/4 (compressed from 7). Watchdog data-staleness patch shipped today.
+- **Phase G Gold Leveraged Stack** — all G.2 sub-phases + G.2h parallel sprint + G.5 validation + Tier 5 obituaries + G.5b M1 path model + tasks #101-108 (graveyard, scalping arch, SWIFT, TV parity framework, cost recalibration, fee profile registry, cost-fix sweep, walk-forward retunes). donchian_gold and vol_momentum_gold have honest post-fix baselines (WF Calmar 13.7 and 11.2 respectively). 982+ tests passing.
+**Next action:** Wall-clock gated: 4-day shadow clock → 2026-04-16 cron auto-runs promote_m3s_authoritative.sh + promote_meta_label.sh --to advisory. After that, G.3 paper-clock readiness check (Phase 4 cTrader live smoke pending Spotware KYC). Manual interim: `cat data/project_status.md` at any time for single-pane status. Dry-run promotions: `./scripts/promote_m3s_authoritative.sh --dry-run` shows 3/4 gates passing (clock blocks).
 
 > **Authority note:** This file is the **only** authoritative source for phase status. If any other file contradicts this, that other file is wrong — fix it to link here. See `CLAUDE.md` § Autonomous Workflow Protocol.
 
@@ -23,9 +25,10 @@
 | 6 | Options Module | Iron condor SPX positive 1-year | ❌ NOT STARTED | — | — |
 | 7 | Production Deployment | 7 days unattended on VPS | ❌ NOT STARTED | — | Phase 3-milestone + M3S |
 | 8 | Scale | 3+ strategies portfolio Sharpe >1.5 | 🟡 PARTIAL — 3 strategies live, Sharpe 2.318 in backtest only | Session 10-11, 14-16 | OOS portfolio validation on live paper data |
-| **G** | **Gold Leveraged Stack** | Two-book (institutional + aggressive) engine + donchian_gold + 3 Tier 5 strategies + split sweep | ✅ **G.2 COMPLETE on `feat/gold-refactor`** (pending merge) | G.0-G.2g shipped (commits 54c0b62 → G.2g) | Merge to main 2026-04-17 ~09:30 after Day 4 sprint cron |
+| DISCOVERED 2026-04-14 | Watchdog data-staleness patch | Kill engine when `last_candle_age_s > 1800s` even if file mtime is fresh | ✅ COMPLETE | `7c5d000` main / `fcb13b9` gold; ARCHITECTURE.md Known Gotchas 2026-04-14 | — |
+| **G** | **Gold Leveraged Stack** | Two-book (institutional + aggressive) engine + donchian_gold + vol_momentum_gold + 3 Tier 5 strategies + split sweep + cost-fix sweep + walk-forward retunes | ✅ **G.2 + G.5b + tasks #101-108 COMPLETE — merged to main 2026-04-14** (3 days early) | 44 commits 54c0b62 → a7703e9 | — |
 
-**Legend:** ✅ complete · ❌ not started · 🟡 in progress/partial
+**Legend:** ✅ complete · ❌ not started · 🟡 in progress/partial · **DISCOVERED** = unplanned work surfaced mid-session (Rule 2)
 
 ---
 
