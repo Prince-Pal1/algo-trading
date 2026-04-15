@@ -1,17 +1,17 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-04-14 (Session 22 Day 1 — main forensic audit + watchdog patch + Gold Phase G + tasks #101-108 merged from feat/gold-refactor)
+**Last updated:** 2026-04-15 (Session 22 Day 2 — SWIFT matrix #109 + leverage validation #110 + walk-forward #111 + shadow orchestrator regression fix; feat/gold-refactor merge-ready for 2026-04-17)
 
 ---
 
 ## Current Position
 
-**Active phase:** Two parallel work streams now both on main: (1) Phase 3b-2 M3S shadow + Phase 3c meta-labeling shadow running in parallel, all code in place for the 2026-04-16/17 automated cron promotions, wall-clock is the only blocker (4-day shadow clock). (2) Phase G Gold Leveraged Stack — fully shipped via tasks #101-108 (graveyard, scalping arch, SWIFT Pine port, TV parity framework, cost recalibration, fee profile registry, cost-fix sweep, walk-forward retunes). donchian_gold and vol_momentum_gold have honest post-fix baselines; both paper-trading-ready.
-**Next session target:** Nothing manual needed before the 2026-04-16 09:07 CronCreate wake-up. If interrupted earlier, `cat data/project_status.md` gives single-pane status; `./scripts/promote_m3s_authoritative.sh --dry-run` re-runs all 4 gates.
-**Engine status:** Paper trading running via launchd (risk-server + engine + watchdog), HEALTHY. Orphan engine process from 2026-04-13 Sunday killed at 16:23 IST today (was writing stale heartbeats for 2 days with frozen CandleBuilder). New engine PID 33988 running since 10:50 UTC. Watchdog patched with `DATA_STALE_KILL_THRESHOLD=1800s` data-staleness check and reloaded (PID 34293). M3S active in shadow mode (day 1/4 compressed clock). Meta-label filter active in shadow mode (4 LR models loaded, AUC 0.486-0.571).
-**Test suite:** 686 passing on main, 962 passing on feat/gold-refactor, 0 skipped.
-**Portfolio:** bb_rsi_mr_opt 40% / donchian_ensemble_adx 30% / vol_momentum 30% + funding_carry live. Sharpe 2.318 baseline (backtest, 2yr walk-forward).
-**Meta-label training:** 2,819 harvested audit rows from backtests; 4 LR models trained with 24-key feature schema (15 populated + 9 placeholders for future enrichment); LightGBM rejected by A/B sanity check (uplift < 0.03 AUC threshold).
+**Active phase:** Two parallel work streams: (1) Phase 3b-2 M3S shadow + Phase 3c meta-labeling shadow on main, clock-blocked toward the 2026-04-16 auto-promotions (unchanged from yesterday). (2) Phase G Gold Leveraged Stack on `feat/gold-refactor` — yesterday's post-merge state extended by tasks #109/#110/#111 (SWIFT matrix deep-dive, leverage semantics validation, SWIFT WF) + one shadow-orchestrator regression fix. Merge window for these 5 new commits is 2026-04-17 ~09:30. donchian_gold + vol_momentum_gold remain the institutional sub-book; SWIFT failed OOS gate under continuous-run metric (Calmar 0.488) and stays research-only.
+**Next session target:** Wait for Day 4 sprint cron to complete 2026-04-17 ~09:30, then fast-forward merge `feat/gold-refactor` → `main` (6 new commits since yesterday's merge: `241092f` + `ebbcea9` + `b2ed46b` + `45b17b1` + `fe9384d` + the `37d5695` merge-sync). Rehearsal on 2026-04-15 auto-resolved cleanly with zero conflicts against `origin/main` (watchdog fix + forensic docs commits coexist peacefully with gold's SWIFT work — non-overlapping edits).
+**Engine status:** Paper trading running via launchd on main (unchanged from yesterday), HEALTHY. M3S active in shadow mode (day 2/4 compressed clock). Meta-label filter active in shadow mode.
+**Test suite:** 1183 passing on feat/gold-refactor, 0 skipped (was 1181 + 2 failing briefly until the shadow orchestrator regression was caught and fixed in `fe9384d`). Includes 7 new leverage invariance tests from task #110. Main branch unchanged (686 passing as of 2026-04-14).
+**Portfolio:** bb_rsi_mr_opt 40% / donchian_ensemble_adx 30% / vol_momentum 30% + funding_carry live on main. Gold institutional sub-book: `donchian_gold` + `vol_momentum_gold` (2 strategies, SWIFT excluded per task #111 verdict).
+**Meta-label training:** 2,819 harvested audit rows from backtests; 4 LR models trained with 24-key feature schema; LightGBM rejected by A/B sanity check. (Unchanged from yesterday.)
 
 ## Session 22 Day 1 — Main automation forensic audit (2026-04-14 afternoon)
 
@@ -53,6 +53,70 @@ The legacy gold-worktree narrative (Phase G.2 COMPLETE state and Tier 5 obituari
 **Gold portfolio plan:** Two-book — institutional (Tiers 1-4, donchian_gold + future additions, aggregate leverage cap 80×, weekly HWM-gated compounding) + aggressive (Tier 5, candle_burst_hunter + news_spike_fade + hedged_structure_play, 1000× position scalping at 5% sub-book sizing with daily/weekly kill switches). Starting split: **institutional_pct=0.95** (conservative until the tuning pass). Prince can override via `config/settings.toml [m3s_gold.allocation] institutional_pct`.
 
 > See `ROADMAP.md` § Phase G for the G.2 sub-phase table. See `SESSIONS_ARCHIVE.md` for Sessions 8-17.
+
+---
+
+## Session 22 Day 2 — SWIFT matrix + leverage validation + walk-forward + shadow regression fix (2026-04-15)
+
+Follow-up pass on the gold worktree after yesterday's 2026-04-14 merge. Prince wanted SWIFT pushed through a comprehensive multi-cell matrix + rigor validation for the leverage axis + honest walk-forward baseline. All five discrete work units captured below:
+
+### Task #109 — SWIFT 240-cell matrix + `book.open_position` float precision fix (commit `241092f` + `ebbcea9`)
+
+`scripts/swift_full_matrix.py` runs SwiftAlmaStrategy across 4 windows × 4 TFs × 5 leverages × 3 fees = **240 backtests** with phased validation gates. Report at `reports/swift_full_matrix_2026-04-15/index.html` (gitignored).
+
+Phase 1-5 validation uncovered a **critical engine bug**: `book.open_position` line 386 rejected positions where `entry_margin == free_margin` exactly (1x leverage with risk-based sizing). SwiftAlma is the worst-case trigger because default `risk_pct == sl_pct == 0.005` makes `notional = equity × 1.0` exactly. Symptom: pine_zero produced 77 trades while cTrader/MT4 produced 307 on identical data (4× discrepancy). Fixed with a 1-cent epsilon: `if entry_margin > current_free_margin + 0.01`. 2 regression tests added.
+
+**Best deployable cell**: `15m × MT4 × 1y` → **+25.57% / 11.96% DD / Calmar 2.14**. The 5m TF (which task #107 used for the initial SWIFT integration test) is unviable on full year (−2.22% MT4, −17.61% cTrader) — task #107 got lucky on a cherry-picked Dec 28 → Apr 14 window.
+
+### Task #110 — SWIFT matrix leverage simulation deep-dive validation (commit `b2ed46b`)
+
+Prince was rightly skeptical that matrix #109 showed bit-perfect identical P&L at 1x / 50x / 100x / 500x / 1000x across all 240 cells. Ran 4 independent validation phases with zero tolerance for hidden discrepancies:
+
+- **Phase A hand trace**: Single trade (1mo × M5 × pine_zero SHORT #1) at 1x and 1000x matches to 10+ decimals. Quantity `1.9609169640 oz` identical, P&L `+$24.511462` identical, final equity `$11,355.455243` identical. Only `margin_used` differs by exactly 1000× ($10,000 → $10). ✅ PASS.
+- **Phase B unit tests**: 7 new tests in `tests/test_backtest/test_leverage_invariance.py` lock the leverage semantics in code (`test_pnl_identical_across_leverages`, `test_quantity_identical_across_leverages`, `test_entry_exit_prices_identical_across_leverages`, `test_final_equity_identical_across_leverages`, `test_margin_used_scales_inversely_with_leverage`, `test_pnl_pct_per_margin_scales_with_leverage`, `test_high_leverage_can_trigger_stop_out_with_wide_sl`). ✅ 7/7.
+- **Phase C data audit**: 1536 invariant assertions on `data/swift_full_matrix_2026-04-15.json` across 48 (window, TF, fee) triplets × 32 assertions/triplet. ✅ 1536/1536.
+- **Phase D counter-demo**: Same SWIFT signal logic with `risk_pct = 0.005 × scale` proves the framework DOES produce leverage variance when a strategy opts in: scale 1×=+13.55% / 2×=+27.81% / 5×=+73% / 10×=+144% / 25×=+133% / 50×=−90% / 100×=−100% wipeout. ✅ Framework correct.
+
+**Verdict**: `engine.run(leverage=N)` is a max-margin cap, NOT a position multiplier. SwiftAlmaStrategy's `risk_pct == sl_pct` design makes `notional = equity` at every leverage, so P&L is leverage-invariant by design. Report at `reports/swift_leverage_validation_2026-04-15.md`. New Known Gotcha row in ARCHITECTURE.md (2026-04-15). No engine or strategy bug.
+
+### Task #111 — SWIFT walk-forward OOS validation (commit `45b17b1`)
+
+With matrix #109 validated, the next question: is the 1y headline +25.57% a robust baseline or a favorable-window cherry-pick? `scripts/walk_forward_swift_alma.py` runs 7 non-overlapping 90-day OOS folds (dt-based slicing to handle weekend gaps) over 2yr XAUUSD 5m→15m, with **fixed Pine params** (no retuning — Pine params are rigid by design).
+
+Three metrics, three stories:
+
+| Metric | Calmar | Verdict |
+|---|---:|---|
+| Per-fold mean (7 folds) | **+1.124** ± 3.126 | ✅ passes gate BUT std 2.8× mean |
+| WF compounded across folds | +0.332 | ❌ fails |
+| **Continuous 630d run** | **+0.488** | **❌ fails** ← most honest |
+| Matrix 1y cell (task #109) | +2.14 | (favorable window) |
+
+Per-fold mean is inflated by fold 5's Calmar 6.97 outlier (2025-07→10 trend regime, +7.24% / 4.21% DD). Fold 3 (2025-01→04 chop regime) is catastrophic: −7.89% / 17.40% DD. The continuous 630d run on the same data produces Calmar **0.488 — below the 0.5 gate**. 4/7 profitable folds. Order of magnitude weaker than `donchian_gold` (OOS Calmar 13.73) and `vol_momentum_gold` (OOS Calmar 11.22).
+
+**Prince chose Option A**: SWIFT stays research-only. Institutional sub-book stays at 2 strategies for the 2026-04-17 merge. The SWIFT port produced two durable artifacts: TV parity framework (task #104) + leverage validation tests (task #110). Report at `reports/swift_walk_forward_2026-04-15.md`.
+
+### Shadow orchestrator regression fix (commit `fe9384d`)
+
+During merge-prep test sweep, 2 shadow tests failing: `test_runs_end_to_end_on_synthetic_data` + `test_state_dump_parquet_written`. Root cause: task #105/#107's switch to volume-based cTrader commission schedule means `commission_usd()` now REQUIRES `reference_price`, but `src/shadow_orchestrator.py` was still:
+1. Calling the forbidden default `ICMarketsMetalFeeModel()` constructor (violates CLAUDE.md rule from task #106)
+2. Not passing `reference_price` to `commission_usd()` in either close-side call site (SL/TP exit + CLOSE signal exit)
+
+Fix: default fee model now goes through `make_fee_model(fee_profile)` with `fee_profile: str = "ic_markets_mt4_xauusd_normal"` as safe default (MT4 per-lot pricing ignores `reference_price` so the fix is defensive even if a downstream caller forgets). Both call sites now pass `reference_price=fill`. Latent since task #107; surfaced when the full test suite was re-run for merge readiness.
+
+### Merge rehearsal + sync (commit `37d5695`)
+
+Pre-merge check: `git merge origin/main --no-commit --no-ff`. Auto-resolved **cleanly with zero conflicts** — the 2026-04-14 dry-run's prediction of 2 ROADMAP/STATE conflicts was wrong because gold and main edited non-overlapping sections of each doc file. Committed as merge-sync `37d5695`, pulling in main's `7c5d000` (watchdog patch) + `2883fdb` (forensic audit docs). `feat/gold-refactor` is now merge-ready for the 2026-04-17 window.
+
+**Commits added to `feat/gold-refactor` on 2026-04-15 (6 total):**
+- `241092f` fix(book): 1-cent epsilon in margin check (task #109 discovery)
+- `ebbcea9` research(swift): comprehensive 240-cell backtest matrix + report
+- `b2ed46b` research(swift): leverage simulation deep-dive validation (task #110)
+- `45b17b1` research(swift): walk-forward OOS validation — gate fail (task #111)
+- `fe9384d` fix(shadow): explicit fee profile + pass reference_price to commission_usd
+- `37d5695` merge: origin/main into feat/gold-refactor (pre-merge sync)
+
+**Test suite on feat/gold-refactor**: 1183 passing, 0 failing. Includes the 7 new leverage invariance tests + the 3 shadow orchestrator tests after the regression fix.
 
 ---
 
