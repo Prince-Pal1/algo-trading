@@ -129,6 +129,7 @@ class LeveragedBacktestResult:
     metrics: dict = field(default_factory=dict)
     total_candles: int = 0
     broker_stop_out_count: int = 0
+    open_rejected_count: int = 0  # task #115: positions rejected by margin gate
     final_institutional_equity: float = 0.0
     final_aggressive_equity: float = 0.0
 
@@ -180,6 +181,11 @@ class LeveragedBacktestEngine:
         self._path_model = path_model or BrownianBridgeModel(run_id=run_id)
         self._m3s = m3s
         self._run_id = run_id
+        # Task #115: counter for positions rejected by book.open_position's
+        # margin check. Incremented in _handle_signal's ValueError handler.
+        # Surfaced in LeveragedBacktestResult.open_rejected_count so
+        # deep_backtest can detect margin starvation at high leverage.
+        self._open_rejected_count: int = 0
 
     def run(
         self,
@@ -387,6 +393,7 @@ class LeveragedBacktestEngine:
             metrics=metrics,
             total_candles=n,
             broker_stop_out_count=total_stop_outs,
+            open_rejected_count=self._open_rejected_count,  # task #115
             final_institutional_equity=final_inst,
             final_aggressive_equity=final_aggr,
         )
@@ -576,6 +583,10 @@ class LeveragedBacktestEngine:
                 sub_book=sub_book,
             )
         except ValueError as e:
+            # Task #115: count margin-gate rejections so deep_backtest can
+            # surface margin-starvation as a CellResult.rejected_positions
+            # field. Also emitted to structlog for debugging.
+            self._open_rejected_count += 1
             log.warning("leveraged_open_rejected", reason=str(e),
                         strategy=strategy_name, bar_idx=bar_idx)
             return

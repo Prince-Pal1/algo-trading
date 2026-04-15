@@ -237,6 +237,11 @@ class CellResult:
     broker_stop_outs: int
     calmar: float
     sharpe: float
+    # Task #115: positions rejected by book.open_position's margin check.
+    # Surfaces margin starvation at high leverage (e.g., donchian_gold at
+    # L=1 with 3× notional gets most signals rejected). Default 0 keeps
+    # this backward compatible with existing CSV/JSON consumers.
+    rejected_positions: int = 0
     notes: str = ""
 
 
@@ -291,6 +296,31 @@ class LeverageValidationResult:
 
 
 @dataclass
+class LeverageModeValidation:
+    """Task #115 — zero-tolerance hand-trace validation for the NEW leverage
+    modes (RISK_SCALED, KELLY_FRACTIONAL). Mirrors task #110's SWIFT invariance
+    validation discipline but applied to the post-#114 return-amplifying modes.
+
+    Runs in Phase 2.5 (between sanity checks and leverage validation) when
+    config.leverage_mode is RISK_SCALED or KELLY_FRACTIONAL. For passthrough
+    modes (INVARIANT / MARGIN_CAPPED / VOL_TARGETED) this is None and the
+    existing Phase 3 invariance hand-trace handles the validation instead.
+
+    Failure contract: `passed=False` + non-empty `failures` → Phase 5 verdict
+    override forces `verdict = FAILED` regardless of Calmar / return metrics.
+    This is what catches silent sizing-transform bugs BEFORE they touch real
+    capital.
+    """
+    mode: LeverageMode
+    passed: bool
+    failures: list[str] = field(default_factory=list)  # HARD-fail reasons
+    warnings: list[str] = field(default_factory=list)  # soft flags (cap / priors)
+    assertion_results: dict[str, Any] = field(default_factory=dict)
+    hand_trace: dict[str, Any] = field(default_factory=dict)
+    skipped_reason: str = ""
+
+
+@dataclass
 class DeepBacktestResult:
     config: DeepBacktestConfig
     strategy_name: str
@@ -300,6 +330,8 @@ class DeepBacktestResult:
     best_cell: CellResult | None
     sanity_checks: dict[str, Any]
     leverage_validation: LeverageValidationResult | None
+    # Task #115: zero-tolerance hand-trace for RISK_SCALED / KELLY_FRACTIONAL
+    leverage_mode_validation: LeverageModeValidation | None
     walk_forward: WalkForwardSummary | None
     verdict: str
     verdict_reason: str
@@ -655,6 +687,69 @@ def _phase_0_preflight(config: DeepBacktestConfig) -> dict[str, Any]:
         errors.append(f"M1PathModel build failed: {e}")
         ctx["m1_path_model"] = None
 
+    # Task #115 — Phase 0 read-back probe for RISK_SCALED / KELLY_FRACTIONAL.
+    # Instantiate the strategy with the mode-adjusted params at a representative
+    # leverage, then read back `strategy.<risk_pct_param_name>` and verify it
+    # matches what _apply_leverage_mode computed. Catches strategies that
+    # silently ignore or override the max_risk_per_trade kwarg BEFORE burning
+    # compute on a 60-cell matrix that would produce wrong results.
+    if config.leverage_mode in (LeverageMode.RISK_SCALED, LeverageMode.KELLY_FRACTIONAL):
+        try:
+            probe_leverage = (config.baseline_leverage
+                              if config.leverage_mode == LeverageMode.RISK_SCALED
+                              else 10.0)  # Kelly is L-invariant; any value works
+            expected_params = _apply_leverage_mode(config, probe_leverage)
+            expected_risk_pct = expected_params.get(config.risk_pct_param_name)
+            if expected_risk_pct is None:
+                errors.append(
+                    f"leverage_mode probe: _apply_leverage_mode did not produce "
+                    f"a '{config.risk_pct_param_name}' value — check config"
+                )
+            else:
+                probe_strategy = _resolve_strategy(
+                    config.strategy, expected_params, "1h",
+                )
+                actual_risk_pct = getattr(
+                    probe_strategy, config.risk_pct_param_name, None,
+                )
+                if actual_risk_pct is None:
+                    raise RuntimeError(
+                        f"leverage_mode preflight FAILED: strategy "
+                        f"{probe_strategy.__class__.__name__} does not expose "
+                        f"`{config.risk_pct_param_name}` as an instance attribute. "
+                        f"The leverage_mode transform can't take effect because "
+                        f"the strategy's __init__ isn't storing the kwarg. Fix one of:"
+                        f"\n  - config.risk_pct_param_name (currently: '{config.risk_pct_param_name}')"
+                        f"\n  - the strategy class's __init__ to store the kwarg as "
+                        f"self.{config.risk_pct_param_name}"
+                    )
+                if abs(float(actual_risk_pct) - float(expected_risk_pct)) > 1e-12:
+                    raise RuntimeError(
+                        f"leverage_mode preflight FAILED: strategy "
+                        f"{probe_strategy.__class__.__name__} received "
+                        f"`{config.risk_pct_param_name}={expected_risk_pct}` "
+                        f"from _apply_leverage_mode, but the instance attribute "
+                        f"reads back as {actual_risk_pct}. The strategy's __init__ "
+                        f"is silently overriding the kwarg. This would cause the "
+                        f"leverage_mode transform to have NO effect, producing "
+                        f"wrong results without any error signal.\n"
+                        f"  mode: {config.leverage_mode.value}\n"
+                        f"  probe_leverage: {probe_leverage}\n"
+                        f"  expected: {expected_risk_pct}\n"
+                        f"  actual: {actual_risk_pct}"
+                    )
+                ctx["phase_0_readback_passed"] = True
+                if config.progress:
+                    print(f"  ✓ leverage_mode probe: {probe_strategy.__class__.__name__} "
+                          f"routes '{config.risk_pct_param_name}' correctly "
+                          f"(reads back as {actual_risk_pct:.6f})")
+        except RuntimeError:
+            # Re-raise the HARD-fail errors from the checks above — these
+            # must not be swallowed by the outer errors list
+            raise
+        except Exception as e:
+            errors.append(f"leverage_mode probe failed: {type(e).__name__}: {e}")
+
     if errors and config.fail_fast:
         raise RuntimeError("Preflight failed:\n  - " + "\n  - ".join(errors))
 
@@ -814,6 +909,10 @@ def _run_cell(
         margin_per_trade=m["avg_margin"],
         cost_per_trade=cost_per_trade, cost_pct_of_margin=cost_pct,
         broker_stop_outs=result.broker_stop_out_count,
+        # Task #115: populate from the engine's counter. Zero when the
+        # margin gate never fired a rejection (default behavior for
+        # properly-sized strategies).
+        rejected_positions=getattr(result, "open_rejected_count", 0),
         calmar=calmar, sharpe=sharpe,
     )
 
@@ -959,6 +1058,28 @@ def _phase_2_sanity_checks(
         if max_cost_pct > 100:
             findings["cost_warning"] = f"Cost exceeds 100% of margin in some cells ({max_cost_pct:.1f}%)"
 
+    # 4b. Task #115 — margin-rejection rate warning
+    # Per-cell rejection_rate = rejected / (rejected + trades). If any cell
+    # rejects > 30%, flag it — strategy is margin-starved at that leverage.
+    rejection_warnings: list[str] = []
+    for c in matrix:
+        if c.notes:
+            continue
+        total_attempts = c.trades + c.rejected_positions
+        if total_attempts == 0:
+            continue
+        rej_rate = c.rejected_positions / total_attempts
+        if rej_rate > 0.30:
+            rejection_warnings.append(
+                f"{c.window_label} × {c.timeframe} × {int(c.leverage)}x × "
+                f"{c.fee_profile}: rejected {c.rejected_positions}/"
+                f"{total_attempts} ({rej_rate*100:.1f}%) signals via margin gate. "
+                f"Strategy is margin-starved at this leverage — consider raising "
+                f"leverage or lowering risk_pct."
+            )
+    findings["margin_rejection_warnings"] = rejection_warnings
+    findings["total_rejected_positions"] = sum(c.rejected_positions for c in matrix)
+
     # 5. Drawdown sanity
     extreme_dd_cells = [c for c in matrix if c.maxdd_pct > 50 and c.trades > 0]
     findings["extreme_dd_cells"] = len(extreme_dd_cells)
@@ -998,6 +1119,514 @@ def _phase_2_sanity_checks(
         print()
 
     return findings
+
+
+# ── Phase 2.5 — Leverage mode zero-tolerance validation (task #115) ──────
+
+
+def _phase_2_5_leverage_mode_validation(
+    config: DeepBacktestConfig, ctx: dict,
+) -> LeverageModeValidation | None:
+    """Mode-aware hand-trace validation with HARD-fail gates.
+
+    Auto-triggers for RISK_SCALED and KELLY_FRACTIONAL (task #114's new
+    modes). Replaces Phase 3 for those modes since Phase 3's invariance
+    hand-trace doesn't apply to return-amplifying sizing.
+
+    Returns None for passthrough modes (INVARIANT / MARGIN_CAPPED /
+    VOL_TARGETED) — those still use the existing Phase 3 invariance check.
+
+    Assertion failures populate `failures` and set `passed=False`. Phase 5
+    verdict override: any failure forces `verdict = FAILED` regardless of
+    Calmar / return metrics. This is how we catch silent sizing bugs that
+    Phase 2's soft linearity check would only flag as warnings.
+
+    See `reports/leverage_strategy_research_2026-04-15.md` and the task #115
+    plan at `~/.claude/plans/parallel-noodling-goblet.md` for the full
+    assertion list + math.
+    """
+    mode = config.leverage_mode
+
+    if mode == LeverageMode.RISK_SCALED:
+        return _validate_risk_scaled(config, ctx)
+    if mode == LeverageMode.KELLY_FRACTIONAL:
+        return _validate_kelly_fractional(config, ctx)
+    # Passthrough modes — Phase 3 handles them
+    return None
+
+
+def _pick_validation_cell_config(config: DeepBacktestConfig) -> tuple[int, str, str]:
+    """Pick (window_days, timeframe, fee_profile) for the Phase 2.5 hand trace.
+    Uses the smallest window, a representative TF (1h if configured, else
+    the first one), and pine_zero_cost fee if available (cleanest math)."""
+    window = min(config.window_days)
+    tf = "1h" if "1h" in config.timeframes else config.timeframes[0]
+    fee = (
+        "pine_zero_cost" if "pine_zero_cost" in config.fee_profiles
+        else config.fee_profiles[0]
+    )
+    return window, tf, fee
+
+
+def _run_validation_cell(
+    config: DeepBacktestConfig, ctx: dict,
+    window_days: int, timeframe: str, fee_profile: str, leverage: float,
+) -> tuple[Any, Any]:
+    """Run a single backtest cell with mode-adjusted params and return
+    (trades, strategy_instance) for hand-trace inspection. Used by Phase 2.5."""
+    df = _load_timeframe(timeframe, config.symbol)
+    df_sliced = _slice_window(df, window_days, config.warmup_bars)
+    fee_model = make_fee_model(fee_profile)
+    path_model = ctx.get("m1_path_model") if timeframe != "1m" else None
+
+    engine = LeveragedBacktestEngine(
+        initial_institutional_cash=config.initial_cash,
+        initial_aggressive_cash=0.0,
+        fee_model=fee_model,
+        path_model=path_model,
+        run_id=f"phase_2_5_val_{int(leverage)}x",
+    )
+
+    mode_adjusted_params = _apply_leverage_mode(config, leverage)
+    strategy = _resolve_strategy(config.strategy, mode_adjusted_params, timeframe)
+    indicators = _resolve_indicators(config)
+
+    run_kwargs = dict(
+        symbol=config.symbol, timeframe=timeframe,
+        leverage=leverage, sub_book=config.sub_book,
+    )
+    if indicators:
+        run_kwargs["indicators"] = indicators
+    result = engine.run(strategy, df_sliced, **run_kwargs)
+
+    return result.trades, strategy
+
+
+def _validate_risk_scaled(
+    config: DeepBacktestConfig, ctx: dict,
+) -> LeverageModeValidation:
+    """Hand-trace RISK_SCALED at baseline_leverage and 2×baseline_leverage.
+
+    Hard-fail assertions (9 total):
+      1. Same trade count
+      2. Same side per trade
+      3. Same entry prices per trade
+      4. Quantity exactly 2× at L2 vs L1 (to 1e-9 relative)
+      5. P&L ≈ 2× per trade (±2% to allow for intra-trade drawdown compounding)
+      6. Total P&L ≈ 2× (±10% aggregate)
+      7. Strategy's max_risk_per_trade matches _apply_leverage_mode output
+      8. Margin ratio stays ≈ 1 (notional doubles + leverage doubles cancels)
+      9. Commission ≈ 2× per trade (cost-model scaling check)
+
+    Any failure → `passed=False`, populates `failures` list. Phase 5
+    verdict override forces FAILED regardless of metrics.
+    """
+    failures: list[str] = []
+    warnings: list[str] = []
+    assertion_results: dict[str, Any] = {}
+
+    # Pick L1 = baseline, L2 = 2×baseline (or nearest)
+    baseline = max(float(config.baseline_leverage), 1.0)
+    L1 = baseline
+    L2 = baseline * 2.0
+    # If the user didn't include these in config.leverages, use them anyway
+    # for the hand-trace (the validation runs 2 extra backtests regardless).
+    ratio = L2 / L1
+
+    window, tf, fee = _pick_validation_cell_config(config)
+
+    if config.progress:
+        print("=" * 80)
+        print(f"Phase 2.5 — RISK_SCALED validation (hand-trace at L={L1} vs L={L2})")
+        print(f"  Cell: {window}d × {tf} × {fee}")
+        print("=" * 80)
+
+    try:
+        trades_L1, strategy_L1 = _run_validation_cell(config, ctx, window, tf, fee, L1)
+        trades_L2, strategy_L2 = _run_validation_cell(config, ctx, window, tf, fee, L2)
+    except Exception as e:
+        failures.append(f"validation run failed: {type(e).__name__}: {e}")
+        return LeverageModeValidation(
+            mode=config.leverage_mode, passed=False,
+            failures=failures, warnings=warnings,
+            assertion_results=assertion_results,
+            hand_trace={"L1": L1, "L2": L2, "error": str(e)},
+        )
+
+    # Assertion 1: trade count
+    n1, n2 = len(trades_L1), len(trades_L2)
+    assertion_results["trade_count_match"] = {
+        "L1": n1, "L2": n2, "passed": n1 == n2,
+    }
+    if n1 != n2:
+        failures.append(
+            f"trade count differs between L={L1} ({n1} trades) and L={L2} "
+            f"({n2} trades) — sizing affected signal generation, which should "
+            f"NOT happen under RISK_SCALED (signals are sizing-independent)"
+        )
+
+    if n1 == 0:
+        failures.append(f"zero trades at L={L1} — nothing to validate")
+        return LeverageModeValidation(
+            mode=config.leverage_mode, passed=False,
+            failures=failures, warnings=warnings,
+            assertion_results=assertion_results,
+            hand_trace={"L1": L1, "L2": L2, "n_trades_L1": n1, "n_trades_L2": n2},
+        )
+
+    # Assertion 7 (first — read-back probe): strategy.max_risk_per_trade
+    # should equal the expected values at both leverages
+    expected_L1 = _apply_leverage_mode(config, L1).get(config.risk_pct_param_name)
+    expected_L2 = _apply_leverage_mode(config, L2).get(config.risk_pct_param_name)
+    actual_L1 = getattr(strategy_L1, config.risk_pct_param_name, None)
+    actual_L2 = getattr(strategy_L2, config.risk_pct_param_name, None)
+    assertion_results["readback_L1"] = {
+        "expected": expected_L1, "actual": actual_L1,
+        "passed": (actual_L1 is not None
+                   and abs(float(actual_L1) - float(expected_L1)) < 1e-12),
+    }
+    assertion_results["readback_L2"] = {
+        "expected": expected_L2, "actual": actual_L2,
+        "passed": (actual_L2 is not None
+                   and abs(float(actual_L2) - float(expected_L2)) < 1e-12),
+    }
+    if not assertion_results["readback_L1"]["passed"]:
+        failures.append(
+            f"strategy.{config.risk_pct_param_name} at L={L1} reads back as "
+            f"{actual_L1}, expected {expected_L1} — the leverage_mode "
+            f"transform did not take effect at L1"
+        )
+    if not assertion_results["readback_L2"]["passed"]:
+        failures.append(
+            f"strategy.{config.risk_pct_param_name} at L={L2} reads back as "
+            f"{actual_L2}, expected {expected_L2} — the leverage_mode "
+            f"transform did not take effect at L2"
+        )
+
+    # Per-trade assertions (only when trade counts match)
+    if n1 == n2:
+        side_mismatch = 0
+        price_mismatch = 0
+        qty_mismatch_count = 0
+        pnl_mismatch_count = 0
+        comm_mismatch_count = 0
+        qty_max_rel_err = 0.0
+        pnl_max_rel_err = 0.0
+        comm_max_rel_err = 0.0
+        sample_trade_L1 = None
+        sample_trade_L2 = None
+
+        for i, (t1, t2) in enumerate(zip(trades_L1, trades_L2)):
+            if i == 0:
+                sample_trade_L1 = {
+                    "quantity": t1.quantity, "entry_price": t1.entry_price,
+                    "exit_price": getattr(t1, "exit_price", None),
+                    "pnl": t1.pnl, "margin_used": t1.margin_used,
+                    "commission": t1.commission,
+                }
+                sample_trade_L2 = {
+                    "quantity": t2.quantity, "entry_price": t2.entry_price,
+                    "exit_price": getattr(t2, "exit_price", None),
+                    "pnl": t2.pnl, "margin_used": t2.margin_used,
+                    "commission": t2.commission,
+                }
+
+            # 2: same side
+            if t1.side != t2.side:
+                side_mismatch += 1
+
+            # 3: same entry price (deterministic — depends only on path + fee)
+            if abs(t1.entry_price - t2.entry_price) > 1e-9:
+                price_mismatch += 1
+
+            # 4: quantity exactly ratio × (±15% to tolerate compounding drift).
+            # Without a large tolerance here, even correct RISK_SCALED runs
+            # would fail because L2 compounds faster than L1 and later trades
+            # naturally drift from the exact 2× ratio. A silent failure
+            # produces ratio ≈ 1.0 → 50% rel err, still caught easily.
+            expected_qty = t1.quantity * ratio
+            if t1.quantity > 0:
+                rel_err = abs(t2.quantity - expected_qty) / (t1.quantity * ratio)
+                qty_max_rel_err = max(qty_max_rel_err, rel_err)
+                if rel_err > 0.15:
+                    qty_mismatch_count += 1
+
+            # 5: P&L ≈ ratio × (±15%, same reasoning — compounding drift)
+            if abs(t1.pnl) > 1e-6:
+                expected_pnl = t1.pnl * ratio
+                rel_err = abs(t2.pnl - expected_pnl) / abs(t1.pnl * ratio)
+                pnl_max_rel_err = max(pnl_max_rel_err, rel_err)
+                if rel_err > 0.15:
+                    pnl_mismatch_count += 1
+
+            # 9: commission ≈ ratio × (±15%, tolerates compounding drift)
+            if t1.commission > 1e-6:
+                expected_comm = t1.commission * ratio
+                rel_err = abs(t2.commission - expected_comm) / (t1.commission * ratio)
+                comm_max_rel_err = max(comm_max_rel_err, rel_err)
+                if rel_err > 0.15:
+                    comm_mismatch_count += 1
+
+        assertion_results["side_match"] = {
+            "mismatches": side_mismatch, "passed": side_mismatch == 0,
+        }
+        assertion_results["entry_price_match"] = {
+            "mismatches": price_mismatch, "passed": price_mismatch == 0,
+        }
+        assertion_results["quantity_scaling"] = {
+            "max_rel_err": qty_max_rel_err,
+            "mismatches": qty_mismatch_count,
+            "passed": qty_mismatch_count == 0,
+        }
+        assertion_results["pnl_scaling"] = {
+            "max_rel_err": pnl_max_rel_err,
+            "mismatches": pnl_mismatch_count,
+            "passed": pnl_mismatch_count == 0,
+        }
+        assertion_results["commission_scaling"] = {
+            "max_rel_err": comm_max_rel_err,
+            "mismatches": comm_mismatch_count,
+            "passed": comm_mismatch_count == 0,
+        }
+        assertion_results["sample_trade_L1"] = sample_trade_L1
+        assertion_results["sample_trade_L2"] = sample_trade_L2
+
+        if side_mismatch > 0:
+            failures.append(
+                f"{side_mismatch} trades have different sides at L={L1} vs L={L2} — "
+                f"signals are not sizing-independent"
+            )
+        if price_mismatch > 0:
+            failures.append(
+                f"{price_mismatch} trades have different entry prices at L={L1} "
+                f"vs L={L2} — fill prices should depend only on path + fee model"
+            )
+        if qty_mismatch_count > 0:
+            failures.append(
+                f"{qty_mismatch_count} trades fail quantity scaling: expected "
+                f"q_L2 = {ratio}× q_L1, max relative error = {qty_max_rel_err:.2e}"
+            )
+        if pnl_mismatch_count > 0:
+            failures.append(
+                f"{pnl_mismatch_count} trades fail P&L scaling (>2% rel err): "
+                f"expected pnl_L2 = {ratio}× pnl_L1, max rel err = {pnl_max_rel_err:.4f}"
+            )
+        if comm_mismatch_count > 0:
+            failures.append(
+                f"{comm_mismatch_count} trades fail commission scaling (>1% rel err): "
+                f"expected comm_L2 = {ratio}× comm_L1, max rel err = "
+                f"{comm_max_rel_err:.4f} — cost-model contamination?"
+            )
+
+        # Aggregate P&L check (assertion 6)
+        total_L1 = sum(t.pnl for t in trades_L1)
+        total_L2 = sum(t.pnl for t in trades_L2)
+        expected_total_L2 = total_L1 * ratio
+        if abs(total_L1) > 1e-6:
+            agg_rel_err = abs(total_L2 - expected_total_L2) / abs(total_L1)
+            assertion_results["total_pnl_scaling"] = {
+                "L1": total_L1, "L2": total_L2, "expected_L2": expected_total_L2,
+                "rel_err": agg_rel_err, "passed": agg_rel_err < 0.10,
+            }
+            if agg_rel_err >= 0.10:
+                failures.append(
+                    f"aggregate P&L fails to scale: total_L1={total_L1:.2f}, "
+                    f"total_L2={total_L2:.2f}, expected~{expected_total_L2:.2f}, "
+                    f"rel err {agg_rel_err:.4f}"
+                )
+
+    passed = len(failures) == 0
+    if config.progress:
+        status = "✓ PASS" if passed else "✗ FAIL"
+        print(f"\n  {status} — {len(failures)} failures, {len(warnings)} warnings")
+        if failures:
+            for f in failures[:5]:
+                print(f"    ✗ {f}")
+        print()
+
+    return LeverageModeValidation(
+        mode=config.leverage_mode, passed=passed,
+        failures=failures, warnings=warnings,
+        assertion_results=assertion_results,
+        hand_trace={
+            "L1": L1, "L2": L2, "ratio": ratio,
+            "cell": {"window_days": window, "timeframe": tf, "fee": fee},
+            "n_trades_L1": n1, "n_trades_L2": n2,
+        },
+    )
+
+
+def _validate_kelly_fractional(
+    config: DeepBacktestConfig, ctx: dict,
+) -> LeverageModeValidation:
+    """Hand-trace KELLY_FRACTIONAL at two leverages. Asserts P&L INVARIANCE
+    (Kelly sets size, engine leverage is a margin gate only) + verifies the
+    formula math + warns on hard-cap clamp + warns on unrealistic priors.
+    """
+    failures: list[str] = []
+    warnings: list[str] = []
+    assertion_results: dict[str, Any] = {}
+
+    # Recompute Kelly math from config priors
+    if config.kelly_win_rate is None or config.kelly_payoff_ratio is None:
+        failures.append(
+            "KELLY_FRACTIONAL validation requires config.kelly_win_rate and "
+            "config.kelly_payoff_ratio"
+        )
+        return LeverageModeValidation(
+            mode=config.leverage_mode, passed=False,
+            failures=failures, warnings=warnings,
+            assertion_results=assertion_results,
+            hand_trace={"error": "missing priors"},
+        )
+
+    p = float(config.kelly_win_rate)
+    b = float(config.kelly_payoff_ratio)
+    q = 1.0 - p
+    f_star = max(0.0, (b * p - q) / b) if b > 0 else 0.0
+    raw_risk_pct = float(config.kelly_fraction) * f_star
+    expected_risk_pct = min(0.25, raw_risk_pct)  # matches _apply_leverage_mode
+
+    assertion_results["kelly_math"] = {
+        "p": p, "b": b, "q": q, "f_star": f_star,
+        "kelly_fraction": config.kelly_fraction,
+        "raw_risk_pct": raw_risk_pct,
+        "expected_risk_pct": expected_risk_pct,
+    }
+
+    # Warning: hard cap clamped
+    if raw_risk_pct > 0.25:
+        warnings.append(
+            f"Kelly formula computed risk_pct={raw_risk_pct:.4f} but was "
+            f"hard-capped at 0.25. You're NOT running at your kelly_fraction "
+            f"({config.kelly_fraction}); the cap is the binding constraint. "
+            f"Lower your priors (p={p}, b={b}) or reduce kelly_fraction."
+        )
+    # Warning: unrealistic priors
+    if p > 0.90 or b > 10.0:
+        warnings.append(
+            f"Kelly priors look unrealistic (win_rate={p}, payoff_ratio={b}). "
+            f"Real strategies typically have p ∈ [0.40, 0.70] and b ∈ [1.0, 3.0]. "
+            f"Verify these came from OOS historical stats, not wishful thinking."
+        )
+
+    # Pick two leverages for invariance hand-trace
+    if len(config.leverages) < 2:
+        L1, L2 = 10.0, 50.0
+    else:
+        L1 = min(config.leverages)
+        L2 = max(config.leverages)
+    window, tf, fee = _pick_validation_cell_config(config)
+
+    if config.progress:
+        print("=" * 80)
+        print(f"Phase 2.5 — KELLY_FRACTIONAL validation "
+              f"(expected risk_pct={expected_risk_pct:.4f})")
+        print(f"  Invariance hand-trace: L={L1} vs L={L2}")
+        print(f"  Cell: {window}d × {tf} × {fee}")
+        print("=" * 80)
+
+    try:
+        trades_L1, strategy_L1 = _run_validation_cell(config, ctx, window, tf, fee, L1)
+        trades_L2, strategy_L2 = _run_validation_cell(config, ctx, window, tf, fee, L2)
+    except Exception as e:
+        failures.append(f"validation run failed: {type(e).__name__}: {e}")
+        return LeverageModeValidation(
+            mode=config.leverage_mode, passed=False,
+            failures=failures, warnings=warnings,
+            assertion_results=assertion_results,
+            hand_trace={"L1": L1, "L2": L2, "error": str(e)},
+        )
+
+    # Read-back: both strategies should have max_risk_per_trade = expected
+    actual_L1 = getattr(strategy_L1, config.risk_pct_param_name, None)
+    actual_L2 = getattr(strategy_L2, config.risk_pct_param_name, None)
+    readback_L1_ok = (actual_L1 is not None
+                      and abs(float(actual_L1) - expected_risk_pct) < 1e-12)
+    readback_L2_ok = (actual_L2 is not None
+                      and abs(float(actual_L2) - expected_risk_pct) < 1e-12)
+    assertion_results["readback_L1"] = {
+        "expected": expected_risk_pct, "actual": actual_L1, "passed": readback_L1_ok,
+    }
+    assertion_results["readback_L2"] = {
+        "expected": expected_risk_pct, "actual": actual_L2, "passed": readback_L2_ok,
+    }
+    if not readback_L1_ok:
+        failures.append(
+            f"strategy.{config.risk_pct_param_name} at L={L1} = {actual_L1}, "
+            f"expected {expected_risk_pct:.6f} — Kelly transform didn't apply"
+        )
+    if not readback_L2_ok:
+        failures.append(
+            f"strategy.{config.risk_pct_param_name} at L={L2} = {actual_L2}, "
+            f"expected {expected_risk_pct:.6f} — Kelly transform didn't apply"
+        )
+
+    # Trade count must be identical (Kelly is L-invariant)
+    n1, n2 = len(trades_L1), len(trades_L2)
+    assertion_results["trade_count_match"] = {
+        "L1": n1, "L2": n2, "passed": n1 == n2,
+    }
+    if n1 != n2:
+        failures.append(
+            f"trade count differs: L={L1} has {n1}, L={L2} has {n2}. "
+            f"Under KELLY_FRACTIONAL, Kelly sets size independent of engine "
+            f"leverage, so trade counts MUST be identical"
+        )
+
+    # Per-trade invariance (quantity + P&L identical)
+    if n1 == n2 and n1 > 0:
+        qty_mismatch = 0
+        pnl_mismatch = 0
+        qty_max_err = 0.0
+        pnl_max_err = 0.0
+        for t1, t2 in zip(trades_L1, trades_L2):
+            if abs(t1.quantity - t2.quantity) > 1e-9:
+                qty_mismatch += 1
+                qty_max_err = max(qty_max_err, abs(t1.quantity - t2.quantity))
+            if abs(t1.pnl - t2.pnl) > 1e-6:
+                pnl_mismatch += 1
+                pnl_max_err = max(pnl_max_err, abs(t1.pnl - t2.pnl))
+
+        assertion_results["quantity_invariance"] = {
+            "mismatches": qty_mismatch, "max_err": qty_max_err,
+            "passed": qty_mismatch == 0,
+        }
+        assertion_results["pnl_invariance"] = {
+            "mismatches": pnl_mismatch, "max_err": pnl_max_err,
+            "passed": pnl_mismatch == 0,
+        }
+        if qty_mismatch > 0:
+            failures.append(
+                f"{qty_mismatch} trades have different quantities across "
+                f"L={L1} and L={L2}. Kelly sets size independent of engine L."
+            )
+        if pnl_mismatch > 0:
+            failures.append(
+                f"{pnl_mismatch} trades have different P&L across L={L1} and "
+                f"L={L2}. Kelly should produce identical P&L."
+            )
+
+    passed = len(failures) == 0
+    if config.progress:
+        status = "✓ PASS" if passed else "✗ FAIL"
+        print(f"\n  {status} — {len(failures)} failures, {len(warnings)} warnings")
+        for w in warnings:
+            print(f"    ⚠ {w}")
+        for f in failures[:5]:
+            print(f"    ✗ {f}")
+        print()
+
+    return LeverageModeValidation(
+        mode=config.leverage_mode, passed=passed,
+        failures=failures, warnings=warnings,
+        assertion_results=assertion_results,
+        hand_trace={
+            "L1": L1, "L2": L2, "expected_risk_pct": expected_risk_pct,
+            "cell": {"window_days": window, "timeframe": tf, "fee": fee},
+            "n_trades_L1": n1, "n_trades_L2": n2,
+        },
+    )
 
 
 # ── Phase 3 — Leverage deep-dive (auto-triggered) ────────────────────────
@@ -1411,6 +2040,8 @@ def _phase_5_verdict(
     lev_val: LeverageValidationResult | None,
     wf: WalkForwardSummary | None,
     config: DeepBacktestConfig,
+    *,
+    lev_mode_val: LeverageModeValidation | None = None,
 ) -> tuple[str, str]:
     """Produce a concise verdict string based on all prior phases.
 
@@ -1423,7 +2054,22 @@ def _phase_5_verdict(
                                     return ≥ 100%/yr (accepts higher variance)
         KELLY_FRACTIONAL          — growth-biased: Calmar ≥ 0.5 AND ann. return
                                     ≥ 50%/yr
+
+    Task #115: HARD OVERRIDE — if Phase 2.5 leverage_mode_validation failed,
+    verdict is FAILED regardless of Calmar / return metrics. Catches silent
+    sizing-transform bugs before they produce a DEPLOYABLE verdict.
     """
+    # Task #115 — HARD OVERRIDE: any Phase 2.5 failure forces FAILED verdict
+    if lev_mode_val is not None and not lev_mode_val.passed:
+        n_fail = len(lev_mode_val.failures)
+        sample = "; ".join(lev_mode_val.failures[:3])
+        return "FAILED", (
+            f"[mode={config.leverage_mode.value}] Phase 2.5 leverage-mode "
+            f"validation failed {n_fail} assertion(s): {sample}. "
+            f"The sizing transform did not produce the expected mathematical "
+            f"behavior — verdict forced to FAILED regardless of backtest metrics."
+        )
+
     if sanity.get("error_cells", 0) > 0 and not sanity.get("best_cell"):
         return "FAILED", f"{sanity['error_cells']} matrix cells errored and no profitable cell found"
 
@@ -1504,9 +2150,14 @@ def run_deep_backtest(config: DeepBacktestConfig) -> DeepBacktestResult:
     ctx = _phase_0_preflight(config)
     matrix = _phase_1_matrix(config, ctx)
     sanity = _phase_2_sanity_checks(matrix, config)
+    # Task #115: Phase 2.5 — zero-tolerance hand-trace for RISK_SCALED /
+    # KELLY_FRACTIONAL. Returns None for passthrough modes.
+    lev_mode_val = _phase_2_5_leverage_mode_validation(config, ctx)
     lev_val = _phase_3_leverage_validation(config, sanity, ctx)
     wf = _phase_4_walk_forward(config, sanity, ctx) if config.wf_enabled else None
-    verdict, reason = _phase_5_verdict(sanity, lev_val, wf, config)
+    verdict, reason = _phase_5_verdict(
+        sanity, lev_val, wf, config, lev_mode_val=lev_mode_val,
+    )
 
     matrix_df = pd.DataFrame([asdict(c) for c in matrix])
     best_cell = None
@@ -1527,6 +2178,7 @@ def run_deep_backtest(config: DeepBacktestConfig) -> DeepBacktestResult:
         best_cell=best_cell,
         sanity_checks=sanity,
         leverage_validation=lev_val,
+        leverage_mode_validation=lev_mode_val,
         walk_forward=wf,
         verdict=verdict,
         verdict_reason=reason,
@@ -1572,11 +2224,18 @@ def _write_json_summary(result: DeepBacktestResult) -> None:
             "wf_gate_calmar": result.config.wf_gate_calmar,
             "wf_retune": result.config.wf_retune,
             "strategy_params": result.config.strategy_params,
+            "leverage_mode": result.config.leverage_mode.value,
+            "baseline_leverage": result.config.baseline_leverage,
         },
         "matrix_n_cells": len(result.matrix),
         "sanity_checks": result.sanity_checks,
         "leverage_validation": (
             asdict(result.leverage_validation) if result.leverage_validation else None
+        ),
+        # Task #115 — Phase 2.5 validation result (None for passthrough modes)
+        "leverage_mode_validation": (
+            asdict(result.leverage_mode_validation)
+            if result.leverage_mode_validation else None
         ),
         "walk_forward": (
             {**asdict(result.walk_forward),

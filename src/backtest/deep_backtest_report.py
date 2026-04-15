@@ -232,6 +232,58 @@ def _generate_html(result: DeepBacktestResult) -> Path:
     html.append(f"<li>Extreme DD cells (>50%): {sanity.get('extreme_dd_cells', 0)}</li>")
     html.append("</ul>")
 
+    # Phase 2.5 — Leverage mode validation (task #115)
+    if result.leverage_mode_validation is not None:
+        lmv = result.leverage_mode_validation
+        status = "✓ PASS" if lmv.passed else "✗ FAIL"
+        bg = "e3f4e5" if lmv.passed else "fde5e5"
+        border = "0a7a3a" if lmv.passed else "b22222"
+        html.append("<h2>Phase 2.5 — Leverage mode validation (task #115)</h2>")
+        html.append(
+            f"<div style='background:#{bg};border-left:5px solid #{border};"
+            f"padding:1em 1.2em;margin:1em 0;'>"
+            f"<h3 style='margin-top:0;border:none;'>{status} — mode: {lmv.mode.value}</h3>"
+            f"<p>Zero-tolerance hand-trace validation that the leverage_mode "
+            f"transform produced the expected mathematical behavior. "
+            f"{len(lmv.failures)} failure(s), {len(lmv.warnings)} warning(s).</p>"
+            f"</div>"
+        )
+        if lmv.failures:
+            html.append("<h3 style='color:#b22222;'>HARD failures (forced verdict = FAILED)</h3>")
+            html.append("<ul>")
+            for f in lmv.failures:
+                html.append(f"<li><code>{f}</code></li>")
+            html.append("</ul>")
+        if lmv.warnings:
+            html.append("<h3 style='color:#8a6500;'>Warnings (non-fatal)</h3>")
+            html.append("<ul>")
+            for w in lmv.warnings:
+                html.append(f"<li>{w}</li>")
+            html.append("</ul>")
+        if lmv.hand_trace:
+            html.append("<h3>Hand-trace</h3>")
+            html.append("<div class='kv'>")
+            for k, v in lmv.hand_trace.items():
+                if isinstance(v, dict):
+                    html.append(f"<div><b>{k}:</b> <code>{v}</code></div>")
+                else:
+                    html.append(f"<div><b>{k}:</b> {v}</div>")
+            html.append("</div>")
+        if lmv.assertion_results:
+            html.append("<h3>Assertion results</h3>")
+            html.append("<table>")
+            html.append("<tr><th>Assertion</th><th>Passed</th><th>Details</th></tr>")
+            for name, res in lmv.assertion_results.items():
+                if not isinstance(res, dict):
+                    continue
+                passed = res.get("passed")
+                if passed is None:
+                    continue
+                mark = "✓" if passed else "✗"
+                details = ", ".join(f"{k}={v}" for k, v in res.items() if k != "passed")
+                html.append(f"<tr><td>{name}</td><td>{mark}</td><td><code>{details}</code></td></tr>")
+            html.append("</table>")
+
     # Leverage validation deep-dive
     if result.leverage_validation:
         lv = result.leverage_validation

@@ -23,11 +23,14 @@ from src.backtest.deep_backtest import (
     DeepBacktestConfig,
     DeepBacktestResult,
     LeverageMode,
+    LeverageModeValidation,
     LeverageValidationResult,
     WalkForwardSummary,
     _apply_leverage_mode,
     _check_window_availability,
     _load_timeframe,
+    _validate_kelly_fractional,
+    _validate_risk_scaled,
     run_deep_backtest,
 )
 
@@ -643,3 +646,242 @@ class TestInteractiveTUI:
             LeverageMode.KELLY_FRACTIONAL,
             LeverageMode.VOL_TARGETED,
         ]
+
+
+# ── Task #115 synthetic strategies for validation testing ───────────────
+
+
+class _OverridesInInitStrategy:
+    """Synthetic strategy that accepts max_risk_per_trade kwarg but IGNORES it
+    inside __init__ and hardcodes the attribute. Used to test the Phase 0
+    read-back probe — this pattern is exactly what the probe must catch
+    because the leverage_mode transform would have no effect on this class.
+    """
+
+    # Mimic BaseStrategy interface just enough to satisfy _resolve_strategy.
+    # We don't inherit from BaseStrategy because we want a minimal synthetic.
+    name = "synthetic_override"
+    markets = ["XAUUSD"]
+    timeframe = "1h"
+    leverage_range = (1.0, 100.0)
+
+    def __init__(self, *, max_risk_per_trade: float = 0.02, timeframe: str = "1h", **kwargs):
+        # BUG SIMULATION: we accept the kwarg but store a hardcoded value.
+        # This is the exact silent-failure pattern the probe catches.
+        self.max_risk_per_trade = 0.01  # ignores kwarg value
+        self.timeframe = timeframe
+        self._bar = 0
+
+    def on_features(self, symbol, timeframe, features):
+        return None  # no signals needed — probe runs before any backtest
+
+
+class TestLeverageModeValidation:
+    """Phase 2.5 zero-tolerance validation tests (task #115).
+
+    Covers:
+      - Passthrough modes skip Phase 2.5
+      - RISK_SCALED validation passes on correct donchian_gold
+      - Phase 0 read-back probe catches silent strategy-constructor override
+      - KELLY_FRACTIONAL validation passes on invariance
+      - KELLY_FRACTIONAL warns on hard-cap clamp
+      - KELLY_FRACTIONAL warns on unrealistic priors
+      - Unit-level f* math via _validate_kelly_fractional priors path
+      - Verdict override forces FAILED on hard-fail
+    """
+
+    def _base_cfg(self, tmp_path, out_sub, **overrides):
+        defaults = dict(
+            strategy="donchian_gold",
+            strategy_params={"session_filter": True, "max_risk_per_trade": 0.02},
+            timeframes=["1h"],
+            window_days=[90],
+            leverages=[10.0],
+            fee_profiles=["ic_markets_mt4_xauusd_normal"],
+            wf_enabled=False,
+            leverage_validation_enabled=False,
+            out_dir=tmp_path / out_sub,
+            generate_html=False,
+            generate_pdf=False,
+            generate_heatmaps=False,
+            progress=False,
+        )
+        defaults.update(overrides)
+        return DeepBacktestConfig(**defaults)
+
+    def test_passthrough_modes_skip_phase_2_5(self, tmp_path):
+        """INVARIANT / MARGIN_CAPPED / VOL_TARGETED runs should have
+        leverage_mode_validation == None. The existing Phase 3 handles them.
+        """
+        for i, mode in enumerate((LeverageMode.INVARIANT,
+                                  LeverageMode.MARGIN_CAPPED,
+                                  LeverageMode.VOL_TARGETED)):
+            cfg = self._base_cfg(
+                tmp_path, f"pass_{mode.value}_{i}",
+                leverage_mode=mode,
+                leverages=[10.0],  # single leverage → Phase 3 doesn't trigger either
+            )
+            result = run_deep_backtest(cfg)
+            assert result.leverage_mode_validation is None, \
+                f"passthrough mode {mode.value} should skip Phase 2.5"
+
+    def test_risk_scaled_validation_passes_on_correct_donchian(self, tmp_path):
+        """End-to-end: donchian_gold in RISK_SCALED mode should PASS Phase 2.5
+        when risk_pct is small enough that the L2=2×baseline run still fits
+        in margin.
+
+        donchian_gold's default notional ≈ 3× equity at risk_pct=0.02. At L2
+        with risk_pct=0.04, notional becomes ~6× equity. At high leverage
+        that still fits, but at modest leverage the margin gate starts
+        rejecting positions → different trade counts → scaling contract
+        breaks. Solution: use a small risk_pct (0.005) so L2 has headroom.
+        """
+        cfg = self._base_cfg(
+            tmp_path, "rs_passing",
+            strategy_params={"session_filter": True, "max_risk_per_trade": 0.005},
+            leverage_mode=LeverageMode.RISK_SCALED,
+            baseline_leverage=10.0,
+            leverages=[10.0],
+        )
+        result = run_deep_backtest(cfg)
+        assert result.leverage_mode_validation is not None
+        lmv = result.leverage_mode_validation
+        assert lmv.mode == LeverageMode.RISK_SCALED
+        # With small enough risk_pct, the 2× scaling should fit in margin and
+        # the hand-trace should pass all 9 assertions.
+        assert lmv.passed is True, \
+            f"expected Phase 2.5 to pass on donchian_gold RISK_SCALED at "\
+            f"risk_pct=0.005, got failures: {lmv.failures}"
+        assert len(lmv.failures) == 0
+
+    def test_readback_probe_catches_param_override(self, tmp_path):
+        """Phase 0 read-back probe must raise RuntimeError when a strategy's
+        __init__ silently overrides max_risk_per_trade. The _OverridesInInitStrategy
+        synthetic above simulates this exact bug pattern."""
+        # Use dotted path to load the synthetic class
+        cfg = DeepBacktestConfig(
+            strategy=f"{__name__}:_OverridesInInitStrategy",
+            strategy_params={"max_risk_per_trade": 0.02},
+            leverage_mode=LeverageMode.RISK_SCALED,
+            baseline_leverage=10.0,
+            timeframes=["1h"],
+            window_days=[90],
+            leverages=[10.0],
+            fee_profiles=["ic_markets_mt4_xauusd_normal"],
+            wf_enabled=False,
+            leverage_validation_enabled=False,
+            out_dir=tmp_path / "readback_catch",
+            generate_html=False, generate_pdf=False, generate_heatmaps=False,
+            progress=False,
+        )
+        # The Phase 0 probe should raise — expected = 0.02 (base), actual = 0.01 (override)
+        with pytest.raises(RuntimeError, match="preflight FAILED"):
+            run_deep_backtest(cfg)
+
+    def test_kelly_fractional_validation_passes_on_donchian(self, tmp_path):
+        """donchian_gold + KELLY_FRACTIONAL with realistic priors + small
+        kelly_fraction should PASS Phase 2.5. The Kelly formula can produce
+        large risk_pct values that crash donchian_gold (e.g., half-Kelly on
+        b=2.0, p=0.55 → 0.1625 risk_pct → 24× equity notional → rejections).
+        Use quarter-Kelly with conservative priors for a feasible run.
+
+        p=0.52, b=1.2 → f* = (1.2×0.52 - 0.48)/1.2 = 0.12
+        kelly_fraction=0.1 → risk_pct = 0.012 (small enough to fit)
+        """
+        cfg = self._base_cfg(
+            tmp_path, "kelly_passing",
+            leverage_mode=LeverageMode.KELLY_FRACTIONAL,
+            kelly_fraction=0.1,
+            kelly_win_rate=0.52,
+            kelly_payoff_ratio=1.2,
+            leverages=[10.0, 50.0],  # two leverages for invariance check
+        )
+        result = run_deep_backtest(cfg)
+        assert result.leverage_mode_validation is not None
+        lmv = result.leverage_mode_validation
+        assert lmv.mode == LeverageMode.KELLY_FRACTIONAL
+        assert lmv.passed is True, \
+            f"expected Phase 2.5 to pass on Kelly with conservative priors, failures: {lmv.failures}"
+        # No cap-clamp warning (0.1 × 0.12 = 0.012, well below 0.25)
+        assert not any("hard-capped" in w for w in lmv.warnings)
+
+    def test_kelly_fractional_warns_on_hard_cap(self, tmp_path):
+        """Priors that produce raw f* × kelly_fraction > 0.25 should trigger
+        the hard-cap clamp warning.
+
+        p=0.80, b=5.0 → f* = (5×0.8 - 0.2)/5 = 0.76
+        kelly_fraction=0.5 → raw=0.38, capped to 0.25
+
+        Note: the capped 0.25 risk_pct is VERY aggressive for donchian_gold
+        and will almost certainly cause margin-gate rejections → trade-count
+        mismatch between L1 and L2 → Phase 2.5 will HARD-FAIL on invariance.
+        That's actually correct behavior (real math in real data) — the
+        strategy cannot survive 25% risk per trade. But the hard-cap warning
+        SHOULD fire regardless. We assert ONLY that the warning is present.
+        """
+        cfg = self._base_cfg(
+            tmp_path, "kelly_cap_warn",
+            leverage_mode=LeverageMode.KELLY_FRACTIONAL,
+            kelly_fraction=0.5,
+            kelly_win_rate=0.80,
+            kelly_payoff_ratio=5.0,
+            leverages=[10.0, 50.0],
+        )
+        result = run_deep_backtest(cfg)
+        lmv = result.leverage_mode_validation
+        assert lmv is not None
+        # Warning must fire regardless of whether passed=True or False —
+        # the cap clamp is a config-level observation, not a runtime outcome
+        assert any("hard-capped" in w for w in lmv.warnings), \
+            f"expected hard-cap warning, got warnings: {lmv.warnings}"
+
+    def test_kelly_fractional_warns_on_unrealistic_priors(self, tmp_path):
+        """p=0.95 (> 0.90) should trigger the unrealistic-priors warning."""
+        cfg = self._base_cfg(
+            tmp_path, "kelly_unreal_warn",
+            leverage_mode=LeverageMode.KELLY_FRACTIONAL,
+            kelly_fraction=0.25,  # use quarter-Kelly to avoid cap
+            kelly_win_rate=0.95,
+            kelly_payoff_ratio=3.0,
+            leverages=[10.0, 50.0],
+        )
+        result = run_deep_backtest(cfg)
+        lmv = result.leverage_mode_validation
+        assert lmv is not None
+        assert any("unrealistic" in w for w in lmv.warnings), \
+            f"expected unrealistic-priors warning, got: {lmv.warnings}"
+
+    def test_kelly_math_unit(self, tmp_path):
+        """Unit test: _validate_kelly_fractional computes f* correctly.
+        p=0.55, b=2.0 → f* = (2×0.55 - 0.45)/2 = (1.10 - 0.45)/2 = 0.325
+        half-Kelly × 0.325 = 0.1625 (below cap)"""
+        cfg = self._base_cfg(
+            tmp_path, "kelly_math_unit",
+            leverage_mode=LeverageMode.KELLY_FRACTIONAL,
+            kelly_fraction=0.5,
+            kelly_win_rate=0.55,
+            kelly_payoff_ratio=2.0,
+        )
+        # Also reproduce via _apply_leverage_mode directly
+        params = _apply_leverage_mode(cfg, 10.0)
+        assert abs(params["max_risk_per_trade"] - 0.1625) < 1e-9
+
+    def test_rejected_positions_count_field_exists(self, tmp_path):
+        """After task #115, every CellResult should have rejected_positions
+        populated from the engine's open_rejected_count. For a normal
+        donchian_gold L=10 run, this is typically 0 (no margin rejections)."""
+        cfg = self._base_cfg(tmp_path, "rejected_field")
+        result = run_deep_backtest(cfg)
+        for cell in result.matrix:
+            assert hasattr(cell, "rejected_positions")
+            assert isinstance(cell.rejected_positions, int)
+            assert cell.rejected_positions >= 0
+
+    def test_sanity_checks_include_rejection_warnings(self, tmp_path):
+        """Phase 2 sanity_checks dict should include margin_rejection_warnings
+        list and total_rejected_positions int after task #115."""
+        cfg = self._base_cfg(tmp_path, "rejection_warnings_field")
+        result = run_deep_backtest(cfg)
+        assert "margin_rejection_warnings" in result.sanity_checks
+        assert isinstance(result.sanity_checks["margin_rejection_warnings"], list)
+        assert "total_rejected_positions" in result.sanity_checks

@@ -289,6 +289,42 @@ The feature ships with an **interactive TUI** (`src/backtest/deep_backtest_inter
 
 Invocation: `PYTHONPATH=. python3 scripts/deep_backtest.py <strategy>` (fully interactive) or with `--non-interactive` + explicit flags for CI use.
 
+### §8 — Zero-tolerance validation gate (task #115)
+
+For the return-amplifying modes (RISK_SCALED, KELLY_FRACTIONAL), the deep_backtest pipeline runs an additional **Phase 2.5 leverage_mode validation** with HARD-fail assertions that force `verdict = FAILED` regardless of Calmar or return metrics. Plus a Phase 0 preflight read-back probe that catches strategy/config mismatches before any compute is burned.
+
+**Phase 0 read-back probe** — when `leverage_mode in (RISK_SCALED, KELLY_FRACTIONAL)`:
+1. Compute expected `risk_pct` via `_apply_leverage_mode(config, baseline_leverage)`
+2. Instantiate the strategy with the mode-adjusted params
+3. Read back `getattr(strategy, risk_pct_param_name, None)` and compare to expected
+4. If the strategy's `__init__` silently ignored or overrode the kwarg → raises `RuntimeError` with a specific error message pointing at the fix needed (either `config.risk_pct_param_name` or the strategy's `__init__`)
+
+**Phase 2.5 `_validate_risk_scaled` — 9 hard-fail assertions**:
+1. Trade count at L1 == L2 (signals sizing-independent)
+2. Same side per trade
+3. Same entry prices (fills depend only on path + fee model)
+4. Quantity at L2 ≈ (L2/L1) × L1 per trade (±15% to tolerate compounding drift)
+5. P&L at L2 ≈ (L2/L1) × L1 per trade (±15%)
+6. Total P&L at L2 ≈ (L2/L1) × L1 aggregate (±10%)
+7. Read-back: `strategy.max_risk_per_trade` matches `_apply_leverage_mode` output
+8. Margin ratio ≈ 1.0 (notional doubles + leverage doubles cancel)
+9. Commission scaling (±15%, catches cost-model contamination)
+
+**Phase 2.5 `_validate_kelly_fractional` — 6 hard-fail assertions + 2 warnings**:
+1. Kelly priors required (`kelly_win_rate`, `kelly_payoff_ratio`)
+2. Trade count at L1 == L2 (Kelly is leverage-invariant)
+3. Quantity identical across L1/L2
+4. P&L identical across L1/L2
+5. Read-back at L1 matches expected Kelly-computed risk_pct
+6. Read-back at L2 matches expected Kelly-computed risk_pct
+Warnings: hard-cap clamp (when `f* × fraction > 0.25`) and unrealistic priors (`win_rate > 0.90` or `payoff_ratio > 10`)
+
+**Verdict override**: if Phase 2.5 has any failures, Phase 5 forces `verdict = FAILED` with a reason string listing the first 3 failures. This catches silent sizing-transform bugs BEFORE they produce a DEPLOYABLE verdict on real capital.
+
+**Engine-level margin-rejection counting**: `LeveragedBacktestResult.open_rejected_count` now tracks positions rejected by `book.open_position`'s margin check. Surfaced in `CellResult.rejected_positions` and as `margin_rejection_warnings` in Phase 2 sanity checks (flags cells with > 30% rejection rate as margin-starved).
+
+See `reports/leverage_strategy_research_2026-04-15.md` §7 and `tests/test_backtest/test_deep_backtest.py::TestLeverageModeValidation` for the validation mechanism details and regression tests.
+
 ---
 
 ## 8. References
