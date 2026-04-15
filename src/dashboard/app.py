@@ -104,6 +104,158 @@ def _format_hero_summary(hero, strategies_by_id) -> str:
     return f"{name} {ret:+.1f}%" if ret is not None else name
 
 
+def _wrap_html_for_light_theme(html_content: str) -> str:
+    """Inject a CSS override so the embedded deep_backtest HTML report
+    renders with a light background even when Streamlit uses dark theme.
+
+    The deep_backtest reports hard-code `color: #222` on body but leave
+    the background unset, so they inherit from the parent iframe color-
+    scheme — which under Streamlit dark theme is near-black → dark text
+    on dark background → illegible.
+
+    We prepend a hard CSS override that forces white bg + dark text. The
+    override uses `!important` on `html, body` + all descendants to beat
+    any inherited color-scheme propagation. Applied at read time, so the
+    actual file on disk is never modified.
+
+    Task #151.2.
+    """
+    override = (
+        '<style>'
+        'html, body { background-color: #ffffff !important; color: #222222 !important; color-scheme: light !important; }'
+        'body * { color: inherit; }'
+        'table { background-color: #ffffff !important; }'
+        'th { background-color: #f5f5f5 !important; color: #222 !important; }'
+        'td, th { border-color: #ddd !important; color: #222 !important; }'
+        'tr:nth-child(even) { background-color: #fafafa !important; }'
+        'h1, h2, h3, h4, h5, h6 { color: #222 !important; }'
+        'a { color: #1f6feb !important; }'
+        '</style>'
+    )
+    # Try to inject inside <head> if present, else prepend to the full doc.
+    lower = html_content.lower()
+    head_close = lower.find("</head>")
+    if head_close >= 0:
+        return html_content[:head_close] + override + html_content[head_close:]
+    return override + html_content
+
+
+def _compare_runs_table(run_rows: list[dict]) -> pd.DataFrame:
+    """Build a master comparison DataFrame from N recent runs' matrix.csv
+    files. Each run's cells get a `run_idx` column so the user can see
+    which run a cell came from, plus strategy name + leverage_mode.
+
+    Task #151.3. Used by the History section's Combined Comparison view.
+    """
+    from src.strategies.storage import _to_absolute as _to_abs
+    frames: list[pd.DataFrame] = []
+    for i, r in enumerate(run_rows):
+        report_dir = r.get("run_report_dir") or r.get("report_dir")
+        if not report_dir:
+            continue
+        abs_dir = _to_abs(report_dir)
+        if not abs_dir or not abs_dir.exists():
+            continue
+        csv_path = abs_dir / "matrix.csv"
+        if not csv_path.exists():
+            continue
+        try:
+            df = pd.read_csv(csv_path)
+        except Exception:
+            continue
+        df = df.copy()
+        df["run_idx"] = i
+        df["strategy"] = r.get("strategy_name") or "?"
+        df["leverage_mode"] = r.get("leverage_mode") or "—"
+        df["when"] = (r.get("run_timestamp") or "")[:19]
+        frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+# Phase parser + progress tracker for the Run Deep Backtest page (task #151.5)
+#
+# The deep_backtest subprocess emits phase markers on stdout like:
+#   Phase 0 — Preflight
+#   Phase 1 — Matrix (N cells: ...)
+#   Phase 2 — Sanity checks
+#   Phase 2.5 — RISK_SCALED validation
+#   Phase 3 — Leverage validation deep-dive
+#   Phase 4 — Walk-forward OOS
+#   VERDICT: DEPLOYABLE
+#
+# We parse these into a PhaseState dataclass and drive a progress bar +
+# vertical tick list + friendly status text in the UI.
+
+DEEP_BACKTEST_PHASES: list[tuple[str, str, str]] = [
+    # (phase_key, friendly_label, match_substring_in_stdout)
+    ("preflight",       "🔍 Phase 0 — Preflight",              "Phase 0"),
+    ("matrix",          "🧮 Phase 1 — Matrix (run every cell)", "Phase 1"),
+    ("sanity",          "🧠 Phase 2 — Sanity checks",           "Phase 2 —"),
+    ("leverage_mode",   "🛡 Phase 2.5 — Leverage-mode validation", "Phase 2.5"),
+    ("leverage_lin",    "📐 Phase 3 — Leverage linearity check", "Phase 3"),
+    ("walk_forward",    "🎯 Phase 4 — Walk-forward OOS",        "Phase 4"),
+    ("verdict",         "⚖️ Phase 5 — Verdict",                 "VERDICT:"),
+]
+
+
+def _phase_status(phase_key: str, current: dict, completed: set) -> str:
+    """Return a unicode glyph + label for a phase based on current state.
+
+    ⏳ = pending (hasn't started), 🔄 = in-progress (currently running),
+    ✅ = complete, ⊘ = skipped (e.g., phase 4 when wf_enabled=False).
+    """
+    if phase_key in completed:
+        return "✅"
+    if current.get("phase_key") == phase_key:
+        return "🔄"
+    return "⏳"
+
+
+def _parse_phase_line(line: str) -> str | None:
+    """Inspect one stdout line and return the phase_key that it activates,
+    or None if the line isn't a phase marker."""
+    for phase_key, _label, marker in DEEP_BACKTEST_PHASES:
+        if marker in line:
+            return phase_key
+    return None
+
+
+def _friendly_status_for_line(line: str, current_phase: str | None) -> str | None:
+    """Turn a raw log line into a human-readable status message for the
+    friendly-text widget. Returns None if the line isn't interesting.
+
+    Goal: translate the firehose of structlog JSON + print statements
+    into short sentences like 'Running window 3mo × TF 1h × leverage 10 …'
+    so the user can follow along without reading raw logs.
+    """
+    s = line.strip()
+    if not s:
+        return None
+    if "Phase 0" in s:
+        return "Running preflight — resolving strategy, checking data availability."
+    if "Phase 1" in s:
+        return "Running the backtest matrix — one full backtest per (window × TF × leverage × fee) combo."
+    if "Phase 2 —" in s:
+        return "Running sanity checks — trade count, drawdown, cost-as-pct-of-margin, leverage invariance."
+    if "Phase 2.5" in s:
+        return "Running zero-tolerance leverage-mode validation — hand-trace hand-grades between leverages."
+    if "Phase 3" in s:
+        return "Running leverage-linearity deep-dive — comparing P&L scaling across leverage levels."
+    if "Phase 4" in s:
+        return "Running walk-forward OOS — rolling train/test folds + continuous OOS run."
+    if "VERDICT:" in s:
+        return "Pipeline complete — evaluating final verdict."
+    if '"event":"leveraged_backtest_complete"' in s:
+        return "Cell complete — moving to the next one."
+    if "write_report" in s or "index.html" in s:
+        return "Writing HTML / PDF / heatmap report."
+    if "attribution" in s.lower() and "computation failed" not in s.lower():
+        return "Computing per-cell attribution breakdown (alpha vs leverage amplification vs cost drag)."
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Sidebar Navigation
 # ---------------------------------------------------------------------------
@@ -560,19 +712,54 @@ elif page == "Strategies":
         st.stop()
 
     # ── LAYER 1 — Fee profile filter ───────────────────────────────────────
+    # Union of (a) fees that actually have backtest data AND (b) fees in the
+    # registry for XAUUSD. Registry-only fees get an "(no data)" suffix so
+    # the user can see ALL broker options (MT4 + cTrader + stress + news +
+    # pine) even if they haven't run a backtest against them yet. Task #151.1.
+    #
+    # Design: use the formatted labels as the `options=` list directly and
+    # reverse-lookup to the raw fee key. Streamlit's AppTest has a quirk
+    # where `format_func` gets double-applied during widget state readback,
+    # which breaks when the formatted label isn't a valid key. Bypassing
+    # format_func sidesteps the quirk entirely.
+    from src.backtest.fee_profiles import list_profiles as _list_profiles
     st.markdown("### 🏷️  Layer 1 — Broker fee profile")
-    fees_sorted = sorted(fee_universe)
-    picked_fee = st.selectbox(
-        "Fee profile (only fees with backtest data shown)",
-        fees_sorted,
-        help=f"{len(fees_sorted)} fee profiles have facets in storage. "
-             f"Pick one to filter the hierarchy below.",
+    registry_fees: list[str] = list(_list_profiles(instrument_class="xauusd_metals"))
+    # Pine zero-cost has instrument_class=(none) so add it manually
+    if "pine_zero_cost" in _list_profiles():
+        registry_fees.append("pine_zero_cost")
+    registry_fees_set = set(registry_fees)
+
+    all_fees_ordered: list[str] = sorted(fee_universe | registry_fees_set)
+    # Build label → raw-key reverse map
+    label_to_fee: dict[str, str] = {}
+    fee_option_labels: list[str] = []
+    for fee in all_fees_ordered:
+        has_data = fee in fee_universe
+        label = fee if has_data else f"{fee}  (no data)"
+        label_to_fee[label] = fee
+        fee_option_labels.append(label)
+
+    picked_fee_label = st.selectbox(
+        "Fee profile",
+        fee_option_labels,
+        help=(
+            f"{len(fee_universe)} of {len(all_fees_ordered)} fee profiles "
+            f"have backtest data in storage. Registry-only fees are marked "
+            f"with a `(no data)` suffix — pick them to see an empty state "
+            f"prompting you to run a deep backtest against that fee."
+        ),
     )
+    picked_fee = label_to_fee[picked_fee_label]
 
     # ── LAYER 2 — Window time-frame with 🏆 hero ───────────────────────────
     windows_for_fee = window_universe.get(picked_fee, {})
     if not windows_for_fee:
-        st.warning(f"No data for fee profile {picked_fee!r}.")
+        st.info(
+            f"📭 **No backtest data yet for `{picked_fee}`.** "
+            f"Run a deep backtest against this fee profile from the "
+            f"**Run Deep Backtest** page to populate the hierarchy."
+        )
         st.stop()
 
     # Sort windows by window_days so "1mo, 3mo, 6mo, 1y" shows in time order
@@ -735,8 +922,22 @@ elif page == "Strategies":
             abs_html = _to_absolute(html_path)
             if abs_html and abs_html.exists():
                 try:
-                    html_content = abs_html.read_text()
-                    st.components.v1.html(html_content, height=900, scrolling=True)
+                    raw_html = abs_html.read_text()
+                    # Task #151.2 — force light theme so dark-mode users can
+                    # actually READ the report (reports hard-code color:#222
+                    # with no bg, so they're illegible in dark theme).
+                    wrapped = _wrap_html_for_light_theme(raw_html)
+                    st.components.v1.html(wrapped, height=900, scrolling=True)
+                    # Task #151.4 — download button instead of file:// link
+                    # because browsers block file:// from web origins.
+                    st.download_button(
+                        label="⬇️ Download HTML report",
+                        data=raw_html,
+                        file_name=abs_html.name,
+                        mime="text/html",
+                        help="Saves the full HTML report to your machine so "
+                             "you can open it in a browser tab outside Streamlit.",
+                    )
                 except Exception as e:
                     st.error(f"Failed to render HTML: {e}")
             else:
@@ -897,10 +1098,14 @@ elif page == "Run Deep Backtest":
     #                        📜 HISTORY SECTION
     # ─────────────────────────────────────────────────────────────────
     if section == "📜 History":
+        from datetime import datetime as _dt, timedelta as _td
+
         st.markdown("### 📜 Recent deep_backtest runs")
         st.caption(
-            "Most recent runs across ALL strategies. "
-            "Pick a row to embed its HTML report below. "
+            "Most recent runs across ALL strategies, newest first. "
+            "Pick one or more runs below to see a **combined comparison** "
+            "of every cell across your selection — leverage modes side by side, "
+            "windows × timeframes × leverages × fees in systematic tables. "
             "Cache TTL: 30s — completed runs appear within 30s without a reload."
         )
 
@@ -926,66 +1131,243 @@ elif page == "Run Deep Backtest":
                 "No runs in the selected window. Run a deep_backtest from the "
                 "**▶ Run** section to populate the history."
             )
-        else:
-            with col_hist1:
-                hist_df = pd.DataFrame([
-                    {
-                        "when": (r["run_timestamp"] or "")[:19],
-                        "strategy": r["strategy_name"],
-                        "description": r.get("description") or r["version_slug"],
-                        "mode": r.get("leverage_mode") or "—",
-                        "L": r.get("baseline_leverage"),
-                        "tf": r.get("timeframe") or "—",
-                        "verdict": r.get("run_verdict") or "—",
-                        "return_pct": r.get("run_max_return_pct"),
-                        "calmar": r.get("run_best_calmar"),
-                        "sane": "✓" if r.get("run_max_return_sane") else
-                                ("⚠" if r.get("run_max_return_sane") is False else "—"),
-                        "cells": r.get("matrix_n_cells"),
-                    }
-                    for r in runs
-                ])
-                st.dataframe(hist_df, width="stretch", hide_index=True)
+            st.stop()
 
-            st.markdown("---")
-            st.markdown("### 📊 Report viewer")
-            st.caption(
-                "Pick one run to embed its full HTML report below. "
-                "Use **Open in new tab** for the full-screen Plotly view."
+        # ── History table with checkboxes for multi-select ──────────────
+        with col_hist1:
+            hist_df = pd.DataFrame([
+                {
+                    "when": (r["run_timestamp"] or "")[:19],
+                    "strategy": r["strategy_name"],
+                    "description": r.get("description") or r["version_slug"],
+                    "mode": r.get("leverage_mode") or "—",
+                    "L": r.get("baseline_leverage"),
+                    "tf": r.get("timeframe") or "—",
+                    "verdict": r.get("run_verdict") or "—",
+                    "return_pct": r.get("run_max_return_pct"),
+                    "calmar": r.get("run_best_calmar"),
+                    "sane": "✓" if r.get("run_max_return_sane") else
+                            ("⚠" if r.get("run_max_return_sane") is False else "—"),
+                    "cells": r.get("matrix_n_cells"),
+                }
+                for r in runs
+            ])
+            st.dataframe(hist_df, width="stretch", hide_index=True)
+
+        st.markdown("---")
+
+        # ── Session auto-detect: group runs within N minutes of each other
+        # AND same strategy. These are runs from a single multi-mode dashboard
+        # subprocess spawn (one run per leverage mode).
+        SESSION_WINDOW_MIN = 5
+        sessions: list[list[int]] = []  # list of run indices per session
+        used: set[int] = set()
+        for i, r in enumerate(runs):
+            if i in used:
+                continue
+            try:
+                ti = _dt.fromisoformat(r["run_timestamp"])
+            except Exception:
+                sessions.append([i])
+                used.add(i)
+                continue
+            group = [i]
+            used.add(i)
+            for j in range(i + 1, len(runs)):
+                if j in used:
+                    continue
+                try:
+                    tj = _dt.fromisoformat(runs[j]["run_timestamp"])
+                except Exception:
+                    continue
+                if (runs[j]["strategy_name"] == r["strategy_name"]
+                        and abs((ti - tj).total_seconds()) <= SESSION_WINDOW_MIN * 60):
+                    group.append(j)
+                    used.add(j)
+            sessions.append(group)
+
+        # Build the session picker — one entry per auto-detected session
+        session_labels: list[str] = []
+        for group in sessions:
+            base = runs[group[0]]
+            ts = (base["run_timestamp"] or "")[:19]
+            modes = sorted({runs[i].get("leverage_mode") or "—" for i in group})
+            mode_str = " / ".join(modes)
+            session_labels.append(
+                f"{ts} · {base['strategy_name']} · {len(group)} run(s) · modes={mode_str}"
             )
 
+        st.markdown("### 🧪 Pick a session to compare")
+        st.caption(
+            f"Auto-detected {len(sessions)} session(s). Runs within "
+            f"{SESSION_WINDOW_MIN}min of each other on the same strategy are "
+            f"grouped as one session (one dashboard 'Run' click → one session)."
+        )
+        picked_session_label = st.selectbox(
+            "Session",
+            session_labels,
+            key="p7_session_pick",
+            help="Each session groups all leverage-mode subprocesses spawned "
+                 "from a single dashboard Run click so you can compare them "
+                 "side by side.",
+        )
+        picked_session_idx = session_labels.index(picked_session_label)
+        session_run_indices = sessions[picked_session_idx]
+        session_runs = [runs[i] for i in session_run_indices]
+
+        st.markdown("#### Runs in this session")
+        session_df = pd.DataFrame([
+            {
+                "when": (r["run_timestamp"] or "")[:19],
+                "mode": r.get("leverage_mode") or "—",
+                "verdict": r.get("run_verdict") or "—",
+                "return_pct": r.get("run_max_return_pct"),
+                "calmar": r.get("run_best_calmar"),
+                "sane": "✓" if r.get("run_max_return_sane") else
+                        ("⚠" if r.get("run_max_return_sane") is False else "—"),
+                "cells": r.get("matrix_n_cells"),
+            }
+            for r in session_runs
+        ])
+        st.dataframe(session_df, width="stretch", hide_index=True)
+
+        # ── Combined comparison tables — one per leverage mode ──────────
+        st.markdown("### 📊 Combined comparison (all runs in session)")
+        st.caption(
+            "**One table per leverage mode.** Rows = leverage × fee profile. "
+            "Columns = window × timeframe. Cells = return / calmar / DD / sanity. "
+            "Hero cell per table is the highest-return sane cell."
+        )
+
+        combined_df = _compare_runs_table(session_runs)
+        if combined_df.empty:
+            st.warning(
+                "No `matrix.csv` files found for runs in this session. The "
+                "report directories may have been deleted, or the runs were "
+                "aborted before writing the matrix."
+            )
+        else:
+            # Pre-compute hero cell per mode for ⭐ highlighting
+            from src.strategies.storage import _is_better_version_metric
+
+            # Group by mode first
+            modes_in_session = sorted(combined_df["leverage_mode"].unique())
+            for mode in modes_in_session:
+                mode_df = combined_df[combined_df["leverage_mode"] == mode].copy()
+                st.markdown(f"#### ⚙️ Leverage mode: `{mode}`")
+
+                # Find hero cell for this mode — max return among sane cells
+                hero_idx = None
+                best_metric = None
+                for idx, row in mode_df.iterrows():
+                    sane = (row["trades"] >= 30 and row["maxdd_pct"] < 60
+                            and row["calmar"] > 0.2)
+                    cand = {"sane": sane, "return_pct": row["return_pct"], "wf_calmar": None}
+                    if _is_better_version_metric(cand, best_metric):
+                        hero_idx = idx
+                        best_metric = cand
+
+                # Build pretty comparison table: rows=(leverage, fee), cols=(window, tf)
+                mode_df["hero"] = mode_df.index.map(lambda i: "⭐" if i == hero_idx else "")
+                mode_df["sane"] = mode_df.apply(
+                    lambda r: "✓" if (
+                        r["trades"] >= 30 and r["maxdd_pct"] < 60 and r["calmar"] > 0.2
+                    ) else "⚠",
+                    axis=1,
+                )
+                display_cols = [
+                    "hero", "window_label", "timeframe", "leverage", "fee_profile",
+                    "trades", "return_pct", "maxdd_pct", "calmar", "sharpe", "sane",
+                ]
+                present_cols = [c for c in display_cols if c in mode_df.columns]
+                pretty = mode_df[present_cols].copy()
+                # Sort: hero on top, then sane first, then return desc
+                pretty["_sort_key"] = pretty.apply(
+                    lambda r: (
+                        0 if r.get("hero") == "⭐" else 1,
+                        0 if r.get("sane") == "✓" else 1,
+                        -(r.get("return_pct") or -1e18),
+                    ),
+                    axis=1,
+                )
+                pretty = pretty.sort_values("_sort_key").drop(columns=["_sort_key"])
+                st.dataframe(pretty, width="stretch", hide_index=True)
+
+                # Plus a pivoted "at-a-glance" view: rows=leverage, cols=(window × tf)
+                # showing return_pct only. Lets the user eyeball linearity.
+                try:
+                    pivot = mode_df.pivot_table(
+                        index=["leverage", "fee_profile"],
+                        columns=["window_label", "timeframe"],
+                        values="return_pct",
+                        aggfunc="first",
+                    )
+                    if not pivot.empty:
+                        with st.expander(f"📐 Return % pivot for `{mode}` (leverage × window×tf)"):
+                            st.dataframe(
+                                pivot.round(2),
+                                width="stretch",
+                            )
+                except Exception as e:
+                    st.caption(f"(pivot table unavailable: {type(e).__name__})")
+
+            # ── Master comparison: ALL cells from ALL modes in one table
+            st.markdown("#### 🗃️  Master: every cell across every mode")
+            st.caption(
+                "Single flat table with ALL cells from ALL runs in this session. "
+                "Filter / sort / export via the table UI."
+            )
+            master_cols = [
+                "leverage_mode", "window_label", "timeframe", "leverage",
+                "fee_profile", "trades", "return_pct", "maxdd_pct", "calmar",
+                "sharpe", "when", "strategy",
+            ]
+            present_master = [c for c in master_cols if c in combined_df.columns]
+            st.dataframe(
+                combined_df[present_master].sort_values("return_pct", ascending=False),
+                width="stretch",
+                hide_index=True,
+            )
+
+        # ── Individual run HTML viewer (legacy, collapsible) ────────────
+        with st.expander("🗐 View individual run HTML report (legacy viewer)"):
             # Picker labels are descriptive; map back to the raw row by index.
-            run_labels = [
-                f"{(r['run_timestamp'] or '')[:19]}  ·  {r['strategy_name']}  ·  "
-                f"{r.get('description') or r['version_slug']}  ·  "
+            session_run_labels = [
+                f"{(r['run_timestamp'] or '')[:19]}  ·  mode={r.get('leverage_mode') or '—'}  ·  "
                 f"verdict={r.get('run_verdict') or '—'}  ·  "
                 f"return={r.get('run_max_return_pct'):+.2f}%"
                 if r.get('run_max_return_pct') is not None else
-                f"{(r['run_timestamp'] or '')[:19]}  ·  {r['strategy_name']}  ·  {r['version_slug']}"
-                for r in runs
+                f"{(r['run_timestamp'] or '')[:19]}  ·  mode={r.get('leverage_mode') or '—'}"
+                for r in session_runs
             ]
-            picked_run_label = st.selectbox("Select a run", run_labels, key="p7_hist_pick")
-            picked_run = runs[run_labels.index(picked_run_label)]
+            picked_run_label = st.selectbox(
+                "Individual run to embed",
+                session_run_labels,
+                key="p7_single_run_pick",
+            )
+            picked_run = session_runs[session_run_labels.index(picked_run_label)]
 
             abs_html_path = _to_absolute(picked_run.get("report_html_path"))
-            col_btn1, col_btn2 = st.columns([1, 3])
-            with col_btn1:
-                if abs_html_path and abs_html_path.exists():
-                    st.link_button(
-                        "🗔 Open in new tab",
-                        f"file://{abs_html_path}",
-                        help="Opens the full HTML report in a new browser tab.",
-                    )
-            with col_btn2:
-                st.caption(
-                    f"version_id: `{picked_run.get('version_id')}` · "
-                    f"report: `{picked_run.get('report_html_path') or '(none)'}`"
-                )
-
             if abs_html_path and abs_html_path.exists():
                 try:
-                    html_content = abs_html_path.read_text()
-                    st.components.v1.html(html_content, height=900, scrolling=True)
+                    raw_html = abs_html_path.read_text()
+                    # Task #151.4 — download button replaces the broken
+                    # file:// link_button. Browsers block file:// URLs
+                    # from web-origin iframes.
+                    st.download_button(
+                        label="⬇️ Download HTML report",
+                        data=raw_html,
+                        file_name=abs_html_path.name,
+                        mime="text/html",
+                        help="Download the full report HTML so you can open "
+                             "it in a new browser tab outside Streamlit.",
+                    )
+                    st.caption(
+                        f"report_dir: `{picked_run.get('run_report_dir') or '(none)'}`"
+                    )
+                    # Task #151.2 — light-theme wrapper for dark-mode users
+                    wrapped = _wrap_html_for_light_theme(raw_html)
+                    st.components.v1.html(wrapped, height=900, scrolling=True)
                 except Exception as e:
                     st.error(f"Failed to render HTML: {e}")
             else:
@@ -1292,18 +1674,11 @@ elif page == "Run Deep Backtest":
     if not can_run:
         st.warning("⚠️ Tick at least one value in every dimension to enable the Run button.")
 
-    # ── 🚀 Run button + live log stream ──────────────────────────────
+    # ── 🚀 Run button + progress-bar UI (task #151.5) ─────────────────
     if st.button("🚀 Run Deep Backtest", type="primary", disabled=not can_run):
         import time as _time
 
         st.session_state["p7_running"] = True
-
-        results_log = st.empty()
-        status_placeholder = st.empty()
-        log_buffer: list[str] = []
-
-        UI_UPDATE_INTERVAL_S = 0.5
-        LOG_DISPLAY_TAIL = 200
 
         base_cmd_tail = [
             "--non-interactive",
@@ -1335,18 +1710,85 @@ elif page == "Run Deep Backtest":
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
 
         # Subprocess watchdog — kill on timeout to prevent UI hangs
-        # Budget: ~10s per cell minimum, 300s floor, 1h ceiling.
         WATCHDOG_TIMEOUT_S = max(300, min(3600, n_cells * 10))
 
         total_modes = len(modes_list)
+        # Estimate per-mode runtime: ~2s per cell minimum, 2s floor
+        per_mode_cells = n_cells // max(1, total_modes)
+        est_seconds_per_mode = max(5.0, per_mode_cells * 2.0)
+        est_total_s = est_seconds_per_mode * total_modes
+
+        st.markdown("### 🚀 Running deep backtest")
+        top_col1, top_col2, top_col3, top_col4 = st.columns(4)
+        mode_counter = top_col1.empty()
+        cell_counter = top_col2.empty()
+        elapsed_counter = top_col3.empty()
+        eta_counter = top_col4.empty()
+
+        overall_progress = st.progress(0.0, text="Waiting to start…")
+
+        # Friendly status text — rewritten from raw logs via _friendly_status_for_line
+        friendly_status = st.empty()
+
+        # Validation tick list — one st.status per phase per mode
+        # We use a single nested layout: for each mode, render a st.status
+        # container with the phase list inside.
+        st.markdown("#### 🧪 Validation checklist")
+        st.caption(
+            "Each phase turns 🔄 while running and ✅ when complete. "
+            "Click any row to see the raw log lines from that phase."
+        )
+
+        mode_status_cols = st.columns(total_modes)
+        mode_phase_states: list[dict] = [
+            {"phase_key": None, "completed": set(), "lines": {k: [] for k, _, _ in DEEP_BACKTEST_PHASES},
+             "status_widget": None, "tick_widgets": {}}
+            for _ in range(total_modes)
+        ]
+
+        def _render_mode_panel(mode_idx: int, mode_obj, state: dict, col):
+            """Render one mode's phase checklist in its column."""
+            with col:
+                st.markdown(f"**Mode {mode_idx + 1}/{total_modes}: `{mode_obj.value}`**")
+                for phase_key, label, _marker in DEEP_BACKTEST_PHASES:
+                    # Skip walk_forward phase if WF disabled
+                    if phase_key == "walk_forward" and not wf_enabled:
+                        st.markdown(f"⊘ {label}  *(skipped — WF off)*")
+                        state["completed"].add(phase_key)
+                        continue
+                    glyph = _phase_status(phase_key, state, state["completed"])
+                    tick_slot = state["tick_widgets"].get(phase_key)
+                    if tick_slot is None:
+                        tick_slot = st.empty()
+                        state["tick_widgets"][phase_key] = tick_slot
+                    tick_slot.markdown(f"{glyph} {label}")
+
+        for i, m in enumerate(modes_list):
+            _render_mode_panel(i, m, mode_phase_states[i], mode_status_cols[i])
+
+        # Collapsible raw log (hidden by default per Prince's request)
+        raw_log_expander = st.expander("🧾 Show raw logs (advanced)", expanded=False)
+        with raw_log_expander:
+            results_log = st.empty()
+        log_buffer: list[str] = []
+        LOG_DISPLAY_TAIL = 200
+        UI_UPDATE_INTERVAL_S = 0.5
+
         overall_start = _time.time()
         proc = None
+        crashed = False
         for mode_idx, mode in enumerate(modes_list, start=1):
             mode_start = _time.time()
-            status_placeholder.markdown(
-                f"**Running mode {mode_idx}/{total_modes}:** `{mode.value}` — {strategy} "
-                f"(overall elapsed: {_time.time() - overall_start:.1f}s)"
-            )
+            state = mode_phase_states[mode_idx - 1]
+            mode_col = mode_status_cols[mode_idx - 1]
+
+            mode_counter.metric("Mode", f"{mode_idx}/{total_modes}")
+            cell_counter.metric("Cells per mode", per_mode_cells)
+            elapsed_counter.metric("Elapsed", f"{int(_time.time() - overall_start)}s")
+            eta_counter.metric("ETA", f"{int(max(0, est_total_s - (_time.time() - overall_start)))}s")
+
+            friendly_status.info(f"🚀 Starting mode **{mode.value}** ({mode_idx}/{total_modes})…")
+
             cmd = [
                 sys.executable,
                 "scripts/deep_backtest.py",
@@ -1355,7 +1797,6 @@ elif page == "Run Deep Backtest":
             ] + base_cmd_tail
 
             log_buffer.append(f"\n{'=' * 70}\n$ {' '.join(cmd)}\n{'=' * 70}\n")
-            results_log.code("".join(log_buffer[-LOG_DISPLAY_TAIL:]), language="bash")
 
             proc = subprocess.Popen(
                 cmd,
@@ -1370,8 +1811,26 @@ elif page == "Run Deep Backtest":
 
             last_ui_push = _time.time()
             timed_out = False
+            current_phase = None
             for line in proc.stdout:
                 log_buffer.append(line)
+
+                # Phase detection — if this line activates a new phase, mark
+                # the previous one complete and flip the tick to 🔄.
+                new_phase = _parse_phase_line(line)
+                if new_phase is not None and new_phase != current_phase:
+                    if current_phase is not None:
+                        state["completed"].add(current_phase)
+                    current_phase = new_phase
+                    state["phase_key"] = new_phase
+                    # Re-render the mode panel
+                    _render_mode_panel(mode_idx - 1, mode, state, mode_col)
+
+                # Friendly status translation
+                friendly = _friendly_status_for_line(line, current_phase)
+                if friendly:
+                    friendly_status.info(f"🔄 **{mode.value}** — {friendly}")
+
                 now = _time.time()
                 if now - mode_start > WATCHDOG_TIMEOUT_S:
                     proc.kill()
@@ -1381,30 +1840,57 @@ elif page == "Run Deep Backtest":
                         f"{WATCHDOG_TIMEOUT_S}s timeout.\n"
                     )
                     break
+
+                # Throttled UI updates for the progress bar, metrics, and raw log
                 if now - last_ui_push >= UI_UPDATE_INTERVAL_S:
-                    display = "".join(log_buffer[-LOG_DISPLAY_TAIL:])
-                    results_log.code(display, language="bash")
-                    status_placeholder.markdown(
-                        f"**Running mode {mode_idx}/{total_modes}:** `{mode.value}` — {strategy} "
-                        f"(mode elapsed: {now - mode_start:.1f}s, "
-                        f"overall: {now - overall_start:.1f}s)"
+                    completed_modes_frac = (mode_idx - 1) / max(1, total_modes)
+                    within_mode_frac = min(
+                        1.0, (now - mode_start) / max(1.0, est_seconds_per_mode)
+                    )
+                    pct = completed_modes_frac + within_mode_frac / max(1, total_modes)
+                    pct = max(0.0, min(1.0, pct))
+                    overall_progress.progress(
+                        pct,
+                        text=f"Mode {mode_idx}/{total_modes}: {mode.value} — {int(pct * 100)}%",
+                    )
+                    elapsed_counter.metric("Elapsed", f"{int(now - overall_start)}s")
+                    eta_counter.metric(
+                        "ETA",
+                        f"{int(max(0, est_total_s - (now - overall_start)))}s",
+                    )
+                    # Raw log still updates for users who open the expander
+                    results_log.code(
+                        "".join(log_buffer[-LOG_DISPLAY_TAIL:]), language="bash",
                     )
                     last_ui_push = now
+
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 timed_out = True
 
-            display = "".join(log_buffer[-LOG_DISPLAY_TAIL:])
-            results_log.code(display, language="bash")
+            # Mark whatever phase was current as complete
+            if current_phase is not None:
+                state["completed"].add(current_phase)
+            # Mark every phase complete on clean exit (catches phases whose
+            # stdout marker wasn't parsed, e.g. VERDICT line came inline)
+            if not timed_out:
+                for phase_key, _label, _marker in DEEP_BACKTEST_PHASES:
+                    if phase_key == "walk_forward" and not wf_enabled:
+                        continue
+                    state["completed"].add(phase_key)
+            state["phase_key"] = None
+            _render_mode_panel(mode_idx - 1, mode, state, mode_col)
+
+            results_log.code("".join(log_buffer[-LOG_DISPLAY_TAIL:]), language="bash")
 
             if timed_out:
-                status_placeholder.error(
+                friendly_status.error(
                     f"⏰ Mode `{mode.value}` TIMED OUT after {WATCHDOG_TIMEOUT_S}s. "
-                    f"Consider reducing matrix size or increasing the timeout "
-                    f"(currently `max(300, cells × 10)` seconds)."
+                    f"Reduce matrix size or increase the timeout."
                 )
+                crashed = True
                 break
 
             VERDICT_CODE_MAP = {
@@ -1414,32 +1900,39 @@ elif page == "Run Deep Backtest":
             }
             if proc.returncode in VERDICT_CODE_MAP:
                 level, glyph, verdict_label = VERDICT_CODE_MAP[proc.returncode]
-                msg = (
-                    f"{glyph} Mode `{mode.value}` → **{verdict_label}** "
-                    f"(mode {mode_idx}/{total_modes}, exit {proc.returncode})"
-                )
                 if level == "success":
-                    status_placeholder.success(msg)
+                    friendly_status.success(
+                        f"{glyph} Mode `{mode.value}` → **{verdict_label}**"
+                    )
                 else:
-                    status_placeholder.warning(msg)
+                    friendly_status.warning(
+                        f"{glyph} Mode `{mode.value}` → **{verdict_label}** "
+                        f"(legitimate research outcome, not a crash)"
+                    )
             else:
-                status_placeholder.error(
+                friendly_status.error(
                     f"✗ Mode `{mode.value}` CRASHED with exit code {proc.returncode}. "
-                    f"Check the log output above for the traceback."
+                    f"Open the raw logs expander for the traceback."
                 )
+                crashed = True
                 break
 
+        # Final UI update — snap to 100%
+        overall_progress.progress(
+            1.0 if not crashed else 0.0,
+            text="Complete" if not crashed else "Aborted",
+        )
+        elapsed_counter.metric("Elapsed", f"{int(_time.time() - overall_start)}s")
+        eta_counter.metric("ETA", "0s")
         st.session_state["p7_running"] = False
 
-        if proc is not None and proc.returncode in (0, 1, 2):
-            # Invalidate the history cache so the just-completed run shows up
-            # immediately when the user switches to the History section.
+        if not crashed and proc is not None and proc.returncode in (0, 1, 2):
             _load_recent_runs_cached.clear()
-            st.success(
-                f"✓ All {total_modes} mode(s) ran to completion. "
-                f"Switch to the **📜 History** section to view the new run(s), "
-                f"or the **Strategies** page to see the versioned registry. "
-                f"Verdicts: exit 0 = DEPLOYABLE, 1 = NEEDS_WF/RESEARCH_ONLY, 2 = FAILED."
+            friendly_status.success(
+                f"✓ All {total_modes} mode(s) ran to completion in "
+                f"{int(_time.time() - overall_start)}s. "
+                f"Switch to the **📜 History** section to view the combined "
+                f"comparison across every leverage mode / window / timeframe."
             )
             if proc.returncode == 0:
                 st.balloons()

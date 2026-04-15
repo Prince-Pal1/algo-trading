@@ -688,6 +688,46 @@ class TestAdversarialEdgeCases:
             fee_box.set_value(fee_box.options[1]).run()
             assert not at.exception
 
+    def test_strategies_page_fee_dropdown_shows_ctrader(self):
+        """Task #151.1 — after merging registry fees with data fees, the
+        Strategies page fee dropdown must include ic_markets_ctrader even
+        when no backtest data exists for it yet (shown with '(no data)'
+        suffix). Previously ONLY mt4 + pine showed."""
+        at = _pick_page(_at(), "Strategies")
+        fee_box = None
+        for sb in at.selectbox:
+            lbl = sb.label if hasattr(sb, 'label') else ''
+            if lbl and "fee" in lbl.lower():
+                fee_box = sb
+                break
+        assert fee_box is not None
+        options_joined = " | ".join(fee_box.options)
+        assert "ic_markets_ctrader" in options_joined, (
+            f"cTrader not in fee dropdown. Options: {fee_box.options}"
+        )
+
+    def test_strategies_page_no_data_fee_shows_empty_state(self):
+        """Picking a fee with no data should show an info message, not crash."""
+        at = _pick_page(_at(), "Strategies")
+        fee_box = None
+        for sb in at.selectbox:
+            lbl = sb.label if hasattr(sb, 'label') else ''
+            if lbl and "fee" in lbl.lower():
+                fee_box = sb
+                break
+        assert fee_box is not None
+        # Find a "(no data)" option
+        no_data_opt = None
+        for opt in fee_box.options:
+            if "(no data)" in opt:
+                no_data_opt = opt
+                break
+        if no_data_opt is None:
+            # Skip if all fees have data (shouldn't happen on current DB)
+            return
+        fee_box.set_value(no_data_opt).run()
+        assert not at.exception, f"picking no-data fee raised: {at.exception}"
+
     def test_page_7_wf_checkbox_toggle(self):
         at = _pick_page(_at(), "Run Deep Backtest")
         wf_box = None
