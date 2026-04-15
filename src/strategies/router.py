@@ -178,5 +178,26 @@ def _load_strategies() -> None:
     except ImportError:
         pass
 
+    # Gold strategies (Phase G) — needed by scripts/deep_backtest.py so they
+    # are invokable by name ("deep backtest swift_alma"). No effect on live
+    # trading paths since registration is idempotent.
+    try:
+        from src.strategies.trend_following.donchian_gold import DonchianGoldStrategy
+        register_strategy("donchian_gold", DonchianGoldStrategy)
+    except ImportError:
+        pass
+
+    try:
+        from src.strategies.momentum.vol_momentum_gold import VolMomentumGoldStrategy
+        register_strategy("vol_momentum_gold", VolMomentumGoldStrategy)
+    except ImportError:
+        pass
+
+    try:
+        from src.strategies.trend_following.swift_alma import SwiftAlmaStrategy
+        register_strategy("swift_alma", SwiftAlmaStrategy)
+    except ImportError:
+        pass
+
 
 _load_strategies()

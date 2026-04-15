@@ -212,6 +212,8 @@ Phase 3b-2. Canonical plan: `docs/planning/m3s_plan_v1.md` § v1.1 ADDENDUM. Sub
 | Leveraged Backtest Engine | `src/backtest/leveraged_engine.py` | Book, costs, path, FeatureEngine, BaseStrategy, M3S (optional) | Gold research, sweep scripts | ✅ G.2a.4 (fresh engine, separate from crypto BacktestEngine, integrates M3S.request_leverage when wired) |
 | Shadow Orchestrator | `src/shadow_orchestrator.py` | Book, costs, path, ParquetReplayFeed/ICMarketsFeed, strategies | G.3 paper clock driver | ✅ G.2h.2 (async feed-driven, reuses leveraged engine components, matches batch engine results bit-exact on 2yr XAUUSD 1h: +38% / 12% DD / 69 trades) |
 | Structure Levels | `src/backtest/structure_levels.py` | `pandas` | hedged_structure_play, future structure-aware strategies | ✅ G.2e (prior day H/L, session open ranges, round numbers, swing H/L, Fibonacci retraces) |
+| Deep Backtest Pipeline | `src/backtest/deep_backtest.py` | LeveragedBacktestEngine, fee_profiles, STRATEGY_REGISTRY, M1PathModel | `scripts/deep_backtest.py` CLI | ✅ 2026-04-15 task #112 (6-phase pipeline: preflight → matrix → sanity → auto-triggered leverage validation → walk-forward OOS → verdict; generic template distilled from SWIFT tasks #109/#110/#111) |
+| Deep Backtest Report | `src/backtest/deep_backtest_report.py` | fpdf2, matplotlib, pandas | Deep Backtest Pipeline | ✅ 2026-04-15 task #112 (HTML + landscape-A4 PDF + PNG heatmaps + CSV generator, SWIFT-report style) |
 
 ### Research Tooling (Python -- src/research/)
 
