@@ -14,7 +14,8 @@ from src.backtest.book import (
     Book,
     LeveragedPosition,
 )
-from src.backtest.costs import ICMarketsMetalFeeModel
+from src.backtest.costs import ICMarketsMetalFeeModel, ZeroCostFeeModel
+from src.backtest.fee_profiles import make_fee_model
 from src.backtest.path import Bar, BrownianBridgeModel, check_sl_tp_hits
 from src.data.feature_engine import _compute_indicators
 from src.data.feeds.parquet_replay_feed import ParquetReplayFeed
@@ -65,7 +66,8 @@ class ShadowOrchestrator:
         state_dump_path: Path | str | None = None,
         state_dump_interval: int = 100,
         run_id: str = "shadow_default",
-        fee_model: ICMarketsMetalFeeModel | None = None,
+        fee_model: ICMarketsMetalFeeModel | ZeroCostFeeModel | None = None,
+        fee_profile: str = "ic_markets_mt4_xauusd_normal",
         path_model: BrownianBridgeModel | None = None,
     ) -> None:
         self._feed = feed
@@ -79,7 +81,11 @@ class ShadowOrchestrator:
         self._state_dump_path = Path(state_dump_path) if state_dump_path else None
         self._state_dump_interval = state_dump_interval
         self._run_id = run_id
-        self._fee_model = fee_model or ICMarketsMetalFeeModel()
+        # Explicit fee profile per CLAUDE.md — never use the default
+        # ICMarketsMetalFeeModel() constructor (the 90× slippage bug history,
+        # commit 6ae48c8 fix). Volume-based cTrader schedules also require
+        # reference_price in commission_usd(); MT4 profile is safest default.
+        self._fee_model = fee_model if fee_model is not None else make_fee_model(fee_profile)
         self._path_model = path_model or BrownianBridgeModel(run_id=run_id)
 
         self._book = Book.new(
@@ -180,7 +186,9 @@ class ShadowOrchestrator:
                 side=fee_side, reference_price=hit_price,
                 atr=0.0, ts_ms=bar.ts_ms,
             )
-            commission = self._fee_model.commission_usd(quantity_units=pos.quantity)
+            commission = self._fee_model.commission_usd(
+                quantity_units=pos.quantity, reference_price=fill,
+            )
             closed = self._book.close_position(pos.id, exit_price=fill, commission=commission)
             self._state.trades.append({
                 **closed,
@@ -207,7 +215,9 @@ class ShadowOrchestrator:
                 fill = self._fee_model.fill_price(
                     side=fee_side, reference_price=bar.close, atr=0.0, ts_ms=bar.ts_ms,
                 )
-                commission = self._fee_model.commission_usd(quantity_units=pos.quantity)
+                commission = self._fee_model.commission_usd(
+                    quantity_units=pos.quantity, reference_price=fill,
+                )
                 closed = self._book.close_position(pid, exit_price=fill, commission=commission)
                 self._state.trades.append({
                     **closed,
