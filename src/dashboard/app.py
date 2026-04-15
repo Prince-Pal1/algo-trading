@@ -219,7 +219,7 @@ if page == "Backtest Runs":
                     "color: red" if isinstance(x, (int, float)) and x < 0 else "",
                     subset=["Return %", "Sharpe"],
                 ),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -288,7 +288,7 @@ elif page == "Strategy Deep Dive":
 
                     from src.backtest.charts import equity_and_drawdown, monthly_heatmap
                     fig = equity_and_drawdown(equity)
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
                     # Monthly heatmap
                     try:
@@ -297,7 +297,7 @@ elif page == "Strategy Deep Dive":
                         daily = eq.resample("D").last().dropna()
                         if len(daily) > 60:
                             fig2 = monthly_heatmap(equity)
-                            st.plotly_chart(fig2, use_container_width=True)
+                            st.plotly_chart(fig2, width="stretch")
                     except Exception:
                         pass
 
@@ -356,7 +356,7 @@ elif page == "Compare Runs":
                         "profit_factor", "total_trades",
                     ]
                     existing_cols = [c for c in display_cols if c in df.columns]
-                    st.dataframe(df[existing_cols], use_container_width=True, hide_index=True)
+                    st.dataframe(df[existing_cols], width="stretch", hide_index=True)
 
                     # Radar chart
                     from src.backtest.charts import strategy_comparison_radar
@@ -364,7 +364,7 @@ elif page == "Compare Runs":
                     for item in comparison:
                         strategies[item["Run"][:30]] = item
                     fig = strategy_comparison_radar(strategies)
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
     except Exception as e:
         st.error(f"Error: {e}")
@@ -405,7 +405,7 @@ elif page == "Imported Strategies":
                         data.append({"ID": d.name, "Name": "ERROR", "Format": "-"})
 
             if data:
-                st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(data), width="stretch", hide_index=True)
 
             # Show IR for selected strategy
             selected = st.selectbox("View IR", [d.name for d in dirs])
@@ -457,7 +457,7 @@ elif page == "Validation":
         {"Tier": "Standard", "Protocol": "deflated_sharpe", "Description": "Multiple testing correction", "Runtime": "instant"},
     ])
 
-    st.dataframe(protocols, use_container_width=True, hide_index=True)
+    st.dataframe(protocols, width="stretch", hide_index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -529,7 +529,7 @@ elif page == "Strategies":
                 }
                 for v in vanity
             ]
-            st.dataframe(pd.DataFrame(vanity_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(vanity_rows), width="stretch", hide_index=True)
 
     # ── Facets universe: which fees/windows have ANY data? ─────────────────
     # Walk every version's facets dict once. Build:
@@ -661,7 +661,7 @@ elif page == "Strategies":
         layer3_rows.sort(
             key=lambda r: (r["sane"] != "✓", -(r["return_pct"] or -1e18))
         )
-        st.dataframe(pd.DataFrame(layer3_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(layer3_rows), width="stretch", hide_index=True)
 
         # ── LAYER 4 — Expand a (strategy × mode) group to see leverage×tf leaves
         st.markdown("### 🔬  Layer 4 — Leverage × candle timeframe leaves")
@@ -679,10 +679,17 @@ elif page == "Strategies":
         picked_key = list(layer3_groups.keys())[picked_idx]
         leaves = layer3_groups[picked_key]
 
-        # Render each leaf as a row keyed by (leverage, timeframe)
-        leaf_rows = []
+        # Render each leaf as a row keyed by (leverage, timeframe).
+        # IMPORTANT (task #146 bug #4 fix): We must keep the raw (v, facet)
+        # tuples aligned with the rendered rows AFTER sorting. The previous
+        # code sorted `leaf_rows` in-place but kept a separate `leaves` list
+        # unsorted, then looked up by the sorted index into the UNSORTED
+        # list — so the user picked leaf N but saw leaf Y's data. Build a
+        # combined list of (row_dict, v, facet) tuples and sort them as
+        # one unit so the picker index is always correct.
+        leaf_tuples: list[tuple[dict, Any, dict]] = []
         for v, facet in leaves:
-            leaf_rows.append({
+            row = {
                 "slug": v.version_slug,
                 "leverage": facet.get("leverage"),
                 "timeframe": facet.get("timeframe"),
@@ -694,11 +701,14 @@ elif page == "Strategies":
                 "sane": "✓" if facet.get("sane") else "⚠",
                 "warning": facet.get("warning") or "",
                 "⭐": "⭐" if hero_lookup.get(picked_key) and hero_lookup[picked_key][0].id == v.id else "",
-            })
-        leaf_rows.sort(
-            key=lambda r: (r["sane"] != "✓", -(r["return_pct"] or -1e18))
+            }
+            leaf_tuples.append((row, v, facet))
+        # Sort the tuples — all three sort keys stay aligned.
+        leaf_tuples.sort(
+            key=lambda t: (t[0]["sane"] != "✓", -(t[0]["return_pct"] or -1e18))
         )
-        st.dataframe(pd.DataFrame(leaf_rows), use_container_width=True, hide_index=True)
+        leaf_rows = [t[0] for t in leaf_tuples]
+        st.dataframe(pd.DataFrame(leaf_rows), width="stretch", hide_index=True)
 
         # ── Embedded HTML report viewer for the picked leaf ────────────────
         st.markdown("### View deep_backtest HTML report")
@@ -709,7 +719,8 @@ elif page == "Strategies":
         ]
         picked_leaf_label = st.selectbox("Pick a leaf to view its HTML report", leaf_picker_options)
         picked_leaf_idx = leaf_picker_options.index(picked_leaf_label)
-        v_pick, facet_pick = leaves[picked_leaf_idx]
+        # Use the aligned tuple list so the index maps correctly.
+        _, v_pick, facet_pick = leaf_tuples[picked_leaf_idx]
         st.caption(f"slug: `{v_pick.version_slug}`  ·  mode: `{v_pick.leverage_mode or '—'}`  ·  baseline L: `{v_pick.baseline_leverage}`")
         if facet_pick.get("warning"):
             st.warning(f"⚠ Vanity flag for this leaf: **{facet_pick['warning']}**")
@@ -752,7 +763,7 @@ elif page == "Strategies":
                         }
                         for h in history
                     ]),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -847,12 +858,9 @@ elif page == "Run Deep Backtest":
         WINDOWS_CATALOG,
     )
     from src.backtest.deep_backtest import _check_window_availability
-    from src.backtest.fee_profiles import (
-        group_profiles_by_broker_platform,
-        list_brokers,
-    )
+    from src.backtest.fee_profiles import group_profiles_by_broker_platform
     from src.strategies.router import STRATEGY_REGISTRY as _CLASS_REGISTRY
-    from src.strategies.storage import list_recent_runs
+    from src.strategies.storage import _to_absolute, list_recent_runs
 
     st.title("🚀 Run Deep Backtest")
     st.caption(
@@ -937,7 +945,7 @@ elif page == "Run Deep Backtest":
                     }
                     for r in runs
                 ])
-                st.dataframe(hist_df, use_container_width=True, hide_index=True)
+                st.dataframe(hist_df, width="stretch", hide_index=True)
 
             st.markdown("---")
             st.markdown("### 📊 Report viewer")
