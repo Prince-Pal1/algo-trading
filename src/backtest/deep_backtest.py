@@ -2406,6 +2406,17 @@ def run_deep_backtest(config: DeepBacktestConfig) -> DeepBacktestResult:
         from src.backtest.deep_backtest_report import write_report
         write_report(result)
 
+    # Task #117 (G.8): Strategy storage registry — upsert version row with
+    # max-return cell + report paths. Lazy-imported + wrapped in try/except so
+    # storage failures cannot break the pipeline. Mirrors the task #79
+    # attribution try/except pattern above.
+    try:
+        from src.strategies.storage import record_deep_backtest_result
+        record_deep_backtest_result(config.strategy, result)
+    except Exception as e:
+        if config.progress:
+            print(f"[warn] strategy storage write failed: {type(e).__name__}: {e}")
+
     if config.progress:
         print("=" * 80)
         print(f"VERDICT: {verdict}")
@@ -2415,6 +2426,72 @@ def run_deep_backtest(config: DeepBacktestConfig) -> DeepBacktestResult:
         print("=" * 80)
 
     return result
+
+
+def _compute_max_return_cell(matrix_df: "pd.DataFrame | None") -> dict:
+    """Task #117 (G.8) — picks the cell with the absolute-highest return_pct
+    from the matrix DataFrame, regardless of risk-adjusted rank.
+
+    Contrast with the existing Calmar-based `best_cell` (see
+    `_phase_2_sanity_checks`) which picks the max-Calmar profitable cell. This
+    helper answers a different question: "what's the absolute best return this
+    strategy can show?" Used by the strategy storage registry to populate
+    `strategy_versions.max_return_pct`.
+
+    Returns an empty dict on empty matrix or all-NaN return_pct (so downstream
+    callers can treat it as "no data"). NaN rows are skipped via dropna.
+    """
+    if matrix_df is None:
+        return {}
+    # matrix_df is a pandas DataFrame built from CellResult instances — see
+    # _phase_1_matrix's matrix_df construction. All numeric columns are float;
+    # NaN rows can appear when an engine error cell slipped through.
+    if getattr(matrix_df, "empty", True):
+        return {}
+    clean = matrix_df.dropna(subset=["return_pct"])
+    if clean.empty:
+        return {}
+    row = clean.loc[clean["return_pct"].idxmax()]
+    return {
+        "window_days": int(row["window_days"]),
+        "window_label": str(row["window_label"]),
+        "timeframe": str(row["timeframe"]),
+        "leverage": float(row["leverage"]),
+        "fee_profile": str(row["fee_profile"]),
+        "trades": int(row["trades"]),
+        "return_pct": float(row["return_pct"]),
+        "maxdd_pct": float(row["maxdd_pct"]),
+        "calmar": float(row["calmar"]),
+        "sharpe": float(row["sharpe"]),
+        "win_rate": float(row["win_rate"]),
+        "profit_factor": float(row["profit_factor"]),
+    }
+
+
+def _is_max_return_sane(cell: dict) -> tuple[bool, str]:
+    """Task #117 (G.8) — flag when the max-return cell is a vanity trap.
+
+    Principal-engineer guard against the "+340% return with 89% DD and 4
+    trades" misread. The storage layer respects the user's literal ask
+    (absolute max return) but surfaces a sanity flag so the future UI can
+    render an amber badge on unsafe cells without hiding the requested number.
+
+    Thresholds:
+      - trades >= 30      (meaningful sample size)
+      - maxdd_pct < 60    (survivable drawdown)
+      - calmar > 0.2      (risk-adjusted coherence)
+
+    Returns (sane_flag, warning_string). Empty warning string on sane=True.
+    """
+    if not cell:
+        return False, "no cells"
+    if cell.get("trades", 0) < 30:
+        return False, f"only {cell['trades']} trades (< 30)"
+    if cell.get("maxdd_pct", 0) >= 60:
+        return False, f"DD {cell['maxdd_pct']:.0f}% (>= 60%)"
+    if cell.get("calmar", 0) <= 0.2:
+        return False, f"Calmar {cell['calmar']:.2f} (<= 0.2)"
+    return True, ""
 
 
 def _write_json_summary(result: DeepBacktestResult) -> None:
