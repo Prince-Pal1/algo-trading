@@ -483,11 +483,14 @@ elif page == "Strategies":
             st.info(f"No versions for {s.name}. Run deep_backtest to auto-populate.")
         else:
             st.markdown(f"### Versions ({len(versions)})")
+            # Column order prioritizes the human-readable description over
+            # the slug. The slug is the DB key (stable, idempotent) but the
+            # description tells the reader what the variant actually IS.
             version_rows = []
             for v in versions:
                 cell = v.max_return_cell or {}
                 version_rows.append({
-                    "slug": v.version_slug,
+                    "description": v.description or f"(no name — {v.version_slug})",
                     "verdict": v.verdict or "—",
                     "max_return_pct": v.max_return_pct,
                     "max_dd_pct": cell.get("maxdd_pct"),
@@ -497,17 +500,26 @@ elif page == "Strategies":
                     "trades": cell.get("trades"),
                     "sane": "✓" if v.max_return_sane else ("⚠" if v.max_return_sane is False else "—"),
                     "last_backtested": (v.last_backtested_at or "")[:10],
+                    "slug": v.version_slug,
                 })
             st.dataframe(pd.DataFrame(version_rows), use_container_width=True, hide_index=True)
 
             # ── Embedded report viewer
             st.markdown("### View deep_backtest HTML report")
-            picked_slug = st.selectbox(
+            # Picker shows the human description; fall back to slug when None
+            picker_options = [
+                (v.description or v.version_slug) for v in versions
+            ]
+            picked_label = st.selectbox(
                 "Pick a version",
-                [v.version_slug for v in versions],
+                picker_options,
                 key=f"version_picker_{s.name}",
             )
-            v = next(v for v in versions if v.version_slug == picked_slug)
+            v = next(
+                v for v in versions
+                if (v.description or v.version_slug) == picked_label
+            )
+            st.caption(f"slug: `{v.version_slug}`")
             if v.max_return_warning:
                 st.warning(f"⚠ Max-return cell vanity flag: **{v.max_return_warning}**")
             if v.verdict_reason:

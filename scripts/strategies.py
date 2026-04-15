@@ -187,12 +187,11 @@ def cmd_show(args: argparse.Namespace) -> int:
 
     print(f"  Versions ({len(versions)}):")
     if _HAVE_RICH:
-        table = Table(show_lines=False, box=None, pad_edge=False)
-        table.add_column("SLUG", style="cyan")
+        table = Table(show_lines=True, box=None, pad_edge=False)
+        table.add_column("NAME / SLUG", style="cyan", overflow="fold")
         table.add_column("VERDICT")
         table.add_column("MAX RET", justify="right")
         table.add_column("(DD%, Calmar)")
-        table.add_column("REPORT")
         for v in versions:
             dd = v.max_return_cell.get("maxdd_pct") if v.max_return_cell else None
             calmar = v.max_return_cell.get("calmar") if v.max_return_cell else None
@@ -200,16 +199,19 @@ def cmd_show(args: argparse.Namespace) -> int:
             ret_cell = _fmt_pct(v.max_return_pct)
             if v.max_return_sane is False:
                 ret_cell = f"{ret_cell} !"
+            # Show description as primary label with the slug beneath it in muted text
+            if v.description:
+                name_cell = f"[bold]{v.description}[/bold]\n[dim]{v.version_slug}[/dim]"
+            else:
+                name_cell = v.version_slug
             table.add_row(
-                v.version_slug,
+                name_cell,
                 v.verdict or "—",
                 ret_cell,
                 risk_bits,
-                v.report_dir or "—",
             )
         _console.print(table)
     else:
-        print(f"    {'SLUG':<30} {'VERDICT':<14} {'MAX RET':>10} {'(DD%, CALMAR)':<20} REPORT")
         for v in versions:
             dd = v.max_return_cell.get("maxdd_pct") if v.max_return_cell else None
             calmar = v.max_return_cell.get("calmar") if v.max_return_cell else None
@@ -217,10 +219,14 @@ def cmd_show(args: argparse.Namespace) -> int:
             ret_cell = _fmt_pct(v.max_return_pct)
             if v.max_return_sane is False:
                 ret_cell = f"{ret_cell} !"
+            label = v.description or v.version_slug
+            print(f"    {label}")
             print(
-                f"    {v.version_slug:<30} {(v.verdict or '—'):<14} "
-                f"{ret_cell:>10} {risk_bits:<20} {v.report_dir or '—'}"
+                f"      slug={v.version_slug:<35} verdict={(v.verdict or '—'):<14} "
+                f"max={ret_cell:<10} {risk_bits}"
             )
+            if v.report_dir:
+                print(f"      report={v.report_dir}")
 
     # Warnings footer for flagged cells
     flagged = [v for v in versions if v.max_return_sane is False and v.max_return_warning]
