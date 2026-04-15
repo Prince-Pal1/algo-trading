@@ -367,6 +367,158 @@ class TestSLTPToggle:
         assert atr_rr == pytest.approx(pct_rr) == pytest.approx(2.0)
 
 
+# ── Task #132 — 3-tier ladder + same-bar reversal ──────────────────────
+
+
+class TestLadderConstructor:
+    def test_use_pine_ladder_default_off(self):
+        """MVP default is single-TP, not ladder — preserves backward compat."""
+        s = SwiftAlmaV2Strategy()
+        assert s.use_pine_ladder is False
+
+    def test_same_bar_flip_default_off(self):
+        s = SwiftAlmaV2Strategy()
+        assert s.same_bar_flip is False
+
+    def test_ladder_qty_sum_validation(self):
+        """Ladder qtys must sum to 1.0 when use_pine_ladder=True."""
+        with pytest.raises(ValueError, match="tp1_qty \\+ tp2_qty \\+ tp3_qty must sum"):
+            SwiftAlmaV2Strategy(
+                use_pine_ladder=True,
+                tp1_qty=0.60, tp2_qty=0.30, tp3_qty=0.20,  # sum = 1.10
+            )
+
+    def test_ladder_qty_sum_ok_when_ladder_off(self):
+        """Qty sum check is skipped when ladder is off (backward compat for
+        tests that might pass weird kwargs)."""
+        s = SwiftAlmaV2Strategy(
+            use_pine_ladder=False,
+            tp1_qty=0.60, tp2_qty=0.30, tp3_qty=0.20,  # doesn't matter
+        )
+        assert s.tp1_qty == 0.60
+
+    def test_ladder_state_initialized_to_zero(self):
+        s = SwiftAlmaV2Strategy(use_pine_ladder=True)
+        assert s._ladder_tp1_price == 0.0
+        assert s._ladder_tp2_price == 0.0
+        assert s._ladder_tp3_price == 0.0
+        assert s._ladder_tp1_hit is False
+        assert s._ladder_tp2_hit is False
+
+
+class TestLadderWeightedExit:
+    def _setup_long_position(self, s: SwiftAlmaV2Strategy, entry: float = 4500.0, r: float = 1.0):
+        """Simulate a LONG position at `entry` with 1R = $r (1R stop)."""
+        s._entry_price = entry
+        s._entry_direction = +1
+        s._position = "LONG"
+        # SL at 1R below entry
+        s._sl_price = entry - r
+        # TP ladder at atr_tp1/2/3 R-multiples above entry
+        s._ladder_tp1_price = entry + s.atr_tp1_mult * r
+        s._ladder_tp2_price = entry + s.atr_tp2_mult * r
+        s._ladder_tp3_price = entry + s.atr_tp3_mult * r
+
+    def test_tp3_hit_all_legs_profitable(self):
+        """All 3 TPs filled → weighted-average exit reflects full ladder gain."""
+        s = SwiftAlmaV2Strategy(
+            use_pine_ladder=True,
+            atr_tp1_mult=2.0, atr_tp2_mult=3.0, atr_tp3_mult=4.0,
+            tp1_qty=0.5, tp2_qty=0.3, tp3_qty=0.2,
+        )
+        self._setup_long_position(s, entry=4500.0, r=1.0)
+        exit_px = s._ladder_weighted_exit(direction=+1, sl_hit=False, tp3_hit=True)
+        # Expected weighted return:
+        #   0.5 × (4502 - 4500)/4500  = 0.5 × (2/4500)
+        # + 0.3 × (4503 - 4500)/4500  = 0.3 × (3/4500)
+        # + 0.2 × (4504 - 4500)/4500  = 0.2 × (4/4500)
+        # = (1 + 0.9 + 0.8) / 4500 = 2.7/4500 = 0.0006
+        expected_return = (0.5 * 2 + 0.3 * 3 + 0.2 * 4) / 4500
+        expected_exit = 4500.0 * (1.0 + expected_return)
+        assert exit_px == pytest.approx(expected_exit, rel=1e-6)
+
+    def test_sl_hit_with_tp1_already_hit(self):
+        """TP1 already hit, then SL wipes remaining legs. Weighted average
+        should blend TP1's profit with SL's loss on remaining legs."""
+        s = SwiftAlmaV2Strategy(
+            use_pine_ladder=True,
+            atr_tp1_mult=2.0, atr_tp2_mult=3.0, atr_tp3_mult=4.0,
+        )
+        self._setup_long_position(s, entry=4500.0, r=1.0)
+        s._ladder_tp1_hit = True  # the TP1 leg already closed at profit
+        exit_px = s._ladder_weighted_exit(direction=+1, sl_hit=True, tp3_hit=False)
+        # 0.5 × +2/4500 (tp1 kept profit)
+        # + 0.3 × -1/4500 (tp2 wiped at sl)
+        # + 0.2 × -1/4500 (tp3 wiped at sl)
+        expected_return = (0.5 * 2 + 0.3 * -1 + 0.2 * -1) / 4500
+        expected_exit = 4500.0 * (1.0 + expected_return)
+        assert exit_px == pytest.approx(expected_exit, rel=1e-6)
+
+    def test_sl_hit_no_tp_filled(self):
+        """Clean stop-out with no TP legs filled → weighted return is all SL loss."""
+        s = SwiftAlmaV2Strategy(use_pine_ladder=True)
+        self._setup_long_position(s, entry=4500.0, r=1.0)
+        exit_px = s._ladder_weighted_exit(direction=+1, sl_hit=True, tp3_hit=False)
+        # All 3 legs stop at -1/4500 = -0.000222
+        expected_return = -1.0 / 4500.0
+        expected_exit = 4500.0 * (1.0 + expected_return)
+        assert exit_px == pytest.approx(expected_exit, rel=1e-6)
+
+    def test_short_direction_inverts_return(self):
+        """SHORT direction — exit price formula uses entry × (1 - total_return)."""
+        s = SwiftAlmaV2Strategy(use_pine_ladder=True)
+        s._entry_price = 4500.0
+        s._entry_direction = -1
+        s._sl_price = 4501.0  # SL above entry for short
+        s._ladder_tp1_price = 4498.0
+        s._ladder_tp2_price = 4497.0
+        s._ladder_tp3_price = 4496.0
+        exit_px = s._ladder_weighted_exit(direction=-1, sl_hit=False, tp3_hit=True)
+        # Short profit: entry above exit
+        # return = (0.5 × 2 + 0.3 × 3 + 0.2 × 4) / 4500
+        expected_return = (0.5 * 2 + 0.3 * 3 + 0.2 * 4) / 4500
+        expected_exit = 4500.0 * (1.0 - expected_return)
+        assert exit_px == pytest.approx(expected_exit, rel=1e-6)
+
+
+class TestSameBarFlip:
+    def test_pending_reversal_state_initialized_zero(self):
+        s = SwiftAlmaV2Strategy()
+        assert s._pending_reversal_direction == 0
+
+    def test_handle_reversal_emits_close_and_stashes_direction(self):
+        """_handle_reversal emits CLOSE + stashes new_direction for next bar."""
+        s = SwiftAlmaV2Strategy(same_bar_flip=True, use_pine_ladder=False)
+        s._entry_price = 4500.0
+        s._entry_direction = +1
+        s._position = "LONG"
+        s._sl_price = 4490.0
+        s._tp_price = 4515.0
+
+        sig = s._handle_reversal(
+            symbol="XAUUSD", timeframe="1h", close=4505.0,
+            new_direction=-1, sl_distance=10.0, tp_distance=15.0, atr_val=8.0,
+        )
+        assert sig.action == SignalAction.CLOSE
+        assert s._pending_reversal_direction == -1
+        assert s._pending_reversal_sl_distance == 10.0
+        assert s._pending_reversal_tp_distance == 15.0
+        assert s._pending_reversal_atr_val == 8.0
+        # Position state reset
+        assert s._entry_direction == 0
+        assert s._entry_price == 0.0
+
+    def test_reset_position_clears_ladder_state(self):
+        s = SwiftAlmaV2Strategy(use_pine_ladder=True)
+        s._ladder_tp1_price = 4500.0
+        s._ladder_tp1_hit = True
+        s._ladder_tp2_hit = True
+        s._reset_position()
+        assert s._ladder_tp1_price == 0.0
+        assert s._ladder_tp1_hit is False
+        assert s._ladder_tp2_hit is False
+
+
 # ── Framework injection (task #131 _maybe_inject_leverage_mode) ──────────
 
 
