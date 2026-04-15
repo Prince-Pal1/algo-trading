@@ -484,16 +484,32 @@ class SwiftAlmaV2Strategy(BaseStrategy):
             if se_trigger and close >= self._htf_ema_value:
                 return None  # SHORT rejected — above HTF trend
 
-        # 13. ATR-scaled SL/TP (upgrade #7) — UPPERCASE column per engine convention
-        atr = features.get(self._ATR_COL)
-        if atr is None or pd.isna(atr) or float(atr) <= 0:
-            # Fallback when ATR unavailable: use percent-based levels
-            atr_val = close * self.sl_pct
+        # 13. SL/TP distance computation — two modes per `use_atr_ladder` toggle.
+        # Always read ATR (used in metadata for diagnostics even when the fixed
+        # percent path is active).
+        atr_raw = features.get(self._ATR_COL)
+        if atr_raw is None or pd.isna(atr_raw) or float(atr_raw) <= 0:
+            atr_val = close * self.sl_pct  # fallback placeholder
         else:
-            atr_val = float(atr)
+            atr_val = float(atr_raw)
 
-        sl_distance = self.atr_sl_mult * atr_val
-        tp_distance = self.atr_tp_mult * atr_val
+        if self.use_atr_ladder:
+            # ATR-scaled (upgrade #7) — adaptive to current volatility.
+            # Works well on 1h TF with leverage ≥ 10 where ATR is $10-30 and
+            # position quantity stays manageable. On 5m TF where ATR is $3-8,
+            # this sizing formula can produce huge quantities that exceed
+            # margin at low leverage — use `use_atr_ladder=False` for percent
+            # sizing matching parent's style in that regime.
+            sl_distance = self.atr_sl_mult * atr_val
+            tp_distance = self.atr_tp_mult * atr_val
+        else:
+            # Fixed-percent SL/TP (parent v1 style). Uses `sl_pct` directly
+            # and scales TP by the atr_tp/sl ratio to preserve reward:risk.
+            # Default ratio = 1.5/1.0 = 1.5R — for parent parity (1%/0.5% = 2R)
+            # pass `atr_tp_mult=2.0, atr_sl_mult=1.0`.
+            sl_distance = close * self.sl_pct
+            rr_ratio = self.atr_tp_mult / max(self.atr_sl_mult, 1e-6)
+            tp_distance = sl_distance * rr_ratio
 
         direction = +1 if le_trigger else -1
 
