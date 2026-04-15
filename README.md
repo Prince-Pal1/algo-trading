@@ -56,13 +56,15 @@ Each concern lives in exactly one file. Redundancy causes drift.
 - QuantStats integration, walk-forward optimizer
 - Single-source-of-truth `compute_metrics()` for crypto; equivalent metrics dict for gold
 
-**Deep Backtest framework** (task #112 + #114 + #115)
+**Deep Backtest framework** (task #112 + #114 + #115 + #79)
 - Interactive `questionary` TUI for multi-select dimension picker
 - 6-phase pipeline: preflight → matrix → sanity → leverage-validation → walk-forward → verdict → report
 - 5 leverage modes: INVARIANT / MARGIN_CAPPED / VOL_TARGETED / RISK_SCALED / KELLY_FRACTIONAL
 - Phase 0 read-back probe + Phase 2.5 zero-tolerance hand-trace validation
-- HTML + landscape-A4 PDF + PNG heatmaps per run
+- **G.7 attribution** (task #79): per-cell decomposition of `return_pct` into alpha + leverage amplification + cost drag + margin rejection + residual
+- HTML + landscape-A4 PDF + PNG heatmaps per run (HTML now includes Attribution section)
 - Multi-mode dispatch: pick N modes, get N reports
+- **Cross-run compare** CLI: `scripts/deep_backtest_compare.py` produces side-by-side HTML of 2+ runs with portfolio recommendation
 
 **Risk management**
 - ZeroMQ-isolated risk manager (out-of-process, cannot be bypassed)
@@ -251,7 +253,7 @@ graph LR
 
 ---
 
-## Deep Backtest pipeline (task #112 + #114 + #115)
+## Deep Backtest pipeline (task #112 + #114 + #115 + #79)
 
 ```mermaid
 graph TD
@@ -566,9 +568,9 @@ algo-trading/
 │   │   ├── fee_profiles.py               # Named broker fee profiles (task #106)
 │   │   ├── path.py                       # Brownian bridge + M1PathModel (G.2a.3/G.5b)
 │   │   ├── structure_levels.py           # PDH/PDL, Fib, swing H/L (G.2e)
-│   │   ├── deep_backtest.py              # Generic pipeline (tasks #112/#114/#115)
+│   │   ├── deep_backtest.py              # Generic pipeline (tasks #112/#114/#115/#79)
 │   │   ├── deep_backtest_interactive.py  # questionary TUI (task #114)
-│   │   ├── deep_backtest_report.py       # HTML + PDF + heatmap generator
+│   │   ├── deep_backtest_report.py       # HTML + PDF + heatmap + attribution (task #79)
 │   │   ├── metrics.py                    # compute_metrics() SSOT
 │   │   ├── result_store.py               # Triple output (DB + JSON + HTML)
 │   │   ├── charts.py                     # 14 Plotly renderers
@@ -616,6 +618,7 @@ algo-trading/
 ├── scripts/
 │   ├── backtest.py                       # Unified crypto backtest CLI
 │   ├── deep_backtest.py                  # Deep backtest CLI (tasks #112/#114)
+│   ├── deep_backtest_compare.py          # Cross-run side-by-side compare CLI (task #79)
 │   ├── walk_forward_donchian_gold.py     # Bespoke WF (task #86)
 │   ├── walk_forward_vol_momentum_gold.py # Bespoke WF (task #90)
 │   ├── walk_forward_swift_alma.py        # Bespoke WF (task #111)
@@ -690,9 +693,9 @@ Both servers are registered in `~/.claude.json` under `mcpServers`. Claude picks
 
 ## Tested & proven
 
-**Test suite:** 1227 tests passing on `feat/gold-refactor`. Includes:
+**Test suite:** 1233 tests passing on `feat/gold-refactor`. Includes:
 
-- 45 deep_backtest framework tests (task #112 + #114 + #115)
+- 50 deep_backtest framework tests (task #112 + #114 + #115 + #79)
 - 7 leverage invariance tests (task #110)
 - 20 TV parity tests (task #104)
 - 11 M3S leverage tests (task #67)
@@ -717,10 +720,11 @@ See [ROADMAP.md](ROADMAP.md) for the authoritative phase table. **Phase G is mer
 Next items in the queue:
 - **Task #62** — merge window 2026-04-17 ~09:30 (in progress)
 - **Task #116** — research better leveraged strategy using task #113 + #115 findings (pending, triggered on demand)
-- **Task #79** — G.7 alpha-vs-leverage attribution dashboard (pending)
-- **Task #78** — G.6 adaptive leverage governor ML model (pending, Phase 5 tie-in)
+- **Task #78** — G.6 adaptive leverage governor ML model (pending, Phase 5 tie-in, needs live trade history)
 - **Task #81** — Phase 4 live smoke test (blocked on Spotware KYC)
 - **Task #74** — G.3 30-day paper clock on IC Markets cTrader demo (blocked on Phase 4 + tuning)
+
+Recently shipped (2026-04-15 Day 2): #109 SWIFT matrix · #110 leverage validation · #111 SWIFT WF · #112 Deep Backtest framework · #113 leverage research · #114 leverage_mode + TUI · #115 Phase 2.5 zero-tolerance · #116 empirical validation · **#79 G.7 attribution dashboard**
 
 ---
 

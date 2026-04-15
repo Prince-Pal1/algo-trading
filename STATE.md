@@ -1,16 +1,16 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-04-15 (Session 22 Day 2 — SWIFT matrix #109 + leverage validation #110 + walk-forward #111 + shadow orchestrator regression fix; feat/gold-refactor merge-ready for 2026-04-17)
+**Last updated:** 2026-04-15 (Session 22 Day 2 — full day of Phase G discoveries: #109 SWIFT matrix, #110 leverage validation, #111 SWIFT WF, #112 Deep Backtest framework, #113 leverage research, #114 leverage_mode + TUI, #115 Phase 2.5 zero-tolerance, #116 empirical validation, #79 G.7 attribution dashboard. feat/gold-refactor merge-ready for 2026-04-17)
 
 ---
 
 ## Current Position
 
-**Active phase:** Two parallel work streams: (1) Phase 3b-2 M3S shadow + Phase 3c meta-labeling shadow on main, clock-blocked toward the 2026-04-16 auto-promotions (unchanged from yesterday). (2) Phase G Gold Leveraged Stack on `feat/gold-refactor` — yesterday's post-merge state extended by tasks #109/#110/#111 (SWIFT matrix deep-dive, leverage semantics validation, SWIFT WF) + one shadow-orchestrator regression fix. Merge window for these 5 new commits is 2026-04-17 ~09:30. donchian_gold + vol_momentum_gold remain the institutional sub-book; SWIFT failed OOS gate under continuous-run metric (Calmar 0.488) and stays research-only.
-**Next session target:** Wait for Day 4 sprint cron to complete 2026-04-17 ~09:30, then fast-forward merge `feat/gold-refactor` → `main` (6 new commits since yesterday's merge: `241092f` + `ebbcea9` + `b2ed46b` + `45b17b1` + `fe9384d` + the `37d5695` merge-sync). Rehearsal on 2026-04-15 auto-resolved cleanly with zero conflicts against `origin/main` (watchdog fix + forensic docs commits coexist peacefully with gold's SWIFT work — non-overlapping edits).
+**Active phase:** Two parallel work streams: (1) Phase 3b-2 M3S shadow + Phase 3c meta-labeling shadow on main, clock-blocked toward the 2026-04-16 auto-promotions (unchanged from yesterday). (2) Phase G Gold Leveraged Stack on `feat/gold-refactor` — Day 2 shipped 9 discovered tasks culminating in task #79 (G.7 attribution dashboard). Empirically validated deployment: donchian_gold at L=15 RISK_SCALED (+140%/yr, 60% alpha / 40% leverage amplification), vol_momentum_gold at L=10-15 MARGIN_CAPPED as diversifier (research over-projected RISK_SCALED for vol_mom — see task #116 and `docs/LEVERAGE_STRATEGY_DESIGN.md` §6). Attribution framework gives per-cell decomposition + cross-run comparison CLI.
+**Next session target:** Merge window 2026-04-17 ~09:30 — fast-forward `feat/gold-refactor` → `main`. G.7 ships with the merge. Research queue: task #116 (better leveraged strategy using #113/#115 lessons), task #78 G.6 (adaptive leverage governor ML — needs live trade history). Interim: continue reading `data/project_status.md` for main's single-pane status.
 **Engine status:** Paper trading running via launchd on main (unchanged from yesterday), HEALTHY. M3S active in shadow mode (day 2/4 compressed clock). Meta-label filter active in shadow mode.
-**Test suite:** 1183 passing on feat/gold-refactor, 0 skipped (was 1181 + 2 failing briefly until the shadow orchestrator regression was caught and fixed in `fe9384d`). Includes 7 new leverage invariance tests from task #110. Main branch unchanged (686 passing as of 2026-04-14).
-**Portfolio:** bb_rsi_mr_opt 40% / donchian_ensemble_adx 30% / vol_momentum 30% + funding_carry live on main. Gold institutional sub-book: `donchian_gold` + `vol_momentum_gold` (2 strategies, SWIFT excluded per task #111 verdict).
+**Test suite:** 1233 passing on feat/gold-refactor (1227 + 6 new `TestAttribution` tests in task #79). Deep-backtest suite: 50 tests. Main branch unchanged (686 passing as of 2026-04-14).
+**Portfolio:** bb_rsi_mr_opt 40% / donchian_ensemble_adx 30% / vol_momentum 30% + funding_carry live on main. Gold institutional sub-book: `donchian_gold` (L=15 RISK_SCALED, return engine) + `vol_momentum_gold` (L=10-15 MARGIN_CAPPED, diversifier). SWIFT excluded per task #111 verdict.
 **Meta-label training:** 2,819 harvested audit rows from backtests; 4 LR models trained with 24-key feature schema; LightGBM rejected by A/B sanity check. (Unchanged from yesterday.)
 
 ## Session 22 Day 1 — Main automation forensic audit (2026-04-14 afternoon)
@@ -108,7 +108,7 @@ Fix: default fee model now goes through `make_fee_model(fee_profile)` with `fee_
 
 Pre-merge check: `git merge origin/main --no-commit --no-ff`. Auto-resolved **cleanly with zero conflicts** — the 2026-04-14 dry-run's prediction of 2 ROADMAP/STATE conflicts was wrong because gold and main edited non-overlapping sections of each doc file. Committed as merge-sync `37d5695`, pulling in main's `7c5d000` (watchdog patch) + `2883fdb` (forensic audit docs). `feat/gold-refactor` is now merge-ready for the 2026-04-17 window.
 
-**Commits added to `feat/gold-refactor` on 2026-04-15 (6 total):**
+**Commits added to `feat/gold-refactor` on 2026-04-15 (6 total at first sync):**
 - `241092f` fix(book): 1-cent epsilon in margin check (task #109 discovery)
 - `ebbcea9` research(swift): comprehensive 240-cell backtest matrix + report
 - `b2ed46b` research(swift): leverage simulation deep-dive validation (task #110)
@@ -116,7 +116,31 @@ Pre-merge check: `git merge origin/main --no-commit --no-ff`. Auto-resolved **cl
 - `fe9384d` fix(shadow): explicit fee profile + pass reference_price to commission_usd
 - `37d5695` merge: origin/main into feat/gold-refactor (pre-merge sync)
 
-**Test suite on feat/gold-refactor**: 1183 passing, 0 failing. Includes the 7 new leverage invariance tests + the 3 shadow orchestrator tests after the regression fix.
+### Task #112 — Deep Backtest framework (commit `0d67908` + `512b84d`)
+
+Generalized SWIFT's 240-cell deep-backtest process (tasks #109/#110/#111) into a reusable pipeline invokable as `python3 scripts/deep_backtest.py <strategy>`. 6 phases: preflight → matrix → sanity → auto-triggered leverage validation → walk-forward OOS → verdict. SWIFT-style output: CSV + PNG heatmaps + HTML + landscape-A4 PDF. New files: `src/backtest/deep_backtest.py` (~800 LOC), `deep_backtest_report.py` (~500 LOC), `scripts/deep_backtest.py` (~200 LOC), 11 unit tests. Registered all 3 gold strategies in STRATEGY_REGISTRY. Cross-validated: donchian_gold continuous Calmar +10.64 / vol_momentum +6.28 (close to task #108's bespoke numbers). 15 tests, 126s runtime.
+
+### Task #113 — Leverage + position sizing super-planning research (commit `f2ae471`)
+
+Super-planning workflow with principal-engineer + senior-hedge-money-manager persona. Traced current leverage infrastructure, found all 3 gold strategies are leverage-passive (none scale position size with engine leverage). Proposed 6-mode `LeverageMode` enum: INVARIANT / MARGIN_CAPPED / VOL_TARGETED (existing) + RISK_SCALED / KELLY_FRACTIONAL / DRAWDOWN_BUDGETED (new). Deployment recommendations for donchian_gold (RISK_SCALED L=15), vol_momentum_gold (later corrected in task #116), swift_alma (research-only). Research document only; code changes in task #114. Report at `reports/leverage_strategy_research_2026-04-15.md`.
+
+### Task #114 — leverage_mode feature + interactive TUI (commit `b1b2ee2`)
+
+Implemented 5 of 6 leverage modes via `LeverageMode` enum. `_apply_leverage_mode()` transforms `strategy_params["max_risk_per_trade"]` BEFORE strategy instantiation — Option A hook point, zero changes to engine or strategies. RISK_SCALED: linear amplification validated (donchian L=10→+21.62%, L=20→+45.87%, 2.12× linear). KELLY_FRACTIONAL: hard-cap at 0.25 absolute risk. Mode-aware Phase 2 sanity + Phase 5 verdict gates. Extended timeframes: 30m/4h/1d via `_resample_ohlcv`. New windows: 2y/4y with graceful availability checks. **Interactive TUI** via `deep_backtest_interactive.py` (questionary multi-select). +15 tests. DRAWDOWN_BUDGETED deferred.
+
+### Task #115 — Zero-tolerance leverage_mode validation (commit `1a26e82` + `bccae32`)
+
+Prince asked whether task #114 guarantees 100% accuracy for return-amplifying modes. Closed all gaps: (1) engine-level `open_rejected_count` tracking, (2) `CellResult.rejected_positions` + Phase 2 warnings, (3) Phase 0 read-back probe catching silent strategy `__init__` overrides, (4) Phase 2.5 with 9 hard-fail assertions for RISK_SCALED (trade count / side / entry / qty scaling / P&L scaling / total P&L / read-back / margin ratio / commission scaling) + 6 for KELLY_FRACTIONAL + 2 warnings, (5) verdict override forcing FAILED on any Phase 2.5 failure. Phase 2.5 window hardcoded to 30d after compounding-drift false-positive on 365d run. +9 tests. Full suite: 1227 passing. Option B (engine-level signal intercept) deferred to task #116 as unnecessary belt-and-suspenders.
+
+### Task #116 — Empirical validation of research deployment recommendations (commit `<pending>`)
+
+Ran both research-recommended deployments through the validated Phase 2.5 pipeline. **donchian_gold RISK_SCALED L=15**: ✅ DEPLOYABLE. WF continuous Calmar +11.74, annualized +140%/yr. Research validated. **vol_momentum_gold RISK_SCALED L=20 (and L=12)**: ❌ Phase 2.5 PASS but FAIL return-biased gate (24%/yr and 14.6%/yr vs 100% gate). Research over-projected vol_mom by 4-8×. Strategy is high-Calmar but low-return; vol_target × risk_scaled composition clamps upside. Corrected recommendation: **vol_momentum_gold stays MARGIN_CAPPED at L=10-15 as diversifier**. Research report §11 + `docs/LEVERAGE_STRATEGY_DESIGN.md` §6 updated. Framework lesson: return-biased gate is mode-specific, not strategy-general.
+
+### Task #79 — G.7 Alpha vs leverage attribution dashboard (commit `<pending>`)
+
+With tasks #112-#116 shipped, built the decomposition that answers "where did the return come from?" at a glance. Per-cell `AttributionBreakdown` decomposes `return_pct` into {alpha_return, leverage_amplification, cost_drag, margin_rejection_drag, residual}. Baseline cell lookup with graceful fallback if `baseline_leverage` isn't in the grid. `_compute_matrix_attribution` runs after Phase 2 in a try/except (attribution failure doesn't break pipeline), attaches to `DeepBacktestResult`, serializes to `summary.json["attribution"]`. HTML report gains Attribution section with best-cell breakdown + full-matrix table. PDF gains equivalent summary page. NEW `scripts/deep_backtest_compare.py` — standalone CLI loading 2+ report directories and emitting side-by-side HTML comparison with verdict / best-cell / attribution / walk-forward / portfolio recommendation block. Exit codes: 0=DEPLOYABLE present, 1=partial, 2=all-failed. Smoke-tested on donchian_gold L=20 RISK_SCALED → 49% alpha / 51% amplification, linear amp validated (L=15 +2.64%, L=20 +5.32%, ratio 2.02). Tests: 6 new `TestAttribution` (passthrough zero-amp / RISK_SCALED linearity / cost_drag exactness / baseline fallback / large-residual flagging / JSON round-trip). Full deep_backtest suite: 50 tests passing (44 + 6). Math documented in `docs/LEVERAGE_STRATEGY_DESIGN.md` §9 with explicit "approximation" framing and residual thresholds (< 5% trust / 5-15% warn / > 15% unreliable). G.7 shipped ahead of its original live-trade-history pre-req because cell-level backtest attribution is already sufficient for pre-deploy research decisions; live-trade attribution defers to Phase 5 via M3S `leverage_grants`.
+
+**Test suite on feat/gold-refactor**: 1233 passing, 0 failing (was 1183 pre-Deep-Backtest + accumulated additions from #112/#114/#115/#79 = 11+15+9+6 = 41 new, plus prior adds). Deep-backtest subsuite: 50 tests.
 
 ---
 

@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from src.backtest.deep_backtest import (
+    AttributionBreakdown,
     CellResult,
     DeepBacktestConfig,
     DeepBacktestResult,
@@ -28,6 +29,9 @@ from src.backtest.deep_backtest import (
     WalkForwardSummary,
     _apply_leverage_mode,
     _check_window_availability,
+    _compute_cell_attribution,
+    _compute_matrix_attribution,
+    _find_baseline_cell,
     _load_timeframe,
     _validate_kelly_fractional,
     _validate_risk_scaled,
@@ -885,3 +889,246 @@ class TestLeverageModeValidation:
         assert "margin_rejection_warnings" in result.sanity_checks
         assert isinstance(result.sanity_checks["margin_rejection_warnings"], list)
         assert "total_rejected_positions" in result.sanity_checks
+
+
+class TestAttribution:
+    """G.7 — alpha vs leverage attribution decomposition (task #79).
+
+    Verifies the return decomposition math and ensures:
+      - Passthrough modes produce zero leverage_amplification
+      - RISK_SCALED produces linear amplification from baseline
+      - cost_drag matches commission / initial_cash exactly
+      - Baseline-cell-missing edge case handled gracefully
+      - Large residual triggers the warning note
+      - attribution serializes correctly into summary.json
+    """
+
+    def _base_cfg(self, tmp_path, out_sub, **overrides):
+        defaults = dict(
+            strategy="donchian_gold",
+            strategy_params={"session_filter": True, "max_risk_per_trade": 0.005},
+            timeframes=["1h"],
+            window_days=[90],
+            leverages=[10.0],
+            fee_profiles=["ic_markets_mt4_xauusd_normal"],
+            wf_enabled=False,
+            leverage_validation_enabled=False,
+            out_dir=tmp_path / out_sub,
+            generate_html=False,
+            generate_pdf=False,
+            generate_heatmaps=False,
+            progress=False,
+        )
+        defaults.update(overrides)
+        return DeepBacktestConfig(**defaults)
+
+    def test_attribution_on_passthrough_mode_zero_amplification(self, tmp_path):
+        """MARGIN_CAPPED (default) should produce leverage_amplification = 0
+        for every cell. Alpha return should equal total return."""
+        cfg = self._base_cfg(
+            tmp_path, "attr_passthrough",
+            leverages=[10.0, 20.0],
+            leverage_mode=LeverageMode.MARGIN_CAPPED,
+        )
+        result = run_deep_backtest(cfg)
+        assert result.attribution is not None
+        for key, ba in result.attribution.items():
+            assert ba.leverage_amplification == 0.0, \
+                f"MARGIN_CAPPED should not amplify, got {ba.leverage_amplification} at {key}"
+            assert ba.alpha_return == ba.total_return, \
+                f"alpha should equal total for passthrough, got diff at {key}"
+
+    def test_attribution_on_risk_scaled_amplifies(self, tmp_path):
+        """RISK_SCALED at L > baseline should produce positive
+        leverage_amplification. L=10 (baseline) has amp=0, L=20 has amp>0
+        and amp at L=20 should roughly double amp at L=15."""
+        cfg = self._base_cfg(
+            tmp_path, "attr_risk_scaled",
+            leverages=[10.0, 15.0, 20.0],
+            leverage_mode=LeverageMode.RISK_SCALED,
+            baseline_leverage=10.0,
+        )
+        result = run_deep_backtest(cfg)
+        assert result.attribution is not None
+
+        # Pull the three cells (same window/tf/fee, different leverage)
+        by_lev = {
+            k[2]: v for k, v in result.attribution.items()
+            if k[0] == 90 and k[1] == "1h"
+        }
+        assert 10.0 in by_lev and 15.0 in by_lev and 20.0 in by_lev
+
+        # Baseline: amp must be 0
+        assert abs(by_lev[10.0].leverage_amplification) < 1e-9
+
+        # Alpha is the same across all three (it's the baseline's return)
+        assert by_lev[10.0].alpha_return == by_lev[15.0].alpha_return
+        assert by_lev[15.0].alpha_return == by_lev[20.0].alpha_return
+
+        # L=15 and L=20 should have positive amplification (donchian has edge)
+        assert by_lev[15.0].leverage_amplification > 0
+        assert by_lev[20.0].leverage_amplification > 0
+
+        # amp at L=20 should be ~2× amp at L=15 (2× step from baseline)
+        # Tolerance: 40% relative (compounding drift over fewer bars)
+        ratio = by_lev[20.0].leverage_amplification / by_lev[15.0].leverage_amplification
+        assert 1.5 <= ratio <= 2.5, \
+            f"Expected amp ratio ~2.0 at 2× step, got {ratio}"
+
+    def test_attribution_cost_drag_matches_commission(self, tmp_path):
+        """cost_drag % should equal -(total_commission / initial_cash × 100)."""
+        cfg = self._base_cfg(
+            tmp_path, "attr_cost_drag",
+            leverage_mode=LeverageMode.MARGIN_CAPPED,
+        )
+        result = run_deep_backtest(cfg)
+        assert result.attribution is not None
+        for cell in result.matrix:
+            if cell.notes:
+                continue
+            key = (cell.window_days, cell.timeframe, cell.leverage, cell.fee_profile)
+            ba = result.attribution[key]
+            expected_drag = -(cell.total_commission / cfg.initial_cash * 100.0)
+            assert abs(ba.cost_drag - expected_drag) < 1e-9, \
+                f"cost_drag {ba.cost_drag} != expected {expected_drag}"
+
+    def test_attribution_baseline_cell_missing_graceful(self, tmp_path):
+        """If baseline_leverage isn't in the matrix, the attribution should
+        use the closest ≤ baseline cell and emit a note explaining the fallback.
+
+        Config: leverages=[5, 15], baseline=10 → neither matches exactly.
+        Expected: L=5 cell is the alpha source for both (closest ≤ 10 is 5).
+        Note should mention the baseline-not-in-matrix situation.
+        """
+        cfg = self._base_cfg(
+            tmp_path, "attr_baseline_missing",
+            leverages=[5.0, 15.0],
+            leverage_mode=LeverageMode.RISK_SCALED,
+            baseline_leverage=10.0,
+        )
+        result = run_deep_backtest(cfg)
+        assert result.attribution is not None
+
+        # L=15 cell should have a note about baseline-not-in-matrix
+        by_lev = {
+            k[2]: v for k, v in result.attribution.items()
+            if k[0] == 90 and k[1] == "1h"
+        }
+        assert 5.0 in by_lev and 15.0 in by_lev
+
+        # L=5 is the baseline (closest ≤ 10) for L=15's alpha
+        assert by_lev[15.0].baseline_cell_leverage == 5.0
+        # Note should mention the fallback
+        assert "baseline cell" in by_lev[15.0].note.lower(), \
+            f"expected note about baseline fallback, got: {by_lev[15.0].note!r}"
+
+    def test_attribution_residual_flagged_on_large_drift(self, tmp_path):
+        """Unit-level: synthesize cells where return_pct diverges hugely from
+        the sum of components. Verify the note field flags 'large residual'.
+        """
+        # Build two synthetic cells in the same triplet. The baseline cell
+        # has return 10%, and the scaled cell has return 100% (impossibly
+        # large — should trigger the large-residual flag after subtracting
+        # the ~10% alpha).
+        baseline_cell = CellResult(
+            window_days=90, window_label="3mo", timeframe="1h",
+            leverage=10.0, fee_profile="ic_markets_mt4_xauusd_normal",
+            trades=10, return_pct=10.0, maxdd_pct=5.0, win_rate=60.0,
+            profit_factor=1.5, avg_win=50.0, avg_loss=-30.0,
+            total_commission=5.0, final_equity=11000.0,
+            margin_per_trade=1000.0, cost_per_trade=0.5, cost_pct_of_margin=0.05,
+            broker_stop_outs=0, calmar=2.0, sharpe=1.5, rejected_positions=0,
+        )
+        weird_cell = CellResult(
+            window_days=90, window_label="3mo", timeframe="1h",
+            leverage=20.0, fee_profile="ic_markets_mt4_xauusd_normal",
+            trades=10, return_pct=100.0, maxdd_pct=50.0, win_rate=60.0,
+            profit_factor=1.5, avg_win=500.0, avg_loss=-300.0,
+            total_commission=5.0, final_equity=20000.0,
+            margin_per_trade=500.0, cost_per_trade=0.5, cost_pct_of_margin=0.1,
+            broker_stop_outs=0, calmar=4.0, sharpe=2.0, rejected_positions=0,
+        )
+        cfg = self._base_cfg(
+            tmp_path, "attr_residual",
+            leverage_mode=LeverageMode.RISK_SCALED,
+            baseline_leverage=10.0,
+        )
+        # alpha=10 (from baseline), lev_amp=90 (100-10), cost_drag≈-0.05
+        # components sum = 10 + 90 - 0.05 - small = ~99.95
+        # total = 100.0
+        # residual ~= 0.05 → NOT large enough to flag
+        # Let me hand-tune: change baseline to return_pct=30 so:
+        # alpha=30, lev_amp=70 (100-30), cost=-0.05, residual = -0.05
+        # Still not large. Need to force a gap.
+
+        # Simpler: test by calling _compute_cell_attribution on cells where
+        # the components don't add up to return_pct at all (simulate compounding
+        # drift by making return_pct much smaller than sum of components).
+        #
+        # Actually, the cleanest approach is to verify the threshold LOGIC
+        # works: call _compute_cell_attribution on a custom pair and check
+        # the note field is populated when residual > 15.
+
+        # Force a scenario by doctoring: give weird_cell a tiny return_pct
+        # while baseline has a large one.
+        weird_cell.return_pct = 30.0  # total=30, alpha=10, lev_amp=20, drag tiny
+        # residual = 30 - (10 + 20 + cost + 0) = ~0, no flag
+
+        # To FORCE a large residual, make the baseline's return much larger
+        # than the scaled cell's:
+        baseline_cell.return_pct = 50.0  # alpha = 50
+        weird_cell.return_pct = 10.0     # total = 10
+        # lev_amp = 10 - 50 = -40 (negative amplification — unusual)
+        # sum = 50 - 40 - 0.05 = 9.95
+        # residual = 10 - 9.95 = 0.05 → no flag
+
+        # OK, the math makes residual small because it's an IDENTITY by
+        # construction (return = alpha + amp + cost + drag + residual, solved
+        # for residual). So residual is always exactly the unexplained
+        # portion. Forcing it > 15% requires extreme cost_drag or margin drag
+        # that doesn't align with reality.
+        #
+        # Easier: directly test the threshold by mocking. But simpler still
+        # is to construct costs that create a bigger gap. Let me make
+        # total_commission huge:
+        baseline_cell.return_pct = 10.0
+        weird_cell.return_pct = 30.0
+        weird_cell.total_commission = 5000.0  # $5k commission on $10k → -50% drag
+        # alpha=10, lev_amp=20, cost_drag=-50, drag=0
+        # sum = 10+20-50 = -20
+        # residual = 30 - (-20) = 50 → LARGE, triggers flag
+
+        ba = _compute_cell_attribution(
+            weird_cell, [baseline_cell, weird_cell], cfg,
+        )
+        assert abs(ba.residual) > 15.0, \
+            f"expected large residual, got {ba.residual}"
+        assert "large residual" in ba.note.lower(), \
+            f"expected 'large residual' in note, got: {ba.note!r}"
+
+    def test_attribution_serializes_to_summary_json(self, tmp_path):
+        """Running a full deep_backtest should produce summary.json with an
+        'attribution' top-level key containing stringified-tuple keys."""
+        cfg = self._base_cfg(
+            tmp_path, "attr_json",
+            leverages=[10.0, 20.0],
+            leverage_mode=LeverageMode.RISK_SCALED,
+            baseline_leverage=10.0,
+            # generate_html defaults False; _write_json_summary always runs
+        )
+        result = run_deep_backtest(cfg)
+        summary_path = result.report_dir / "summary.json"
+        assert summary_path.exists()
+        import json
+        loaded = json.loads(summary_path.read_text())
+        assert "attribution" in loaded
+        assert loaded["attribution"] is not None
+        # Keys are "window|tf|leverage|fee" strings
+        for key_str, cell_attr in loaded["attribution"].items():
+            parts = key_str.split("|")
+            assert len(parts) == 4, f"bad key format: {key_str}"
+            # Each value is a dict with the dataclass fields
+            assert "alpha_return" in cell_attr
+            assert "leverage_amplification" in cell_attr
+            assert "cost_drag" in cell_attr
+            assert "residual" in cell_attr

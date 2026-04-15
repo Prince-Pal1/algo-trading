@@ -349,6 +349,103 @@ def _generate_html(result: DeepBacktestResult) -> Path:
         html.append(f"<p>Profitable folds: {wf.profitable_folds} / {wf.n_folds}. "
                     f"Total trades: {wf.total_trades}.</p>")
 
+    # ── Task #79 (G.7) — Attribution decomposition ──────────────────────
+    if result.attribution:
+        html.append("<h2>Attribution — where did the return come from?</h2>")
+        html.append(
+            "<p class='muted'>Decomposes each cell's return into "
+            "<b>alpha</b> (unlevered edge), <b>leverage amplification</b>, "
+            "<b>cost drag</b> (commissions), and <b>margin rejection drag</b> "
+            "(lost signals). The math is an approximation — see "
+            "<code>docs/LEVERAGE_STRATEGY_DESIGN.md §9</code> for limits.</p>"
+        )
+
+        # Best cell breakdown — prominent card with visual proportions
+        if result.best_cell is not None:
+            bc = result.best_cell
+            key = (bc.window_days, bc.timeframe, bc.leverage, bc.fee_profile)
+            ba = result.attribution.get(key)
+            if ba is not None:
+                tot = ba.total_return
+                # Compute visual widths as fractions of max absolute value
+                max_abs = max(
+                    abs(ba.alpha_return), abs(ba.leverage_amplification),
+                    abs(ba.cost_drag), abs(ba.margin_rejection_drag), 1.0,
+                )
+                def _bar(v: float) -> str:
+                    pct = (abs(v) / max_abs) * 100.0
+                    color = "#0a7a3a" if v >= 0 else "#b22222"
+                    return (
+                        f"<div style='background:{color};height:14px;"
+                        f"width:{pct:.1f}%;display:inline-block;"
+                        f"vertical-align:middle;'></div>"
+                    )
+
+                html.append("<h3>Best cell decomposition</h3>")
+                html.append(
+                    f"<div class='note'><b>{bc.window_label} × {bc.timeframe} × "
+                    f"{int(bc.leverage)}x × {_short_fee(bc.fee_profile)}</b> → "
+                    f"total return <b>{_fmt_pct(tot)}</b></div>"
+                )
+                html.append("<table style='width:100%;'>")
+                html.append("<tr><th>Component</th><th style='width:50%;'>"
+                            "Contribution</th><th>Value</th><th>% of total</th></tr>")
+                rows = [
+                    ("Alpha (unlevered edge)", ba.alpha_return),
+                    ("Leverage amplification", ba.leverage_amplification),
+                    ("Cost drag (commissions)", ba.cost_drag),
+                    ("Margin rejection drag", ba.margin_rejection_drag),
+                    ("Residual (compounding drift)", ba.residual),
+                ]
+                for label, value in rows:
+                    pct_of_total = (value / tot * 100.0) if abs(tot) > 1e-9 else 0.0
+                    html.append(
+                        f"<tr><td>{label}</td>"
+                        f"<td>{_bar(value)}</td>"
+                        f"<td>{_fmt_pct(value)}</td>"
+                        f"<td class='muted'>{pct_of_total:+.1f}%</td></tr>"
+                    )
+                html.append("</table>")
+                if ba.note:
+                    html.append(f"<p class='muted'><i>Note: {ba.note}</i></p>")
+                if ba.baseline_cell_leverage is not None:
+                    html.append(
+                        f"<p class='muted'>Baseline cell leverage for alpha "
+                        f"computation: <code>{ba.baseline_cell_leverage:g}x</code></p>"
+                    )
+
+        # Full matrix attribution table
+        html.append("<h3>Full matrix attribution</h3>")
+        html.append("<table>")
+        html.append("<tr><th>Window</th><th>TF</th><th>Lev</th><th>Fees</th>"
+                    "<th>Total</th><th>Alpha</th><th>Lev amp</th>"
+                    "<th>Cost drag</th><th>Margin drag</th><th>Residual</th></tr>")
+        for key in sorted(result.attribution.keys()):
+            ba = result.attribution[key]
+            wl = WINDOW_LABELS.get(ba.window_days, f"{ba.window_days}d")
+            html.append(
+                f"<tr>"
+                f"<td>{wl}</td>"
+                f"<td>{ba.timeframe}</td>"
+                f"<td>{int(ba.leverage)}x</td>"
+                f"<td>{_short_fee(ba.fee_profile)}</td>"
+                f"<td>{_fmt_pct(ba.total_return)}</td>"
+                f"<td>{_fmt_pct(ba.alpha_return)}</td>"
+                f"<td>{_fmt_pct(ba.leverage_amplification)}</td>"
+                f"<td>{_fmt_pct(ba.cost_drag)}</td>"
+                f"<td>{_fmt_pct(ba.margin_rejection_drag)}</td>"
+                f"<td>{_fmt_pct(ba.residual)}</td>"
+                f"</tr>"
+            )
+        html.append("</table>")
+        html.append(
+            "<p class='muted'><i>How to read: higher leverage amplification = "
+            "more return from the leverage dial; higher alpha = more from "
+            "signal quality. Large residuals signal that compounding drift or "
+            "path-dependent effects (stop-outs, margin calls) are dominating "
+            "the math — treat those cells' decomposition with caution.</i></p>"
+        )
+
     # Heatmap image references
     heatmap_dir = result.report_dir / "heatmaps"
     if heatmap_dir.exists() and any(heatmap_dir.iterdir()):
@@ -603,6 +700,56 @@ def _generate_pdf(result: DeepBacktestResult) -> Path | None:
             f"Profitable folds: {wf.profitable_folds} / {wf.n_folds}  |  Gate: "
             f"{'PASS' if wf.continuous_gate_passed else 'FAIL'}"
         ), new_x="LMARGIN", new_y="NEXT")
+
+    # Task #79 (G.7) — Attribution summary page
+    if result.attribution and result.best_cell is not None:
+        bc = result.best_cell
+        key = (bc.window_days, bc.timeframe, bc.leverage, bc.fee_profile)
+        ba = result.attribution.get(key)
+        if ba is not None:
+            pdf.add_page()
+            pdf.set_font("Helvetica", style="B", size=14)
+            pdf.cell(0, 8, _ascii("Attribution — where did the return come from?"),
+                     new_x="LMARGIN", new_y="NEXT", align="L")
+            pdf.set_font("Helvetica", size=10)
+            pdf.cell(0, 5, _ascii(
+                f"Best cell: {bc.window_label} x {bc.timeframe} x "
+                f"{int(bc.leverage)}x x {_short_fee(bc.fee_profile)}"
+            ), new_x="LMARGIN", new_y="NEXT")
+            pdf.cell(0, 5, _ascii(f"Total return: {ba.total_return:+.2f}%"),
+                     new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(3)
+            pdf.set_font("Helvetica", style="B", size=10)
+            pdf.cell(80, 6, "Component", border=1)
+            pdf.cell(30, 6, "Value", border=1, align="R")
+            pdf.cell(30, 6, "% of total", border=1, align="R")
+            pdf.ln(6)
+            pdf.set_font("Helvetica", size=9)
+            tot = ba.total_return if abs(ba.total_return) > 1e-9 else 1.0
+            rows = [
+                ("Alpha (unlevered edge)", ba.alpha_return),
+                ("Leverage amplification", ba.leverage_amplification),
+                ("Cost drag (commissions)", ba.cost_drag),
+                ("Margin rejection drag", ba.margin_rejection_drag),
+                ("Residual (compounding)", ba.residual),
+            ]
+            for label, value in rows:
+                pct = (value / tot * 100.0)
+                pdf.cell(80, 5, _ascii(label), border=1)
+                pdf.cell(30, 5, _ascii(f"{value:+.2f}%"), border=1, align="R")
+                pdf.cell(30, 5, _ascii(f"{pct:+.1f}%"), border=1, align="R")
+                pdf.ln(5)
+            pdf.ln(3)
+            if ba.note:
+                pdf.set_font("Helvetica", size=9)
+                for line in _wrap_text(f"Note: {ba.note}", 100):
+                    pdf.cell(0, 5, _ascii(line), new_x="LMARGIN", new_y="NEXT")
+            if ba.baseline_cell_leverage is not None:
+                pdf.set_font("Helvetica", size=9)
+                pdf.cell(0, 5, _ascii(
+                    f"Baseline cell leverage: {ba.baseline_cell_leverage:g}x "
+                    f"(used for alpha computation)"
+                ), new_x="LMARGIN", new_y="NEXT")
 
     pdf_path = result.report_dir / "report.pdf"
     pdf.output(str(pdf_path))

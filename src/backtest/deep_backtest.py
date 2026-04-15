@@ -296,6 +296,47 @@ class LeverageValidationResult:
 
 
 @dataclass
+class AttributionBreakdown:
+    """Task #79 (G.7) — decomposes a cell's return_pct into interpretable
+    components so users can answer "where did this return come from?".
+
+    The decomposition is:
+        return_pct ≈ alpha_return + leverage_amplification + cost_drag + margin_rejection_drag + residual
+
+    Where:
+      - alpha_return = the return at the baseline-leverage cell in the same
+        (window, tf, fee) triplet. For passthrough modes (INVARIANT,
+        MARGIN_CAPPED, VOL_TARGETED) this equals return_pct. For
+        RISK_SCALED / KELLY_FRACTIONAL modes, it's the un-amplified baseline.
+      - leverage_amplification = return_pct - alpha_return. Zero for
+        passthrough modes. Positive for RISK_SCALED when L > baseline.
+      - cost_drag = total_commission / initial_cash × 100 (negative
+        contribution). What % of starting capital was eaten by fees.
+      - margin_rejection_drag = proxy for lost alpha from margin-gated
+        signals. Approximated as the fraction of signals rejected times
+        the per-trade alpha.
+      - residual = return_pct - (alpha + lev_amp + cost_drag + margin_drag).
+        Reflects compounding drift, path-dependent effects, and stop-out
+        interactions. Flagged as "large residual" if abs(residual) > 15%.
+
+    The decomposition is an APPROXIMATION, not a bit-exact split — see
+    docs/LEVERAGE_STRATEGY_DESIGN.md §9 for the math and its limits.
+    """
+    window_days: int
+    timeframe: str
+    leverage: float
+    fee_profile: str
+    total_return: float
+    alpha_return: float
+    leverage_amplification: float
+    cost_drag: float
+    margin_rejection_drag: float
+    residual: float
+    baseline_cell_leverage: float | None
+    note: str = ""
+
+
+@dataclass
 class LeverageModeValidation:
     """Task #115 — zero-tolerance hand-trace validation for the NEW leverage
     modes (RISK_SCALED, KELLY_FRACTIONAL). Mirrors task #110's SWIFT invariance
@@ -337,6 +378,11 @@ class DeepBacktestResult:
     verdict_reason: str
     report_dir: Path
     elapsed_seconds: float
+    # Task #79 (G.7): per-cell attribution decomposing return into
+    # {alpha, leverage amplification, cost drag, margin rejection drag}.
+    # Keyed by (window_days, timeframe, leverage, fee_profile). None for
+    # runs where the attribution computation failed gracefully.
+    attribution: dict[tuple, AttributionBreakdown] | None = None
 
 
 # ── Strategy resolution ──────────────────────────────────────────────────
@@ -966,6 +1012,150 @@ def _phase_1_matrix(config: DeepBacktestConfig, ctx: dict) -> list[CellResult]:
 
 
 # ── Phase 2 — Sanity checks ──────────────────────────────────────────────
+
+
+# ── Attribution decomposition (task #79 — G.7) ──────────────────────────
+
+# Thresholds for flagging residuals. The decomposition is an approximation
+# (compounding drift + path-dependent effects), so these set the bar for
+# "this cell's attribution is unreliable".
+_ATTRIBUTION_RESIDUAL_WARN_PCT: float = 5.0   # > 5% residual → note in breakdown
+_ATTRIBUTION_RESIDUAL_LARGE_PCT: float = 15.0  # > 15% residual → "large residual" flag
+
+
+def _find_baseline_cell(
+    cell: CellResult, matrix: list[CellResult], baseline_leverage: float,
+) -> CellResult | None:
+    """Find the cell matching `cell`'s (window, tf, fee) but at the baseline
+    leverage (or the closest available ≤ baseline). Returns None if no such
+    cell exists in the matrix."""
+    same_triplet = [
+        c for c in matrix
+        if c.window_days == cell.window_days
+        and c.timeframe == cell.timeframe
+        and c.fee_profile == cell.fee_profile
+        and not c.notes.startswith("ERROR")
+    ]
+    if not same_triplet:
+        return None
+
+    # Exact match on baseline
+    exact = [c for c in same_triplet if abs(c.leverage - baseline_leverage) < 1e-9]
+    if exact:
+        return exact[0]
+
+    # Fallback: closest leverage ≤ baseline_leverage
+    below = [c for c in same_triplet if c.leverage <= baseline_leverage]
+    if below:
+        return max(below, key=lambda c: c.leverage)
+
+    # Fallback: smallest leverage in the triplet (cell is below baseline)
+    return min(same_triplet, key=lambda c: c.leverage)
+
+
+def _compute_cell_attribution(
+    cell: CellResult, matrix: list[CellResult], config: DeepBacktestConfig,
+) -> AttributionBreakdown:
+    """Decompose a cell's return_pct into alpha / leverage_amp / costs / margin_drag.
+
+    See the `AttributionBreakdown` dataclass docstring and
+    docs/LEVERAGE_STRATEGY_DESIGN.md §9 for the math and its limits.
+    """
+    mode = config.leverage_mode
+    total_return = cell.return_pct
+
+    # Passthrough modes: leverage doesn't amplify notional, so alpha = total
+    is_passthrough = mode in (
+        LeverageMode.INVARIANT,
+        LeverageMode.MARGIN_CAPPED,
+        LeverageMode.VOL_TARGETED,
+    )
+
+    # Look up the baseline cell
+    baseline = _find_baseline_cell(cell, matrix, config.baseline_leverage)
+    baseline_leverage = baseline.leverage if baseline else None
+    note_parts: list[str] = []
+
+    if is_passthrough:
+        # For passthrough modes, alpha_return = return_pct regardless of which
+        # cell in the triplet we picked (they should all be identical returns
+        # because leverage only gates margin, not size).
+        alpha_return = total_return
+        leverage_amplification = 0.0
+    elif baseline is None:
+        # Amplifying mode but no baseline cell to compare against — can't
+        # decompose. Fall back to "everything is alpha, no amplification
+        # computable" and flag the note.
+        alpha_return = total_return
+        leverage_amplification = 0.0
+        note_parts.append("baseline cell missing — attribution unavailable")
+    else:
+        alpha_return = baseline.return_pct
+        leverage_amplification = total_return - alpha_return
+        if abs(baseline.leverage - config.baseline_leverage) > 1e-9:
+            note_parts.append(
+                f"baseline cell at L={baseline.leverage:g} (config baseline "
+                f"L={config.baseline_leverage:g} not in matrix)"
+            )
+
+    # cost_drag: what % of starting capital was eaten by fees
+    cost_drag = -(cell.total_commission / config.initial_cash * 100.0)
+
+    # margin_rejection_drag: proxy for lost alpha from margin-gated signals
+    total_attempted = cell.trades + cell.rejected_positions
+    if total_attempted > 0 and cell.trades > 0 and alpha_return != 0.0:
+        rejection_rate = cell.rejected_positions / total_attempted
+        per_trade_alpha = alpha_return / cell.trades
+        margin_rejection_drag = -(rejection_rate * per_trade_alpha * cell.trades)
+    else:
+        margin_rejection_drag = 0.0
+
+    # Residual captures compounding drift + path-dependent effects that the
+    # additive decomposition can't account for exactly.
+    components_sum = (
+        alpha_return + leverage_amplification + cost_drag + margin_rejection_drag
+    )
+    residual = total_return - components_sum
+
+    if abs(residual) > _ATTRIBUTION_RESIDUAL_LARGE_PCT:
+        note_parts.append(
+            f"large residual {residual:+.2f}% — attribution is unreliable "
+            f"for this cell (compounding drift or stop-out interaction)"
+        )
+    elif abs(residual) > _ATTRIBUTION_RESIDUAL_WARN_PCT:
+        note_parts.append(
+            f"residual {residual:+.2f}% above warn threshold "
+            f"— compounding drift is noticeable"
+        )
+
+    return AttributionBreakdown(
+        window_days=cell.window_days,
+        timeframe=cell.timeframe,
+        leverage=cell.leverage,
+        fee_profile=cell.fee_profile,
+        total_return=total_return,
+        alpha_return=alpha_return,
+        leverage_amplification=leverage_amplification,
+        cost_drag=cost_drag,
+        margin_rejection_drag=margin_rejection_drag,
+        residual=residual,
+        baseline_cell_leverage=baseline_leverage,
+        note="; ".join(note_parts),
+    )
+
+
+def _compute_matrix_attribution(
+    matrix: list[CellResult], config: DeepBacktestConfig,
+) -> dict[tuple, AttributionBreakdown]:
+    """Build the full attribution map keyed by (window_days, timeframe,
+    leverage, fee_profile). Skips cells with ERROR notes."""
+    out: dict[tuple, AttributionBreakdown] = {}
+    for cell in matrix:
+        if cell.notes.startswith("ERROR"):
+            continue
+        key = (cell.window_days, cell.timeframe, cell.leverage, cell.fee_profile)
+        out[key] = _compute_cell_attribution(cell, matrix, config)
+    return out
 
 
 def _phase_2_sanity_checks(
@@ -2162,6 +2352,15 @@ def run_deep_backtest(config: DeepBacktestConfig) -> DeepBacktestResult:
     ctx = _phase_0_preflight(config)
     matrix = _phase_1_matrix(config, ctx)
     sanity = _phase_2_sanity_checks(matrix, config)
+    # Task #79 (G.7): attribution decomposition — wrapped in try/except so a
+    # computation error falls back to attribution=None without breaking the
+    # pipeline. Attribution is informational; it does NOT gate the verdict.
+    try:
+        attribution = _compute_matrix_attribution(matrix, config)
+    except Exception as e:
+        attribution = None
+        if config.progress:
+            print(f"[warn] attribution computation failed: {type(e).__name__}: {e}")
     # Task #115: Phase 2.5 — zero-tolerance hand-trace for RISK_SCALED /
     # KELLY_FRACTIONAL. Returns None for passthrough modes.
     lev_mode_val = _phase_2_5_leverage_mode_validation(config, ctx)
@@ -2196,6 +2395,7 @@ def run_deep_backtest(config: DeepBacktestConfig) -> DeepBacktestResult:
         verdict_reason=reason,
         report_dir=config.out_dir,
         elapsed_seconds=time.time() - t_start,
+        attribution=attribution,  # Task #79 — per-cell P&L decomposition
     )
 
     # Write JSON summary (always)
@@ -2248,6 +2448,16 @@ def _write_json_summary(result: DeepBacktestResult) -> None:
         "leverage_mode_validation": (
             asdict(result.leverage_mode_validation)
             if result.leverage_mode_validation else None
+        ),
+        # Task #79 (G.7) — per-cell attribution decomposition. Keys are
+        # stringified tuples ("window_days|timeframe|leverage|fee_profile")
+        # because JSON doesn't support tuple keys.
+        "attribution": (
+            {
+                f"{k[0]}|{k[1]}|{k[2]}|{k[3]}": asdict(v)
+                for k, v in result.attribution.items()
+            }
+            if result.attribution else None
         ),
         "walk_forward": (
             {**asdict(result.walk_forward),

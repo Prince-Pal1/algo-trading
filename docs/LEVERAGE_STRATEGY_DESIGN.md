@@ -338,7 +338,76 @@ See `reports/leverage_strategy_research_2026-04-15.md` §7 and `tests/test_backt
 
 ---
 
-## 8. References
+## 9. Attribution decomposition (task #79 — G.7)
+
+Once a strategy clears Phase 2.5 and Phase 5, the natural next question is **where did the return come from?** G.7 extends the deep_backtest pipeline with a per-cell decomposition:
+
+```
+return_pct ≈ alpha_return + leverage_amplification + cost_drag + margin_rejection_drag + residual
+```
+
+### The four components
+
+| Component | Definition | Sign | Exact or approximate? |
+|---|---|---|---|
+| `alpha_return` | Return at the **baseline cell** — same (window, tf, fee) but at `baseline_leverage` | usually + | exact (just reads another cell's `return_pct`) |
+| `leverage_amplification` | `return_pct − alpha_return` — extra return from scaling risk_pct | + for RISK_SCALED at L > baseline, 0 for passthrough modes | exact by construction, but the split between "this was edge" vs "this was amplification" is only meaningful if the baseline cell is unlevered |
+| `cost_drag` | `−(total_commission / initial_cash × 100)` — fees eaten from starting capital | − | exact ratio |
+| `margin_rejection_drag` | `−(rejected / (trades + rejected)) × (alpha_return / trades)` — proxy for lost alpha from signals that got margin-gated | − | approximate — uses per-trade alpha as a stand-in for actual rejected-signal quality |
+
+### What's approximate and why
+
+The components **don't sum to `return_pct` bit-exactly**. The gap — the **residual** — comes from:
+
+1. **Compounding is nonlinear** — `equity_L2` compounds 2× faster than `equity_L1`, so per-trade ratios drift over long runs (the same effect that forced task #115's Phase 2.5 to use a 30-day window instead of 365)
+2. **Fee structure has fixed + variable components** — spread is per-lot, commission scales with notional, slippage has jitter
+3. **Broker stop-outs and margin calls** (when they happen) introduce path-dependent effects the decomposition can't see
+
+The framework reports `residual = total − sum(components)` explicitly so you can judge how reliable the attribution is:
+- **< 5% residual** → decomposition is trustworthy
+- **5–15% residual** → `note = "compounding drift or stop-out interaction"` — interpret the numbers with caution
+- **> 15% residual** → `note = "large residual — attribution is unreliable for this cell"` — don't trust the alpha/amp split
+
+### Passthrough vs amplifying modes
+
+For MARGIN_CAPPED / INVARIANT / VOL_TARGETED modes (leverage doesn't scale notional), the baseline cell shares `return_pct` with every other cell in the same (window, tf, fee) triplet, so `alpha_return = total_return` and `leverage_amplification = 0`. The attribution still surfaces cost_drag and margin_rejection_drag, which are real costs regardless of mode.
+
+For RISK_SCALED, alpha is the un-amplified return at `baseline_leverage` and `leverage_amplification` captures the linear scaling contribution. For KELLY_FRACTIONAL, Kelly sets size independently of engine leverage, so `leverage_amplification ≈ 0` by design.
+
+### Baseline cell fallback
+
+If `baseline_leverage` isn't present in `config.leverages`, the attribution code falls back to the closest lower cell and emits a note so the user can see what happened. If no cell at ≤ baseline exists (unusual), it uses the smallest available and flags "baseline-cell-missing" in the note.
+
+### How to read the decomposition
+
+Example from donchian_gold post-task-#79 smoke test at L=20 (3mo window, RISK_SCALED, baseline 10):
+
+```
+Total return:            +10.48%
+  Alpha (unlevered edge) +5.16%   (49%)
+  Leverage amplification +5.32%   (51%)
+  Cost drag              -0.01%
+  Margin rejection       -0.00%
+  Residual               +0.01%
+```
+
+**Reading this**: ~half the return is unlevered signal edge, ~half is leverage scaling. Amplification is linear (+5.32% at L=20 is exactly 2× the +2.64% at L=15, confirming RISK_SCALED math). Cost drag is negligible at this scale — the strategy isn't fee-bound. Residual is within tolerance.
+
+If a different strategy showed `alpha = +1%, amp = +40%`, that would tell you the strategy has **almost no raw edge** and is entirely dependent on leverage — a fragility signal worth flagging in a deployment review, even if the top-line return looks DEPLOYABLE.
+
+### Where to find it
+
+- **In the HTML report**: `src/backtest/deep_backtest_report.py` emits an "Attribution" section between Walk-forward and Heatmaps. Best-cell breakdown up top; full per-cell table below.
+- **In the JSON**: `summary.json["attribution"]` is a dict keyed by `"{window_days}|{timeframe}|{leverage}|{fee_profile}"` → `AttributionBreakdown` dict (see `src/backtest/deep_backtest.py::AttributionBreakdown`).
+- **Cross-run comparison**: `scripts/deep_backtest_compare.py` loads 2+ report directories and produces a side-by-side HTML with attribution, walk-forward, and a portfolio recommendation block.
+
+Runs produced **before** task #79 don't have the `attribution` key. The compare script handles this gracefully with a "no attribution data — re-run to populate" notice.
+
+See `tests/test_backtest/test_deep_backtest.py::TestAttribution` for the 6 regression tests (passthrough zero-amp, RISK_SCALED linearity, cost_drag math, baseline fallback, large-residual flagging, JSON round-trip).
+
+---
+
+## 10. References
 
 - [Full research report](../reports/leverage_strategy_research_2026-04-15.md) — task #113, 2026-04-15
 - [Task #110 leverage validation](../reports/swift_leverage_validation_2026-04-15.md) — the Phase D counter-demo showed RISK_SCALED can 10× returns before DD wipeout
