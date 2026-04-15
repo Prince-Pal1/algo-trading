@@ -192,3 +192,125 @@ class TestStrategyResolution:
         )
         with pytest.raises((RuntimeError, KeyError)):
             run_deep_backtest(config)
+
+
+class TestGoldStrategyIndicatorPrecompute:
+    """Regression tests for the indicator-precompute code path (the bugfix
+    after task #112). SwiftAlmaStrategy computes features inline via
+    on_features() so it doesn't need `indicators=...` passed to engine.run().
+    But donchian_gold / vol_momentum_gold DO rely on precomputed features,
+    and before the fix every matrix cell produced zero trades.
+
+    These tests lock the fix in place:
+        1. donchian_gold fires real trades through deep_backtest
+        2. vol_momentum_gold fires real trades through deep_backtest
+        3. A strategy with explicit config.indicators override also works
+        4. WF retune path on donchian_gold with a trivial 2-combo grid
+
+    Intentionally small configs (~30-45s each) so the gold-path tests add
+    roughly 2 minutes to the overall suite. Worth it — this is the path
+    that Prince cares about most (gold is the primary market), and it's
+    the path that previously shipped broken.
+    """
+
+    def _gold_config(self, tmp_path: Path, strategy_name: str,
+                     strategy_params: dict, out_sub: str) -> DeepBacktestConfig:
+        return DeepBacktestConfig(
+            strategy=strategy_name,
+            strategy_params=strategy_params,
+            symbol="XAUUSD",
+            timeframes=["1h"],            # gold strategies are 1h-native
+            window_days=[90],             # single window, tiny matrix
+            leverages=[10.0],             # skip 1x — donchian hits margin rejection
+            fee_profiles=["ic_markets_mt4_xauusd_normal"],
+            wf_enabled=False,             # skip WF for speed (covered separately)
+            leverage_validation_enabled=False,  # only one leverage, no invariance check needed
+            out_dir=tmp_path / out_sub,
+            generate_html=False,
+            generate_pdf=False,
+            generate_heatmaps=False,
+            progress=False,
+        )
+
+    def test_donchian_gold_matrix_fires_real_trades(self, tmp_path):
+        """Pre-fix, donchian_gold produced 0 trades per cell because
+        indicators were never passed to engine.run(). This test ensures the
+        framework auto-resolves the default indicator list."""
+        cfg = self._gold_config(tmp_path, "donchian_gold",
+                                {"session_filter": True}, "donchian_test")
+        result = run_deep_backtest(cfg)
+        assert len(result.matrix) == 1
+        cell = result.matrix[0]
+        assert cell.notes == "", f"cell errored: {cell.notes}"
+        assert cell.trades > 0, \
+            "donchian_gold should fire real trades when indicators are auto-resolved"
+        # Sanity: a 90d window with donchian hitting at ~10 trades/quarter should
+        # produce a non-trivial return (+/- a few %)
+        assert abs(cell.return_pct) >= 0.01 or cell.trades >= 5
+
+    def test_vol_momentum_gold_matrix_fires_real_trades(self, tmp_path):
+        """Same regression check for vol_momentum_gold."""
+        cfg = self._gold_config(tmp_path, "vol_momentum_gold",
+                                {"long_only": True, "session_filter": True},
+                                "vol_mom_test")
+        result = run_deep_backtest(cfg)
+        assert len(result.matrix) == 1
+        cell = result.matrix[0]
+        assert cell.notes == "", f"cell errored: {cell.notes}"
+        assert cell.trades > 0, \
+            "vol_momentum_gold should fire real trades when indicators are auto-resolved"
+
+    def test_explicit_indicators_override_respected(self, tmp_path):
+        """User can force a specific indicator set via config.indicators.
+        When the override has all the keys donchian needs, trades still fire."""
+        cfg = self._gold_config(tmp_path, "donchian_gold",
+                                {"session_filter": True}, "explicit_ind_test")
+        cfg.indicators = [
+            "donchian_20", "donchian_55", "donchian_120",
+            "atr_14", "atr_20", "adx_14",
+        ]
+        result = run_deep_backtest(cfg)
+        assert result.matrix[0].trades > 0
+        assert result.matrix[0].notes == ""
+
+    def test_wf_retune_path_executes(self, tmp_path):
+        """The `wf_retune=True` + `wf_param_grid` code path isn't covered
+        by the SWIFT tests (SWIFT uses fixed Pine params). Run donchian_gold
+        with a trivial 2-combo grid to verify the grid-search path runs
+        end-to-end and writes best_params into each fold."""
+        cfg = DeepBacktestConfig(
+            strategy="donchian_gold",
+            strategy_params={"session_filter": True},
+            symbol="XAUUSD",
+            timeframes=["1h"],
+            window_days=[90],
+            leverages=[10.0],
+            fee_profiles=["ic_markets_mt4_xauusd_normal"],
+            wf_enabled=True,
+            wf_fold_days=30,
+            wf_n_folds=2,
+            wf_train_days=90,
+            wf_retune=True,
+            wf_param_grid={
+                "sl_atr_mult": [2.5, 3.0],
+                "adx_trend_threshold": [20.0, 25.0],
+                "min_channels": [2],
+                "max_risk_per_trade": [0.02],
+            },
+            wf_leverage=10.0,
+            leverage_validation_enabled=False,
+            out_dir=tmp_path / "wf_retune_test",
+            generate_html=False,
+            generate_pdf=False,
+            generate_heatmaps=False,
+            progress=False,
+        )
+        result = run_deep_backtest(cfg)
+        assert result.walk_forward is not None
+        assert len(result.walk_forward.folds) == 2
+        for fold in result.walk_forward.folds:
+            # best_params should be populated because wf_retune=True
+            assert fold.best_params is not None
+            assert "sl_atr_mult" in fold.best_params
+            assert fold.best_params["sl_atr_mult"] in (2.5, 3.0)
+            assert fold.best_params["adx_trend_threshold"] in (20.0, 25.0)
