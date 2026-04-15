@@ -1157,9 +1157,21 @@ def _phase_2_5_leverage_mode_validation(
 
 def _pick_validation_cell_config(config: DeepBacktestConfig) -> tuple[int, str, str]:
     """Pick (window_days, timeframe, fee_profile) for the Phase 2.5 hand trace.
-    Uses the smallest window, a representative TF (1h if configured, else
-    the first one), and pine_zero_cost fee if available (cleanest math)."""
-    window = min(config.window_days)
+
+    **Uses a HARDCODED 30-day window**, NOT the config's window_days. Rationale:
+    Phase 2.5 is a MATH validation, not a performance test. Per-trade scaling
+    assertions need short windows to minimize compounding drift between L1 and
+    L2 equity curves. Over a 1-year run with ~36 trades, L2's account compounds
+    ~2× faster than L1 due to the scaled position sizes, so by trade 30 the
+    equity ratio has drifted from 1.0 to ~1.5, and each subsequent trade sizes
+    off a different equity — causing per-trade quantity ratios to drift from
+    the exact 2.0 expectation by 40-60%. A 30-day window gives 3-5 trades,
+    minimal compounding drift, tight assertions.
+
+    Picks 1h TF if available (donchian_gold's native), else first configured.
+    Picks pine_zero_cost fee if available (cleanest math), else first.
+    """
+    window = 30  # Fixed 30-day window for Phase 2.5 math validation
     tf = "1h" if "1h" in config.timeframes else config.timeframes[0]
     fee = (
         "pine_zero_cost" if "pine_zero_cost" in config.fee_profiles
