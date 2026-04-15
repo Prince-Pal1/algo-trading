@@ -72,6 +72,7 @@ page = st.sidebar.radio(
         "Imported Strategies",
         "Validation",
         "Strategies",
+        "Run Deep Backtest",
     ],
     index=0,
 )
@@ -561,3 +562,272 @@ elif page == "Strategies":
                         use_container_width=True,
                         hide_index=True,
                     )
+
+
+# ---------------------------------------------------------------------------
+# Page 7: Run Deep Backtest — Streamlit-native alternative to questionary TUI
+# ---------------------------------------------------------------------------
+
+elif page == "Run Deep Backtest":
+    import subprocess
+
+    from src.backtest.deep_backtest_interactive import (
+        FEES_CATALOG,
+        LEVERAGES_CATALOG,
+        LEVERAGE_MODES_CATALOG,
+        TIMEFRAMES_CATALOG,
+        WINDOWS_CATALOG,
+    )
+    from src.backtest.deep_backtest import _check_window_availability
+    from src.strategies.router import STRATEGY_REGISTRY as _CLASS_REGISTRY
+
+    st.title("Run Deep Backtest")
+    st.caption(
+        "Browser-native alternative to the `questionary` TUI. Pick dimensions, "
+        "hit Run, watch output stream live. Result auto-captures into the "
+        "Strategies page when it finishes."
+    )
+
+    # ── Strategy picker ──────────────────────────────────────────────
+    strategy_names = sorted(_CLASS_REGISTRY.keys())
+    if not strategy_names:
+        st.error("No strategies registered in `router.STRATEGY_REGISTRY`.")
+        st.stop()
+
+    strategy = st.selectbox(
+        "Strategy",
+        strategy_names,
+        help="Registered strategy class to backtest. Sourced from `src/strategies/router.py::STRATEGY_REGISTRY`.",
+    )
+
+    # ── Symbol (defaults to XAUUSD for gold stack) ───────────────────
+    col_s1, col_s2 = st.columns(2)
+    with col_s1:
+        symbol = st.text_input("Symbol", value="XAUUSD")
+    with col_s2:
+        initial_cash = st.number_input("Initial cash ($)", value=10000.0, step=1000.0, min_value=1000.0)
+
+    st.markdown("---")
+
+    # ── Matrix dimensions ────────────────────────────────────────────
+    st.subheader("Matrix dimensions")
+    st.caption("Multi-select tick boxes — each combination becomes one matrix cell.")
+
+    # Windows with per-window availability check (probe 1h data for the symbol)
+    window_labels = []
+    window_values = {}
+    for days, label in WINDOWS_CATALOG:
+        try:
+            available, reason = _check_window_availability(days, "1h", symbol)
+        except Exception as e:
+            available, reason = False, f"probe error: {type(e).__name__}"
+        if available:
+            tag = label
+        else:
+            tag = f"{label}  (NOT AVAILABLE — {reason})"
+        window_labels.append(tag)
+        window_values[tag] = (days, available)
+
+    col_w, col_tf = st.columns(2)
+    with col_w:
+        picked_windows = st.multiselect(
+            "Time windows",
+            window_labels,
+            default=[lbl for lbl in window_labels if window_values[lbl][1] and window_values[lbl][0] in (90, 365)],
+        )
+        # Filter out unavailable picks
+        window_days_list = [window_values[lbl][0] for lbl in picked_windows if window_values[lbl][1]]
+
+    with col_tf:
+        tf_labels = [f"{tf} — {desc}" for tf, desc in TIMEFRAMES_CATALOG]
+        tf_map = {f"{tf} — {desc}": tf for tf, desc in TIMEFRAMES_CATALOG}
+        picked_tfs = st.multiselect(
+            "Timeframes",
+            tf_labels,
+            default=[l for l in tf_labels if tf_map[l] in ("1h",)],
+        )
+        timeframes_list = [tf_map[l] for l in picked_tfs]
+
+    # Fees + leverages
+    col_f, col_l = st.columns(2)
+    with col_f:
+        fee_labels = [desc for _, desc in FEES_CATALOG]
+        fee_map = {desc: key for key, desc in FEES_CATALOG}
+        picked_fees = st.multiselect(
+            "Fee profiles",
+            fee_labels,
+            default=[desc for _, desc in FEES_CATALOG if "MT4" in desc],
+        )
+        fees_list = [fee_map[l] for l in picked_fees]
+
+    with col_l:
+        picked_levs = st.multiselect(
+            "Leverages (x)",
+            [str(l) for l in LEVERAGES_CATALOG],
+            default=["10"],
+        )
+        leverages_list = [float(x) for x in picked_levs]
+
+    # Leverage modes (multi-select → runs pipeline once per mode)
+    mode_labels = [desc for _, desc in LEVERAGE_MODES_CATALOG]
+    mode_map = {desc: mode for mode, desc in LEVERAGE_MODES_CATALOG}
+    picked_modes = st.multiselect(
+        "Leverage modes (one run per mode, separate report dirs)",
+        mode_labels,
+        default=[desc for mode, desc in LEVERAGE_MODES_CATALOG if mode.value == "margin_capped"],
+    )
+    modes_list = [mode_map[l] for l in picked_modes]
+
+    st.markdown("---")
+
+    # ── Walk-forward + advanced ──────────────────────────────────────
+    col_wf1, col_wf2, col_wf3 = st.columns(3)
+    with col_wf1:
+        wf_enabled = st.checkbox("Walk-forward OOS validation", value=True)
+    with col_wf2:
+        wf_retune = st.checkbox("WF retune (per-fold grid search)", value=False, disabled=not wf_enabled)
+    with col_wf3:
+        baseline_lev = st.number_input(
+            "Baseline leverage (RISK_SCALED only)", value=10.0, step=1.0, min_value=1.0, max_value=1000.0,
+        )
+
+    with st.expander("Advanced options"):
+        version_slug_override = st.text_input(
+            "Explicit version slug (optional)",
+            value="",
+            help="Overrides the auto-generated `{mode}_L{baseline}_{tf}` slug. "
+                 "Useful for naming bespoke variants (e.g. `optimized_v2`).",
+        )
+        strategy_params_raw = st.text_input(
+            "Strategy param overrides (key=value, comma-separated)",
+            value="",
+            help="E.g. `session_filter=true,max_risk_per_trade=0.02`",
+        )
+        col_kelly1, col_kelly2, col_kelly3 = st.columns(3)
+        with col_kelly1:
+            kelly_win_rate = st.number_input("Kelly win rate (0-1)", value=0.0, step=0.05, min_value=0.0, max_value=1.0)
+        with col_kelly2:
+            kelly_payoff = st.number_input("Kelly payoff ratio", value=0.0, step=0.5, min_value=0.0)
+        with col_kelly3:
+            kelly_fraction = st.number_input("Kelly fraction", value=0.5, step=0.25, min_value=0.0, max_value=1.0)
+
+    # ── Preview + cell count ─────────────────────────────────────────
+    n_cells = (
+        max(1, len(window_days_list)) *
+        max(1, len(timeframes_list)) *
+        max(1, len(leverages_list)) *
+        max(1, len(fees_list)) *
+        max(1, len(modes_list))
+    )
+    st.info(
+        f"**Planned matrix:** {len(window_days_list) or 1} windows × "
+        f"{len(timeframes_list) or 1} TFs × "
+        f"{len(leverages_list) or 1} leverages × "
+        f"{len(fees_list) or 1} fees × "
+        f"{len(modes_list) or 1} modes = **{n_cells} cells**  "
+        f"(runtime estimate: ~{max(1, n_cells * 2)}s)"
+    )
+
+    can_run = (
+        len(window_days_list) > 0 and
+        len(timeframes_list) > 0 and
+        len(fees_list) > 0 and
+        len(leverages_list) > 0 and
+        len(modes_list) > 0
+    )
+    if not can_run:
+        st.warning("Tick at least one value in every dimension to enable the Run button.")
+
+    # ── Run button + live log stream ─────────────────────────────────
+    if st.button("🚀 Run Deep Backtest", type="primary", disabled=not can_run):
+        # Build the CLI args we would pass to scripts/deep_backtest.py.
+        # We use `--non-interactive` to skip the TUI since the browser is the UI.
+        # Multi-mode runs are handled by passing multiple --leverage-mode flags
+        # OR by running the subprocess once per mode. The deep_backtest.py CLI
+        # supports ONE mode per invocation (the TUI handles multi-mode by
+        # looping), so we do the same.
+
+        results_log = st.empty()
+        status_placeholder = st.empty()
+        log_buffer: list[str] = []
+
+        # Extra args shared across modes
+        base_cmd_tail = [
+            "--non-interactive",
+            "--symbol", symbol,
+            "--timeframes", ",".join(timeframes_list),
+            "--windows", ",".join(str(w) for w in window_days_list),
+            "--leverages", ",".join(str(l) for l in leverages_list),
+            "--fees", ",".join(fees_list),
+            "--initial-cash", str(initial_cash),
+            "--baseline-leverage", str(baseline_lev),
+        ]
+        if not wf_enabled:
+            base_cmd_tail.append("--no-wf")
+        if wf_retune:
+            base_cmd_tail.append("--wf-retune")
+        if version_slug_override.strip():
+            base_cmd_tail.extend(["--version-slug", version_slug_override.strip()])
+        if strategy_params_raw.strip():
+            base_cmd_tail.extend(["--strategy-params", strategy_params_raw.strip()])
+        if kelly_win_rate > 0:
+            base_cmd_tail.extend(["--kelly-win-rate", str(kelly_win_rate)])
+        if kelly_payoff > 0:
+            base_cmd_tail.extend(["--kelly-payoff-ratio", str(kelly_payoff)])
+        if kelly_fraction != 0.5:
+            base_cmd_tail.extend(["--kelly-fraction", str(kelly_fraction)])
+
+        # One subprocess per mode (same as TUI's multi-mode loop)
+        import os
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
+
+        total_modes = len(modes_list)
+        for mode_idx, mode in enumerate(modes_list, start=1):
+            status_placeholder.markdown(
+                f"**Running mode {mode_idx}/{total_modes}:** `{mode.value}` — {strategy}"
+            )
+            cmd = [
+                sys.executable,
+                "scripts/deep_backtest.py",
+                strategy,
+                "--leverage-mode", mode.value,
+            ] + base_cmd_tail
+
+            log_buffer.append(f"\n{'=' * 70}\n$ {' '.join(cmd)}\n{'=' * 70}\n")
+            results_log.code("".join(log_buffer), language="bash")
+
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(Path(__file__).resolve().parents[2]),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                log_buffer.append(line)
+                # Cap the log display to the last ~200 lines to keep Streamlit responsive
+                display = "".join(log_buffer[-200:])
+                results_log.code(display, language="bash")
+            proc.wait()
+
+            if proc.returncode == 0:
+                status_placeholder.success(
+                    f"✓ Mode `{mode.value}` completed (mode {mode_idx}/{total_modes})"
+                )
+            else:
+                status_placeholder.error(
+                    f"✗ Mode `{mode.value}` failed with exit code {proc.returncode}"
+                )
+                break
+
+        if proc.returncode == 0:
+            st.success(
+                f"All {total_modes} mode(s) complete. "
+                f"Switch to the **Strategies** page to see the new version row(s) — "
+                f"auto-capture landed them in `strategy_versions` automatically."
+            )
+            st.balloons()
