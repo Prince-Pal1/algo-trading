@@ -31,7 +31,7 @@ timezone = "US/Eastern"
 # from 7 days in Session 22 sprint).
 enabled = true
 mode = "STANDARD"               # CONSERVATIVE | STANDARD | GROWTH | CUSTOM
-shadow_mode = true              # true = log only, no signal mutation
+shadow_mode = false  # true = log only, no signal mutation
 db_path = "data/m3s.sqlite"
 rebalance_cadence_hours = 24.0
 
