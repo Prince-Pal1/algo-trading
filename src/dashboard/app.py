@@ -261,6 +261,35 @@ def _friendly_status_for_line(line: str, current_phase: str | None) -> str | Non
 # ---------------------------------------------------------------------------
 
 st.sidebar.title("Algo Trading")
+
+# Active-broker banner — shown on every page (Phase F of fee-manager build).
+# One line: [active broker] | XAUUSD profile: [profile] | scenario: [scenario].
+# Scenario is auto-detected from the current UTC time so the banner reflects
+# the cost regime the engine would use IF a trade fired right now.
+try:
+    import time as _time
+    from src.fees import FeeManager, get_active_broker
+    _ab = get_active_broker()
+    _now_ms = int(_time.time() * 1000)
+    _info = FeeManager.explain(symbol="XAUUSD", timestamp_ms=_now_ms)
+    _sev_emoji = {
+        "normal": "🟢",
+        "news_active": "📰",
+        "illiquid": "🌙",
+        "volatile": "⚡",
+    }.get(_info["scenario"], "🟢")
+    st.sidebar.markdown(
+        f"**🏦 Active broker:** `{_ab.id}`\n\n"
+        f"**{_sev_emoji} Scenario (XAUUSD):** `{_info['scenario']}`\n\n"
+        f"**📋 Profile:** `{_info['profile_name']}`\n\n"
+        f"_Switch: edit `config/active_broker.toml` or run_ "
+        f"`python3 scripts/set_active_broker.py <broker_id>`"
+    )
+except Exception as _e:
+    st.sidebar.info(f"Fee system not loaded: {_e!s}")
+
+st.sidebar.divider()
+
 page = st.sidebar.radio(
     "Navigation",
     [
