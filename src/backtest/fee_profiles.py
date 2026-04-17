@@ -267,6 +267,69 @@ def make_fee_model(name: str) -> ICMarketsMetalFeeModel | ZeroCostFeeModel:
     return get_profile(name).make_fee_model()
 
 
+def group_profiles_by_broker_platform(
+    *,
+    instrument_class: str | None = None,
+    scenario: str | None = None,
+) -> dict[str, dict[str, list[str]]]:
+    """Return `{broker: {platform: [profile_name, ...]}}` grouped view.
+
+    Used by the Streamlit dashboard page 7 "Run Deep Backtest" to render a
+    broker-specific fee selector (instead of a flat dropdown of all 9
+    profiles). Adding a new broker or platform to the TOML automatically
+    shows up in the UI — no UI-side catalog to maintain.
+
+    Args:
+        instrument_class: optional filter (e.g., "xauusd_metals" to hide
+            FX profiles from the XAUUSD-only deep_backtest pipeline).
+        scenario: optional filter (e.g., "normal" to hide stress/news
+            variants from the default view).
+
+    Returns:
+        Nested dict keyed by broker, then platform. Each leaf is a sorted
+        list of profile names matching the filters.
+
+    Example:
+        >>> group_profiles_by_broker_platform(
+        ...     instrument_class="xauusd_metals", scenario="normal"
+        ... )
+        {
+            "IC Markets": {
+                "mt4": ["ic_markets_mt4_xauusd_normal"],
+                "ctrader": ["ic_markets_ctrader_xauusd_normal"],
+            },
+            "(none)": {
+                "(none)": ["pine_zero_cost"],  # falls in if scenario matches
+            },
+        }
+    """
+    tree: dict[str, dict[str, list[str]]] = {}
+    for name, profile in _registry().items():
+        if instrument_class is not None and profile.instrument_class != instrument_class:
+            continue
+        if scenario is not None and profile.scenario != scenario:
+            continue
+        broker = profile.broker or "(none)"
+        platform = profile.platform or "(none)"
+        tree.setdefault(broker, {}).setdefault(platform, []).append(name)
+    # Sort the leaf lists for deterministic ordering in the UI.
+    for broker in tree:
+        for platform in tree[broker]:
+            tree[broker][platform].sort()
+    return tree
+
+
+def list_brokers(*, instrument_class: str | None = None) -> list[str]:
+    """Return the sorted list of distinct brokers in the registry.
+
+    Filtered by `instrument_class` so strategies restricted to XAUUSD only
+    see brokers that actually trade gold. Empty broker strings are collapsed
+    to "(none)" for the Pine-validation profile.
+    """
+    tree = group_profiles_by_broker_platform(instrument_class=instrument_class)
+    return sorted(tree.keys())
+
+
 def select_profile(
     *,
     broker: str = "IC Markets",

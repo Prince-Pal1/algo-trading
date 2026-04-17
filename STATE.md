@@ -1,17 +1,17 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-04-14 (Session 22 Day 1 — main forensic audit + watchdog patch + Gold Phase G + tasks #101-108 merged from feat/gold-refactor)
+**Last updated:** 2026-04-16 (Session 22 Day 3 — 27 Phase G discoveries shipped: through task #141 plus #146 **Extreme Dashboard Test Suite**: 127 pytest extreme tests + 54 Streamlit AppTest UI integration tests + found/fixed 4 real bugs including a critical data-correctness bug in the Layer 4 leaf picker where sort-order index was applied to the unsorted leaves list — user picked leaf N but saw leaf Y's report. 1509 tests passing total. feat/gold-refactor merge-ready for 2026-04-17)
 
 ---
 
 ## Current Position
 
-**Active phase:** Two parallel work streams now both on main: (1) Phase 3b-2 M3S shadow + Phase 3c meta-labeling shadow running in parallel, all code in place for the 2026-04-16/17 automated cron promotions, wall-clock is the only blocker (4-day shadow clock). (2) Phase G Gold Leveraged Stack — fully shipped via tasks #101-108 (graveyard, scalping arch, SWIFT Pine port, TV parity framework, cost recalibration, fee profile registry, cost-fix sweep, walk-forward retunes). donchian_gold and vol_momentum_gold have honest post-fix baselines; both paper-trading-ready.
-**Next session target:** Nothing manual needed before the 2026-04-16 09:07 CronCreate wake-up. If interrupted earlier, `cat data/project_status.md` gives single-pane status; `./scripts/promote_m3s_authoritative.sh --dry-run` re-runs all 4 gates.
-**Engine status:** Paper trading running via launchd (risk-server + engine + watchdog), HEALTHY. Orphan engine process from 2026-04-13 Sunday killed at 16:23 IST today (was writing stale heartbeats for 2 days with frozen CandleBuilder). New engine PID 33988 running since 10:50 UTC. Watchdog patched with `DATA_STALE_KILL_THRESHOLD=1800s` data-staleness check and reloaded (PID 34293). M3S active in shadow mode (day 1/4 compressed clock). Meta-label filter active in shadow mode (4 LR models loaded, AUC 0.486-0.571).
-**Test suite:** 686 passing on main, 962 passing on feat/gold-refactor, 0 skipped.
-**Portfolio:** bb_rsi_mr_opt 40% / donchian_ensemble_adx 30% / vol_momentum 30% + funding_carry live. Sharpe 2.318 baseline (backtest, 2yr walk-forward).
-**Meta-label training:** 2,819 harvested audit rows from backtests; 4 LR models trained with 24-key feature schema (15 populated + 9 placeholders for future enrichment); LightGBM rejected by A/B sanity check (uplift < 0.03 AUC threshold).
+**Active phase:** Two parallel work streams: (1) Phase 3b-2 M3S shadow + Phase 3c meta-labeling shadow on main, clock-blocked toward the 2026-04-16 auto-promotions (unchanged from yesterday). (2) Phase G Gold Leveraged Stack on `feat/gold-refactor` — Day 2 shipped 9 discovered tasks culminating in task #79 (G.7 attribution dashboard). Empirically validated deployment: donchian_gold at L=15 RISK_SCALED (+140%/yr, 60% alpha / 40% leverage amplification), vol_momentum_gold at L=10-15 MARGIN_CAPPED as diversifier (research over-projected RISK_SCALED for vol_mom — see task #116 and `docs/LEVERAGE_STRATEGY_DESIGN.md` §6). Attribution framework gives per-cell decomposition + cross-run comparison CLI.
+**Next session target:** Merge window 2026-04-17 ~09:30 — fast-forward `feat/gold-refactor` → `main`. G.7 ships with the merge. Research queue: task #116 (better leveraged strategy using #113/#115 lessons), task #78 G.6 (adaptive leverage governor ML — needs live trade history). Interim: continue reading `data/project_status.md` for main's single-pane status.
+**Engine status:** Paper trading running via launchd on main (unchanged from yesterday), HEALTHY. M3S active in shadow mode (day 2/4 compressed clock). Meta-label filter active in shadow mode.
+**Test suite:** 1509 passing on feat/gold-refactor (1342 + 167 new in task #146 extreme + AppTest suite: 127 extreme + 54 AppTest − 14 overlap counted in both). Found + fixed 4 bugs: bug #1 `_to_absolute` NameError in page 7 History section (crash on every report click), bug #2 12× `use_container_width` deprecation warnings, bug #3 unused `list_brokers` import, **bug #4 CRITICAL: Strategies page 6 Layer 4 leaf picker sort-index mismatch → user picked leaf N but saw leaf Y's HTML report** (fixed by zipping rows + tuples + sorting as one unit). **Smoke test: 18/18 pass** via `python3 scripts/smoke_test_dashboard.py`. Deep-backtest suite: 50 tests. Strategy-storage suite: 63 tests. Dashboard extreme suite: 127 tests. Dashboard AppTest UI suite: 54 tests. swift_alma_v2 suite: 46 tests. Main branch unchanged (686 passing as of 2026-04-14).
+**Portfolio:** bb_rsi_mr_opt 40% / donchian_ensemble_adx 30% / vol_momentum 30% + funding_carry live on main. Gold institutional sub-book: `donchian_gold` (L=15 RISK_SCALED, return engine) + `vol_momentum_gold` (L=10-15 MARGIN_CAPPED, diversifier). SWIFT excluded per task #111 verdict.
+**Meta-label training:** 2,819 harvested audit rows from backtests; 4 LR models trained with 24-key feature schema; LightGBM rejected by A/B sanity check. (Unchanged from yesterday.)
 
 ## Session 22 Day 1 — Main automation forensic audit (2026-04-14 afternoon)
 
@@ -53,6 +53,128 @@ The legacy gold-worktree narrative (Phase G.2 COMPLETE state and Tier 5 obituari
 **Gold portfolio plan:** Two-book — institutional (Tiers 1-4, donchian_gold + future additions, aggregate leverage cap 80×, weekly HWM-gated compounding) + aggressive (Tier 5, candle_burst_hunter + news_spike_fade + hedged_structure_play, 1000× position scalping at 5% sub-book sizing with daily/weekly kill switches). Starting split: **institutional_pct=0.95** (conservative until the tuning pass). Prince can override via `config/settings.toml [m3s_gold.allocation] institutional_pct`.
 
 > See `ROADMAP.md` § Phase G for the G.2 sub-phase table. See `SESSIONS_ARCHIVE.md` for Sessions 8-17.
+
+---
+
+## Session 22 Day 2 — SWIFT matrix + leverage validation + walk-forward + shadow regression fix (2026-04-15)
+
+Follow-up pass on the gold worktree after yesterday's 2026-04-14 merge. Prince wanted SWIFT pushed through a comprehensive multi-cell matrix + rigor validation for the leverage axis + honest walk-forward baseline. All five discrete work units captured below:
+
+### Task #109 — SWIFT 240-cell matrix + `book.open_position` float precision fix (commit `241092f` + `ebbcea9`)
+
+`scripts/swift_full_matrix.py` runs SwiftAlmaStrategy across 4 windows × 4 TFs × 5 leverages × 3 fees = **240 backtests** with phased validation gates. Report at `reports/swift_full_matrix_2026-04-15/index.html` (gitignored).
+
+Phase 1-5 validation uncovered a **critical engine bug**: `book.open_position` line 386 rejected positions where `entry_margin == free_margin` exactly (1x leverage with risk-based sizing). SwiftAlma is the worst-case trigger because default `risk_pct == sl_pct == 0.005` makes `notional = equity × 1.0` exactly. Symptom: pine_zero produced 77 trades while cTrader/MT4 produced 307 on identical data (4× discrepancy). Fixed with a 1-cent epsilon: `if entry_margin > current_free_margin + 0.01`. 2 regression tests added.
+
+**Best deployable cell**: `15m × MT4 × 1y` → **+25.57% / 11.96% DD / Calmar 2.14**. The 5m TF (which task #107 used for the initial SWIFT integration test) is unviable on full year (−2.22% MT4, −17.61% cTrader) — task #107 got lucky on a cherry-picked Dec 28 → Apr 14 window.
+
+### Task #110 — SWIFT matrix leverage simulation deep-dive validation (commit `b2ed46b`)
+
+Prince was rightly skeptical that matrix #109 showed bit-perfect identical P&L at 1x / 50x / 100x / 500x / 1000x across all 240 cells. Ran 4 independent validation phases with zero tolerance for hidden discrepancies:
+
+- **Phase A hand trace**: Single trade (1mo × M5 × pine_zero SHORT #1) at 1x and 1000x matches to 10+ decimals. Quantity `1.9609169640 oz` identical, P&L `+$24.511462` identical, final equity `$11,355.455243` identical. Only `margin_used` differs by exactly 1000× ($10,000 → $10). ✅ PASS.
+- **Phase B unit tests**: 7 new tests in `tests/test_backtest/test_leverage_invariance.py` lock the leverage semantics in code (`test_pnl_identical_across_leverages`, `test_quantity_identical_across_leverages`, `test_entry_exit_prices_identical_across_leverages`, `test_final_equity_identical_across_leverages`, `test_margin_used_scales_inversely_with_leverage`, `test_pnl_pct_per_margin_scales_with_leverage`, `test_high_leverage_can_trigger_stop_out_with_wide_sl`). ✅ 7/7.
+- **Phase C data audit**: 1536 invariant assertions on `data/swift_full_matrix_2026-04-15.json` across 48 (window, TF, fee) triplets × 32 assertions/triplet. ✅ 1536/1536.
+- **Phase D counter-demo**: Same SWIFT signal logic with `risk_pct = 0.005 × scale` proves the framework DOES produce leverage variance when a strategy opts in: scale 1×=+13.55% / 2×=+27.81% / 5×=+73% / 10×=+144% / 25×=+133% / 50×=−90% / 100×=−100% wipeout. ✅ Framework correct.
+
+**Verdict**: `engine.run(leverage=N)` is a max-margin cap, NOT a position multiplier. SwiftAlmaStrategy's `risk_pct == sl_pct` design makes `notional = equity` at every leverage, so P&L is leverage-invariant by design. Report at `reports/swift_leverage_validation_2026-04-15.md`. New Known Gotcha row in ARCHITECTURE.md (2026-04-15). No engine or strategy bug.
+
+### Task #111 — SWIFT walk-forward OOS validation (commit `45b17b1`)
+
+With matrix #109 validated, the next question: is the 1y headline +25.57% a robust baseline or a favorable-window cherry-pick? `scripts/walk_forward_swift_alma.py` runs 7 non-overlapping 90-day OOS folds (dt-based slicing to handle weekend gaps) over 2yr XAUUSD 5m→15m, with **fixed Pine params** (no retuning — Pine params are rigid by design).
+
+Three metrics, three stories:
+
+| Metric | Calmar | Verdict |
+|---|---:|---|
+| Per-fold mean (7 folds) | **+1.124** ± 3.126 | ✅ passes gate BUT std 2.8× mean |
+| WF compounded across folds | +0.332 | ❌ fails |
+| **Continuous 630d run** | **+0.488** | **❌ fails** ← most honest |
+| Matrix 1y cell (task #109) | +2.14 | (favorable window) |
+
+Per-fold mean is inflated by fold 5's Calmar 6.97 outlier (2025-07→10 trend regime, +7.24% / 4.21% DD). Fold 3 (2025-01→04 chop regime) is catastrophic: −7.89% / 17.40% DD. The continuous 630d run on the same data produces Calmar **0.488 — below the 0.5 gate**. 4/7 profitable folds. Order of magnitude weaker than `donchian_gold` (OOS Calmar 13.73) and `vol_momentum_gold` (OOS Calmar 11.22).
+
+**Prince chose Option A**: SWIFT stays research-only. Institutional sub-book stays at 2 strategies for the 2026-04-17 merge. The SWIFT port produced two durable artifacts: TV parity framework (task #104) + leverage validation tests (task #110). Report at `reports/swift_walk_forward_2026-04-15.md`.
+
+### Shadow orchestrator regression fix (commit `fe9384d`)
+
+During merge-prep test sweep, 2 shadow tests failing: `test_runs_end_to_end_on_synthetic_data` + `test_state_dump_parquet_written`. Root cause: task #105/#107's switch to volume-based cTrader commission schedule means `commission_usd()` now REQUIRES `reference_price`, but `src/shadow_orchestrator.py` was still:
+1. Calling the forbidden default `ICMarketsMetalFeeModel()` constructor (violates CLAUDE.md rule from task #106)
+2. Not passing `reference_price` to `commission_usd()` in either close-side call site (SL/TP exit + CLOSE signal exit)
+
+Fix: default fee model now goes through `make_fee_model(fee_profile)` with `fee_profile: str = "ic_markets_mt4_xauusd_normal"` as safe default (MT4 per-lot pricing ignores `reference_price` so the fix is defensive even if a downstream caller forgets). Both call sites now pass `reference_price=fill`. Latent since task #107; surfaced when the full test suite was re-run for merge readiness.
+
+### Merge rehearsal + sync (commit `37d5695`)
+
+Pre-merge check: `git merge origin/main --no-commit --no-ff`. Auto-resolved **cleanly with zero conflicts** — the 2026-04-14 dry-run's prediction of 2 ROADMAP/STATE conflicts was wrong because gold and main edited non-overlapping sections of each doc file. Committed as merge-sync `37d5695`, pulling in main's `7c5d000` (watchdog patch) + `2883fdb` (forensic audit docs). `feat/gold-refactor` is now merge-ready for the 2026-04-17 window.
+
+**Commits added to `feat/gold-refactor` on 2026-04-15 (6 total at first sync):**
+- `241092f` fix(book): 1-cent epsilon in margin check (task #109 discovery)
+- `ebbcea9` research(swift): comprehensive 240-cell backtest matrix + report
+- `b2ed46b` research(swift): leverage simulation deep-dive validation (task #110)
+- `45b17b1` research(swift): walk-forward OOS validation — gate fail (task #111)
+- `fe9384d` fix(shadow): explicit fee profile + pass reference_price to commission_usd
+- `37d5695` merge: origin/main into feat/gold-refactor (pre-merge sync)
+
+### Task #112 — Deep Backtest framework (commit `0d67908` + `512b84d`)
+
+Generalized SWIFT's 240-cell deep-backtest process (tasks #109/#110/#111) into a reusable pipeline invokable as `python3 scripts/deep_backtest.py <strategy>`. 6 phases: preflight → matrix → sanity → auto-triggered leverage validation → walk-forward OOS → verdict. SWIFT-style output: CSV + PNG heatmaps + HTML + landscape-A4 PDF. New files: `src/backtest/deep_backtest.py` (~800 LOC), `deep_backtest_report.py` (~500 LOC), `scripts/deep_backtest.py` (~200 LOC), 11 unit tests. Registered all 3 gold strategies in STRATEGY_REGISTRY. Cross-validated: donchian_gold continuous Calmar +10.64 / vol_momentum +6.28 (close to task #108's bespoke numbers). 15 tests, 126s runtime.
+
+### Task #113 — Leverage + position sizing super-planning research (commit `f2ae471`)
+
+Super-planning workflow with principal-engineer + senior-hedge-money-manager persona. Traced current leverage infrastructure, found all 3 gold strategies are leverage-passive (none scale position size with engine leverage). Proposed 6-mode `LeverageMode` enum: INVARIANT / MARGIN_CAPPED / VOL_TARGETED (existing) + RISK_SCALED / KELLY_FRACTIONAL / DRAWDOWN_BUDGETED (new). Deployment recommendations for donchian_gold (RISK_SCALED L=15), vol_momentum_gold (later corrected in task #116), swift_alma (research-only). Research document only; code changes in task #114. Report at `reports/leverage_strategy_research_2026-04-15.md`.
+
+### Task #114 — leverage_mode feature + interactive TUI (commit `b1b2ee2`)
+
+Implemented 5 of 6 leverage modes via `LeverageMode` enum. `_apply_leverage_mode()` transforms `strategy_params["max_risk_per_trade"]` BEFORE strategy instantiation — Option A hook point, zero changes to engine or strategies. RISK_SCALED: linear amplification validated (donchian L=10→+21.62%, L=20→+45.87%, 2.12× linear). KELLY_FRACTIONAL: hard-cap at 0.25 absolute risk. Mode-aware Phase 2 sanity + Phase 5 verdict gates. Extended timeframes: 30m/4h/1d via `_resample_ohlcv`. New windows: 2y/4y with graceful availability checks. **Interactive TUI** via `deep_backtest_interactive.py` (questionary multi-select). +15 tests. DRAWDOWN_BUDGETED deferred.
+
+### Task #115 — Zero-tolerance leverage_mode validation (commit `1a26e82` + `bccae32`)
+
+Prince asked whether task #114 guarantees 100% accuracy for return-amplifying modes. Closed all gaps: (1) engine-level `open_rejected_count` tracking, (2) `CellResult.rejected_positions` + Phase 2 warnings, (3) Phase 0 read-back probe catching silent strategy `__init__` overrides, (4) Phase 2.5 with 9 hard-fail assertions for RISK_SCALED (trade count / side / entry / qty scaling / P&L scaling / total P&L / read-back / margin ratio / commission scaling) + 6 for KELLY_FRACTIONAL + 2 warnings, (5) verdict override forcing FAILED on any Phase 2.5 failure. Phase 2.5 window hardcoded to 30d after compounding-drift false-positive on 365d run. +9 tests. Full suite: 1227 passing. Option B (engine-level signal intercept) deferred to task #116 as unnecessary belt-and-suspenders.
+
+### Task #116 — Empirical validation of research deployment recommendations (commit `<pending>`)
+
+Ran both research-recommended deployments through the validated Phase 2.5 pipeline. **donchian_gold RISK_SCALED L=15**: ✅ DEPLOYABLE. WF continuous Calmar +11.74, annualized +140%/yr. Research validated. **vol_momentum_gold RISK_SCALED L=20 (and L=12)**: ❌ Phase 2.5 PASS but FAIL return-biased gate (24%/yr and 14.6%/yr vs 100% gate). Research over-projected vol_mom by 4-8×. Strategy is high-Calmar but low-return; vol_target × risk_scaled composition clamps upside. Corrected recommendation: **vol_momentum_gold stays MARGIN_CAPPED at L=10-15 as diversifier**. Research report §11 + `docs/LEVERAGE_STRATEGY_DESIGN.md` §6 updated. Framework lesson: return-biased gate is mode-specific, not strategy-general.
+
+### Task #79 — G.7 Alpha vs leverage attribution dashboard (commit `2f9376f`)
+
+With tasks #112-#116 shipped, built the decomposition that answers "where did the return come from?" at a glance. Per-cell `AttributionBreakdown` decomposes `return_pct` into {alpha_return, leverage_amplification, cost_drag, margin_rejection_drag, residual}. Baseline cell lookup with graceful fallback if `baseline_leverage` isn't in the grid. `_compute_matrix_attribution` runs after Phase 2 in a try/except (attribution failure doesn't break pipeline), attaches to `DeepBacktestResult`, serializes to `summary.json["attribution"]`. HTML report gains Attribution section with best-cell breakdown + full-matrix table. PDF gains equivalent summary page. NEW `scripts/deep_backtest_compare.py` — standalone CLI loading 2+ report directories and emitting side-by-side HTML comparison with verdict / best-cell / attribution / walk-forward / portfolio recommendation block. Exit codes: 0=DEPLOYABLE present, 1=partial, 2=all-failed. Smoke-tested on donchian_gold L=20 RISK_SCALED → 49% alpha / 51% amplification, linear amp validated (L=15 +2.64%, L=20 +5.32%, ratio 2.02). Tests: 6 new `TestAttribution` (passthrough zero-amp / RISK_SCALED linearity / cost_drag exactness / baseline fallback / large-residual flagging / JSON round-trip). Full deep_backtest suite: 50 tests passing (44 + 6). Math documented in `docs/LEVERAGE_STRATEGY_DESIGN.md` §9 with explicit "approximation" framing and residual thresholds (< 5% trust / 5-15% warn / > 15% unreliable). G.7 shipped ahead of its original live-trade-history pre-req because cell-level backtest attribution is already sufficient for pre-deploy research decisions; live-trade attribution defers to Phase 5 via M3S `leverage_grants`.
+
+### Task #117 — G.8 Strategy storage system (commit `<pending>`)
+
+Prince's pain: "I can't tell at a glance which variants of donchian_gold exist, what their max return is, and where the HTML report lives. Zero-index on disk." New module `src/strategies/storage.py` (~700 LOC) with 2 SQLite tables (`strategies` + `strategy_versions`) in `data/trades.db`. Principal-engineer upgrades the graveyard didn't do: WAL mode + FK enforcement + retry-on-busy from day 1, schema_version stub for future ALTER TABLE, relative paths for repo-move safety. Do-not-clobber UPSERT preserves user-set description/family/tags across auto-capture calls. Slug scheme `{mode}_L{int(baseline)}_{tf}` with 6-char sha1(params) collision fallback — idempotent on re-run with same params, distinct slug when params differ. Auto-capture hook in `run_deep_backtest()` (wrapped in try/except mirroring task #79's attribution hook pattern) introspects BaseStrategy instance for name/base_class/tier/markets/default_timeframe/leverage_range, picks max-return cell from `matrix_df` (absolute max, user's G.8 literal ask), computes sanity flag (trades<30 OR DD≥60% OR Calmar≤0.2) + short warning string. Two new helpers in deep_backtest.py: `_compute_max_return_cell(matrix_df)` (NaN-safe via `dropna`) + `_is_max_return_sane(cell)`. New CLI `scripts/strategies.py` with `list`/`show`/`register` subcommands — rich tables when `rich` is installed, plain-text fallback. Smoke-tested end-to-end: fresh donchian_gold deep_backtest auto-populates `strategies` + `strategy_versions` rows, CLI correctly shows +33.41% max return with `!` vanity-flag ("only 8 trades (< 30)" — the 90-day test window intentionally short). Tests: 25 new `TestStorage` (schema idempotent / WAL+FK pragmas / upsert preserves user fields / upsert preserves performance fields on None input / FK orphan raises IntegrityError / slug idempotent on same params / slug hash-collision on different params / default slug / max-return picks absolute max NOT Calmar / NaN-safe / empty matrix graceful / sane flag on thin trades / high DD / low Calmar / record_deep_backtest_result idempotent + created_at preserved / list_versions filter / retry_on_busy 3-call + max-attempt + non-locked-error passthrough). Stage 2 defers: backfill of 16 existing report dirs, `open`/`sync`/`kill` CLI commands, WF denormalization, graveyard linkage. Stage 3 defers: Streamlit page 6 (embed `index.html` via `st.components.v1.html`), `strategy_version_runs` history table, `backtest_run_id` FK link. Lays the data foundation for the future Streamlit strategies page.
+
+**Test suite on feat/gold-refactor**: 1258 passing, 0 failing. Deep-backtest subsuite: 50 tests. Strategy-storage subsuite: 25 tests.
+
+### Tasks #118-#130 — Strategy storage Stage 2/3/legacy follow-up sweep (commit `<pending>`)
+
+Single execution sweep through all 12 follow-up tasks created at the end of task #117. Grouped by what landed:
+
+**Schema migration framework + ALTER TABLE migrations (tasks #119/#121/#123/#124)**: `_apply_migrations()` driven by `PRAGMA user_version`. Schema bumped v1 → v5 with idempotent `ALTER TABLE ... ADD COLUMN` migrations guarded by `_column_exists()` / `_table_exists()` checks. v2 = WF denormalization (6 columns: wf_continuous_return_pct/dd_pct/calmar/gate_passed/n_folds/profitable_folds). v3 = `strategies.killed_graveyard_id` FK column. v4 = `strategy_versions.backtest_run_id` nullable FK. v5 = NEW `strategy_version_runs` append-only history table. Each migration is idempotent and the runner re-stamps `user_version` after each step.
+
+**Auto-population from result.walk_forward**: `record_deep_backtest_result` reads `result.walk_forward.continuous_*` and populates the new wf_* columns. Every call also appends one row to `strategy_version_runs` via the new `_append_version_run()` helper.
+
+**Graveyard linkage (#121)**: `kill_strategy(name, graveyard_id)` decoupled helper flips `strategies.status='killed'` + sets the FK. Doesn't touch `graveyard.record_kill()` so the two modules stay independent.
+
+**JSON1 query helpers (#129)**: `query_best_by_max_return(verdict=, limit=)`, `query_deployable_by_calmar(use_wf_calmar=, limit=)`, `query_vanity_traps()` — the critical safety query that surfaces all DEPLOYABLE versions whose max-return cell failed the sanity flag (thin trades / huge DD / low Calmar). Audit BEFORE promoting any version to live capital.
+
+**CLI ergonomics (#120)**: `scripts/strategies.py` grew **6 new subcommands**: `open NAME SLUG` (webbrowser opens the deep_backtest HTML report), `sync` (walks `router.STRATEGY_REGISTRY` upserting empty rows for code-registered classes not yet in the DB), `kill NAME --graveyard-id N` (status flip + FK link), `vanity` (lists all DEPLOYABLE+sane=False rows; non-zero exit code so CI can detect), `top --limit N --by-calmar` (top versions by max-return or WF Calmar), `history NAME SLUG --limit N` (run history from the v5 table). Plus `scripts/deep_backtest.py --version-slug SLUG` flag plumbed through `DeepBacktestConfig.version_slug` and honored by the storage hook (overrides auto-generated slug for ideation/naming).
+
+**Backfill (#118)**: NEW `scripts/strategies_backfill.py` (~225 LOC) walks `reports/deep_backtest_*/` dirs, parses each `summary.json` + `matrix.csv`, upserts strategies + versions + history rows. Idempotent. Picks max-return cell + sanity flag retroactively. Reuses report timestamp from dir name as `last_backtested_at`. Recovered 16/17 historical runs (one was an aborted run with no summary.json).
+
+**Streamlit Strategies page 6 (#122)**: NEW page in `src/dashboard/app.py` (~140 LOC). Front-and-center vanity-trap audit panel. Headline table of all strategies with version counts + best max-return + sanity glyph. Strategy detail view with parent metadata + version table (slug, verdict, max-return, DD, Calmar, WF Calmar, trades, sane flag, last_backtested). Embedded HTML report viewer via `st.components.v1.html(html_path.read_text(), height=900, scrolling=True)` — clicking a version renders the deep_backtest report inline. Per-version run history expander.
+
+**Strategy dependency graph (#130)**: NEW `scripts/strategy_graph.py` emits Graphviz DOT format with parent → variant edges. Color-coded by status (parent fill) + verdict (version border). Vanity-flag glyphs on unsafe cells. Optional `--by-family` clusters by family using DOT subgraphs. Render externally with `dot -Tsvg strategies.dot > strategies.svg`.
+
+**Test isolation bug fix (mid-execution discovery)**: While running the backfill, discovered that pytest test runs of `test_deep_backtest.py` were polluting the real `data/trades.db` because the auto-capture hook used a hardcoded default `db_path = "data/trades.db"`. Fix: `_resolve_default_db()` reads `ALGO_STRATEGY_DB` env var; new `tests/test_backtest/conftest.py` autouse fixture sets the env var to a per-test tmp_path DB. All 13 storage signatures updated to default `db_path: str | None = None` with central resolution in `_connect()`. Cleaned up the 10 polluted rows from `data/trades.db` post-fix.
+
+**Architectural decisions logged in MASTER_PLAN.md (#126/#127)**: Two new entries in §16 Key Decisions Log. (a) `config/catalog.toml` is research-only; runtime versioned registry lives in SQLite tables — they do NOT sync. (b) Deep_backtest does NOT write to `backtest_runs`; the two layers stay orthogonal. Stage 3 task #124 added an OPTIONAL `backtest_run_id` FK on strategy_versions for future Streamlit deep-link.
+
+**STRATEGY_REGISTRY consolidation (#125)**: `scripts/backtest.py::STRATEGY_REGISTRY` renamed to `BACKTEST_PRESETS` with a backward-compat `STRATEGY_REGISTRY = BACKTEST_PRESETS` alias for legacy importers (scripts/gold_backtest.py). Comprehensive design note added at the top of scripts/backtest.py explaining the relationship: `router.py::STRATEGY_REGISTRY` = canonical class lookup; `scripts/backtest.py::BACKTEST_PRESETS` = CLI preset library mapping preset IDs to fully-parameterized factory lambdas + indicator presets. The two CANNOT be merged (different shapes, different consumers) but the renaming makes the disambiguation crystal clear.
+
+**DRAWDOWN_BUDGETED (#128)**: Architectural blocker formally documented in `docs/LEVERAGE_STRATEGY_DESIGN.md` §7.1. Requires a new `LeveragedBacktestEngine.on_bar_close(equity, peak_equity, drawdown_pct)` callback hook + corresponding `BaseStrategy.on_equity_update()` method + a `DrawdownBudgetedSizer` mixin. Bundled with task #78 (G.6 ML adaptive leverage governor) since both need the same engine refactor. **Do not** add `DRAWDOWN_BUDGETED` to the `LeverageMode` enum until the engine hook lands — adding it half-implemented would break the Phase 2.5 zero-tolerance contract.
+
+**Tests**: 18 new `TestStorage` test classes/methods (43 total in test_storage.py — schema migrations × 6, WF denormalization × 2, version run history × 2, kill_strategy × 3, JSON1 query helpers × 5). All 43 pass. Full suite target: 1276 passing (1258 + 18).
 
 ---
 

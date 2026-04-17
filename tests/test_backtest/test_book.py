@@ -172,6 +172,43 @@ class TestOpenPositionValidation:
                 sub_book=SUB_BOOK_INSTITUTIONAL,
             )
 
+    def test_margin_exactly_equal_to_free_margin_succeeds(self):
+        """Regression test for task #109 float-precision bug.
+
+        When notional == equity at 1x leverage (e.g. risk-based sizing
+        where risk_pct == sl_pct), the margin requirement equals exactly
+        the available free margin. Float ULP differences could cause
+        `entry_margin > free_margin` to fire spuriously. The 1-cent
+        epsilon in book.open_position lets these "exactly at the limit"
+        positions succeed.
+
+        Scenario: $10,000 cash, 1x leverage, position notional = $10,000
+        (e.g., 2 oz of gold @ $5,000). Margin needed = $10,000.
+        Free margin = $10,000. Should succeed (within 1-cent epsilon).
+        """
+        book = Book.new(institutional_cash=10_000.0, aggressive_cash=0.0)
+        # 2 oz @ $5000 = $10,000 notional, 1x lev → $10,000 margin
+        pos = book.open_position(
+            side="LONG", entry_price=5000.0, quantity=2.0, leverage=1.0,
+            stop_loss=4975.0, take_profit=5050.0, entry_ts_ms=0,
+            sub_book=SUB_BOOK_INSTITUTIONAL,
+        )
+        assert pos.id in book.institutional.positions
+        assert pos.entry_price == 5000.0
+        assert pos.quantity == 2.0
+        assert pos.leverage == 1.0
+
+    def test_margin_just_over_free_margin_still_rejects(self):
+        """The epsilon is exactly 1 cent — anything more should still reject."""
+        book = Book.new(institutional_cash=100.0, aggressive_cash=0.0)
+        # Need $100.50 margin (50 cents over the cash) → still rejected
+        with pytest.raises(ValueError, match="insufficient cash"):
+            book.open_position(
+                side="LONG", entry_price=10050.0, quantity=0.01, leverage=1.0,
+                stop_loss=10000.0, take_profit=None, entry_ts_ms=0,
+                sub_book=SUB_BOOK_INSTITUTIONAL,
+            )
+
     def test_aggressive_sub_book_routing(self):
         book = Book.new(institutional_cash=500.0, aggressive_cash=500.0)
         pos = book.open_position(

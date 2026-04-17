@@ -30,9 +30,9 @@ class BBRSIMeanRevStrategy(BaseStrategy):
 
     def __init__(
         self,
-        name: str,
-        markets: list[str],
-        timeframe: str,
+        name: str = "bb_rsi_mr",
+        markets: list[str] | None = None,
+        timeframe: str = "1h",
         risk_profile: RiskProfile = RiskProfile.SAFE,
         max_risk_per_trade: float = 0.01,
         *,
@@ -51,7 +51,13 @@ class BBRSIMeanRevStrategy(BaseStrategy):
         cooldown_bars: int = 5,
         max_notional_pct: float = 2.0,
     ):
-        super().__init__(name, markets, timeframe, risk_profile, max_risk_per_trade)
+        super().__init__(
+            name,
+            markets if markets is not None else ["BTCUSDT"],
+            timeframe,
+            risk_profile,
+            max_risk_per_trade,
+        )
 
         # Indicator settings
         self.bb_period = bb_period
