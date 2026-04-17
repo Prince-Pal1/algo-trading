@@ -1,0 +1,24 @@
+# Active broker pointer — single source of truth for "which broker is
+# the live engine currently routing through."
+#
+# Every component that needs to know the active broker reads this via
+# src.fees.active.get_active_broker() (or *_for_instrument_class()).
+#
+# Change this file to switch brokers — no code changes needed.
+# Prefer scripts/set_active_broker.py (dashboard wraps the same helper)
+# which validates the broker_id exists in config/brokers/ before writing.
+
+[active]
+# Default broker for everything not overridden below.
+default = "ic_markets_ctrader"
+
+[active.overrides]
+# Per-instrument-class overrides. Examples:
+#   crypto = "binance_futures"
+#   us_equities = "alpaca"
+# Uncomment + set when running multi-broker setups.
+
+[special]
+# Research-only profile that bypasses real broker costs — used for Pine
+# script port validation (Stage 0 of the strategy dev process).
+research_baseline = "pine_zero_cost"
