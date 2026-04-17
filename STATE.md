@@ -17,6 +17,16 @@ KYC came through ~2026-04-17. Walked the full Phase 4 setup:
 
 **Phase 4 connection:** ✅ live-validated. Ready for G.3 Day 1.
 
+## Session 22 Day 5 — Paper engine deep investigation (2026-04-17/18)
+
+After 5 days of paper trading the engine had only 5 closed trades and equity stuck at +1.44%. Three findings from parallel investigation (`~/.claude/plans/yes-do-a-deepinvestigation-merry-horizon.md`):
+
+1. **bb_rsi_mr — accept, don't fix.** Strategy fired 1 signal in 5 days. Cause: parameters `RSI_14 < 25 AND ADX_14 < 20` simultaneously are extremely strict; the chosen altcoin universe (ETH, BNB, ADA, DOT, APT) almost never satisfies the combo. Strategy code, routing, and indicators all verified working. Decision: leave parameters untouched and observe for 30+ days before re-tuning. Don't react to a 5-day live sample with parameter changes calibrated against a backtest.
+
+2. **vol_momentum FAT_FINGER_QTY rejections — FIXED.** Commit `e36e075`: `FatFingerGuard._avg_trade_size` was lost on every process restart, locking the running average at the size of whatever small post-restart signal happened first (31.20 in our case). Every subsequent normal-sized signal (1400-5000) tripped "qty > 10× avg" forever. Fix: persist the average to the existing `risk_state` SQLite table (load on init, save on every fill). 7 new regression tests, full suite 1635/1635.
+
+3. **vol_momentum momentum=-1.61 staleness — diagnosed, NOT fixed.** Diagnostic `scripts/diagnose_vol_momentum_ada.py` proves the strategy code is correct (fed fresh Binance data, momentum drifts naturally in -0.005 to +0.020 range). But live engine sees momentum=-1.61, implying `_closes[0]` holds an ADA price of ~$1.25 (last seen November 2024). Parquet warmup alone wouldn't produce this (parquet ends 2026-04-01, would give -0.09). Suspect downloader fallback or candle backfill path. **OPERATIONAL RISK:** with the FatFingerGuard fix shipped, vol_momentum's bad SHORT signals will start filling and getting stopped out. Full investigation writeup at `docs/investigations/2026-04-17_vol_momentum_stale_buffer.md`.
+
 ## Session 22 Day 5 — Fee Manager system (2026-04-18)
 
 Built a broker-aware, scenario-aware, style-aware fee system after Prince asked for "as much as necessary to make this most accurate and precise."
