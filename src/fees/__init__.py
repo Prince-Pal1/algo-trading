@@ -42,6 +42,12 @@ from src.fees.active import (
     get_active_broker_for_instrument_class,
     set_active_broker,
 )
+from src.fees.attribution import (
+    attribute_realized_pnl_pct,
+    ensure_schema as ensure_attribution_schema,
+    read_attribution,
+    stamp_round_trip,
+)
 from src.fees.helpers import (
     cost_for_signal,
     cost_for_strategy_signal,
@@ -57,9 +63,13 @@ __all__ = [
     "FeeManager",
     "ScenarioContext",
     "ScenarioName",
+    "attribute_realized_pnl_pct",
     "cost_for_signal",
     "cost_for_strategy_signal",
+    "ensure_attribution_schema",
     "explain_for_signal",
+    "read_attribution",
+    "stamp_round_trip",
     "detect",
     "detect_simple",
     "get_broker",
