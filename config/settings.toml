@@ -72,7 +72,7 @@ max_concurrent_positions = 3
 # research memo's "small uplift on validated primary models" prediction.
 # Shadow mode is the right deployment until we retrain with LightGBM.
 enabled = true
-shadow_mode = true
+shadow_mode = false
 veto_threshold = 0.30
 scale_sharpness = 8.0
 scale_mode = false
