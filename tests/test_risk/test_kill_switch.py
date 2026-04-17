@@ -28,6 +28,8 @@ def _make_state() -> RiskState:
     state.strategy_paused = set()
     state.active_mode = "AGGRESSIVE"
     state.custom_multipliers = {}
+    state.fat_finger_avg_trade_size = 0.0
+    state.fat_finger_trade_count = 0
     return state
 
 

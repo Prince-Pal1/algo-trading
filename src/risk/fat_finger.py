@@ -25,8 +25,13 @@ class FatFingerGuard:
     def __init__(self, config: RiskConfig, state: RiskState):
         self._cfg = config
         self._state = state
-        self._avg_trade_size: float = 0.0
-        self._trade_count: int = 0
+        # Restore running-average state from RiskState (which loaded it from
+        # the risk_state SQLite table). Before this restore was added, every
+        # engine restart lost the average and the first small post-restart
+        # signal locked in avg≈31, rejecting every subsequent normal-sized
+        # signal as "10× avg" forever.
+        self._avg_trade_size: float = float(state.fat_finger_avg_trade_size)
+        self._trade_count: int = int(state.fat_finger_trade_count)
         self._last_prices: dict[str, float] = {}
 
     def check(self, signal: Signal, *,
@@ -86,6 +91,16 @@ class FatFingerGuard:
             self._last_prices[symbol] = price
 
     def update_avg_trade_size(self, quantity: float) -> None:
-        """Update running average trade size."""
+        """Update running average trade size (Welford's method).
+
+        Also mirrors the updated values into RiskState so they persist across
+        process restarts. The owning RiskManager.update_fill() calls
+        state.persist() immediately after this method, making the durability
+        guarantee: every fill's contribution to the running average is
+        committed to disk before the method returns to the caller.
+        """
         self._trade_count += 1
         self._avg_trade_size += (quantity - self._avg_trade_size) / self._trade_count
+        # Mirror into RiskState so the next persist() picks it up.
+        self._state.fat_finger_avg_trade_size = self._avg_trade_size
+        self._state.fat_finger_trade_count = self._trade_count

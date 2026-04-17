@@ -187,6 +187,12 @@ class RiskManager:
         elif fill.side.value == "SELL":
             self.state.remove_position(fill.symbol)
 
+        # Persist so the fat-finger running-average + position state survives
+        # a process restart. Before this call was added, the running average
+        # was lost on restart and the first small post-restart signal locked
+        # in a low average that rejected all subsequent normal-size signals.
+        self.state.persist()
+
     def update_trade_close(self, strategy: str, pnl: float, symbol: str) -> None:
         """Update state when a trade closes."""
         self.state.record_trade_pnl(strategy, pnl)

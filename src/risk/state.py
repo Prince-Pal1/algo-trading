@@ -74,6 +74,14 @@ class RiskState:
         self.active_mode: str = "AGGRESSIVE"
         self.custom_multipliers: dict[str, float] = {}
 
+        # FatFingerGuard running average (persisted so it survives process
+        # restarts; before persistence was added, an engine restart reset
+        # the average to 0.0 and the first post-restart signal set avg to
+        # its own size — causing every subsequent larger signal to be
+        # rejected as "10× avg" forever. See plan yes-do-a-deepinvestigation.)
+        self.fat_finger_avg_trade_size: float = 0.0
+        self.fat_finger_trade_count: int = 0
+
     def load_from_db(self) -> None:
         """Restore state from SQLite on startup."""
         try:
@@ -101,6 +109,10 @@ class RiskState:
                     self.active_mode = value
                 elif key == "custom_multipliers":
                     self.custom_multipliers = orjson.loads(value)
+                elif key == "fat_finger_avg_trade_size":
+                    self.fat_finger_avg_trade_size = float(value)
+                elif key == "fat_finger_trade_count":
+                    self.fat_finger_trade_count = int(value)
             conn.close()
             log.info("risk_state_loaded", peak_equity=self.peak_equity,
                      kill_switch=self.kill_switch_active)
@@ -125,6 +137,8 @@ class RiskState:
                 ("last_monthly_reset", self._last_monthly_reset),
                 ("active_mode", self.active_mode),
                 ("custom_multipliers", orjson.dumps(self.custom_multipliers).decode()),
+                ("fat_finger_avg_trade_size", str(self.fat_finger_avg_trade_size)),
+                ("fat_finger_trade_count", str(self.fat_finger_trade_count)),
             ]
             for key, value in pairs:
                 conn.execute(
