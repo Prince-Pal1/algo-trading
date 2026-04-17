@@ -141,11 +141,26 @@ class Broker:
             for ip in self.instrument_profiles.values()
         )
 
-    def instrument_class_for_symbol(self, symbol: str) -> str | None:
+    def instrument_class_for_symbol(
+        self, symbol: str, *, allow_wildcard: bool = False
+    ) -> str | None:
+        """Return the instrument_class this broker uses for `symbol`.
+
+        If `allow_wildcard=True` and no alias matches, a broker that has
+        only an 'any' instrument_class (no declared aliases) will match
+        any symbol. Used for the pine_zero_cost research baseline —
+        callers that explicitly request broker_id=pine_zero_cost set this
+        flag; symbol→broker auto-routing does NOT, so unknown symbols still
+        raise rather than silently falling to pine.
+        """
         symbol_upper = symbol.upper()
         for ic, ip in self.instrument_profiles.items():
             if symbol_upper in [s.upper() for s in ip.symbol_aliases]:
                 return ic
+        if allow_wildcard:
+            any_ip = self.instrument_profiles.get("any")
+            if any_ip is not None and not any_ip.symbol_aliases:
+                return "any"
         return None
 
     def max_leverage_for(self, instrument_class: str) -> float:
