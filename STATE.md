@@ -1,6 +1,21 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-04-17 (Session 22 Day 4 — second feat/gold-refactor → main merge: 32 commits / +18.9k lines / +839 tests. Main now carries all Session 22 sprint work. Meta-label `shadow_mode=false` flip captured in source. M3S authoritative. Test suite: 1525 passing on main.)
+**Last updated:** 2026-04-18 (Session 22 Day 4-5 — Spotware KYC approved; live cTrader demo connection validated end-to-end. OAuth helper patched for moved auth URL. Discovered ctidTraderAccountId vs traderLogin distinction. G.3 Day 1 launch unblocked.)
+
+## Session 22 Day 5 — IC Markets cTrader live wiring (2026-04-18)
+
+KYC came through ~2026-04-17. Walked the full Phase 4 setup:
+1. `.env` populated with CLIENT_ID, CLIENT_SECRET, ACCOUNT_ID (from cTrader app + IC Markets welcome email).
+2. **OAuth helper had two stale defaults** that returned HTTP 400 from Spotware:
+   - `EndPoints.AUTH_URI` from `ctrader-open-api` lib still points at `openapi.ctrader.com/apps/auth` — Spotware moved this to `id.ctrader.com/my/settings/openapi/grantingaccess/`.
+   - The script used `scope="accounts trading"` (space-separated) but Spotware's docs treat scope as a single value (`accounts` OR `trading`). Also missing `product=web` parameter.
+   - Patched `scripts/ctrader_token_helper.py` to hardcode the correct URL + use single scope + add `product=web`.
+3. Production tokens written to `.env` via patched OAuth flow (~30d access, indefinite refresh).
+4. Wrote `scripts/ctrader_smoke.py` — full chain validator (TCP→app auth→account list→account auth→symbols→spot subscribe).
+5. **Discovered: `CTRADER_ACCOUNT_ID` env var is mis-documented in `.env.example`** — it must be the protobuf `ctidTraderAccountId` (e.g. `46991382`), NOT the human-facing `traderLogin` (e.g. `9977259`). The smoke test surfaces both and prints which is needed.
+6. Smoke test PASS: 351 symbols on demo account, XAUUSD live spot at ~$4864.70/$4864.75 (5-pip spread, IC Markets Raw quality).
+
+**Phase 4 connection:** ✅ live-validated. Ready for G.3 Day 1.
 
 ---
 

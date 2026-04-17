@@ -26,18 +26,20 @@ except ImportError:
     print("ERROR: requests is required. Run `pip install requests`.")
     sys.exit(1)
 
-try:
-    from ctrader_open_api import EndPoints
-    AUTH_URL = EndPoints.AUTH_URI
-    TOKEN_URL = EndPoints.TOKEN_URI
-except ImportError:
-    AUTH_URL = "https://openapi.ctrader.com/apps/auth"
-    TOKEN_URL = "https://openapi.ctrader.com/apps/token"
+# Spotware moved the user-facing authorization page from
+# openapi.ctrader.com/apps/auth → id.ctrader.com/my/settings/openapi/grantingaccess.
+# The ctrader-open-api lib's EndPoints.AUTH_URI still points at the old URL
+# (which now returns HTTP 400), so we hardcode the current one here. The token
+# exchange endpoint is unchanged.
+AUTH_URL = "https://id.ctrader.com/my/settings/openapi/grantingaccess/"
+TOKEN_URL = "https://openapi.ctrader.com/apps/token"
 
 REDIRECT_HOST = "127.0.0.1"
 REDIRECT_PORT = 8080
 REDIRECT_URI = f"http://localhost:{REDIRECT_PORT}/callback"
-SCOPE = "accounts trading"
+# Per Spotware docs, scope is a single value: "accounts" (read-only) or "trading"
+# (read + execute). G.3 paper clock places orders, so we need "trading".
+SCOPE = "trading"
 
 
 _received_code: dict[str, str] = {}
@@ -124,6 +126,7 @@ def main() -> int:
         "client_id": client_id,
         "redirect_uri": REDIRECT_URI,
         "scope": SCOPE,
+        "product": "web",
     }
     auth_full_url = f"{AUTH_URL}?{urllib.parse.urlencode(auth_params)}"
 
