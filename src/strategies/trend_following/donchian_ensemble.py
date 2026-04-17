@@ -31,6 +31,7 @@ from src.utils.types import RiskProfile, Signal, SignalAction, Tier
 
 class DonchianEnsembleStrategy(BaseStrategy):
     """Multi-period Donchian channel breakout ensemble."""
+    fee_style = "swing"
 
     def __init__(
         self,

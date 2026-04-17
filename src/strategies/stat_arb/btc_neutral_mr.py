@@ -29,6 +29,7 @@ from src.utils.types import RiskProfile, Signal, SignalAction
 
 class BTCNeutralMRStrategy(BaseStrategy):
     """BTC-neutral residual mean reversion on altcoins."""
+    fee_style = "arbitrage"
 
     def __init__(
         self,

@@ -33,7 +33,23 @@ class BaseStrategy(ABC):
     - Previous features rotation (for crossover detection)
     - Position state tracking (prevents duplicate signals)
     - Config loading from strategies.toml
+
+    Fee-system integration:
+    - `fee_style` is a class attribute declaring the strategy's typical
+      hold-time/behavior bucket. The FeeManager uses this to pick the
+      right fee profile and cost-projection model. Valid values:
+      "scalping"  — <15 min holds, commission-dominant
+      "intraday"  — same-day, no swap (default)
+      "swing"     — multi-day, swap-aware
+      "position"  — multi-week+, swap-dominant
+      "arbitrage" — paired/spread, fraction-of-pip precision
+    Subclasses override by re-assigning the class attribute:
+        class MyStrategy(BaseStrategy):
+            fee_style = "swing"
     """
+
+    # Default style; subclasses override. See docs/FEE_SYSTEM.md.
+    fee_style: str = "intraday"
 
     def __init__(
         self,

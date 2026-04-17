@@ -58,6 +58,9 @@ _PIP_SIZE = 0.10
 
 
 class NewsSpikeFadeStrategy(BaseStrategy):
+
+    fee_style = "scalping"
+
     def __init__(
         self,
         name: str = "news_spike_fade",

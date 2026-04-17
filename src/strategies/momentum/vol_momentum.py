@@ -33,6 +33,7 @@ from src.utils.types import RiskProfile, Signal, SignalAction, Tier
 
 class VolMomentumStrategy(BaseStrategy):
     """Volatility-scaled momentum strategy."""
+    fee_style = "swing"
 
     def __init__(
         self,

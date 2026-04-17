@@ -70,6 +70,9 @@ from src.utils.types import RiskProfile, Signal, SignalAction, Tier
 
 
 class SwiftAlmaStrategy(BaseStrategy):
+
+    fee_style = "swing"
+
     def __init__(
         self,
         name: str = "swift_alma",

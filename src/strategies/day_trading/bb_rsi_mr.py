@@ -27,6 +27,7 @@ from src.utils.types import RiskProfile, Signal, SignalAction
 
 class BBRSIMeanRevStrategy(BaseStrategy):
     """Bollinger Band + RSI mean reversion strategy with ADX regime filter."""
+    fee_style = "intraday"
 
     def __init__(
         self,

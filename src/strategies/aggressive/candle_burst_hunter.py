@@ -37,6 +37,9 @@ from src.utils.types import RiskProfile, Signal, SignalAction
 
 
 class CandleBurstHunterStrategy(BaseStrategy):
+
+    fee_style = "scalping"
+
     def __init__(
         self,
         name: str = "candle_burst_hunter",

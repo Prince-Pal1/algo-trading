@@ -54,6 +54,7 @@ from src.utils.types import RiskProfile, Signal, SignalAction
 
 class FundingCarryStrategy(BaseStrategy):
     """Perpetual funding rate carry — always-long on synthetic carry asset."""
+    fee_style = "position"
 
     def __init__(
         self,

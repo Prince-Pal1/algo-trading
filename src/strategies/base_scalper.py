@@ -44,6 +44,7 @@ class ScalperStrategy(BaseStrategy):
     class's `process()` override, so subclasses can just call
     `self.multi_bar_velocity(3)` etc. inside their entry logic.
     """
+    fee_style = "scalping"
 
     def __init__(
         self,

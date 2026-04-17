@@ -57,6 +57,7 @@ class FundingMeanReversionStrategy(BaseStrategy):
     window of the last `quantile_window` funding observations. If the
     strategy hasn't seen enough history yet, it waits.
     """
+    fee_style = "intraday"
 
     def __init__(
         self,

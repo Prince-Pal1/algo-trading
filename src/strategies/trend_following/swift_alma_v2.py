@@ -108,6 +108,7 @@ class SwiftAlmaV2Strategy(BaseStrategy):
 
     See module docstring for the full leverage mode sizing matrix.
     """
+    fee_style = "swing"
 
     # Indicators the deep_backtest pipeline should precompute for this
     # strategy. Read by `_resolve_indicators()` in deep_backtest.py.

@@ -69,6 +69,9 @@ class _State:
 
 
 class HedgedStructurePlayStrategy(BaseStrategy):
+
+    fee_style = "scalping"
+
     def __init__(
         self,
         name: str = "hedged_structure_play",

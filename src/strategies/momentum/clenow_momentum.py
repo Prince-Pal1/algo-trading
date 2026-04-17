@@ -45,6 +45,7 @@ log = get_logger("clenow_momentum")
 
 class ClenowMomentumStrategy(BaseStrategy):
     """Per-symbol Clenow momentum with shared rank cache."""
+    fee_style = "position"
 
     def __init__(
         self,

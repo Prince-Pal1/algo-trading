@@ -177,7 +177,21 @@ class LeveragedBacktestEngine:
         """
         self._initial_institutional_cash = float(initial_institutional_cash)
         self._initial_aggressive_cash = float(initial_aggressive_cash)
-        self._fee_model = fee_model or ICMarketsMetalFeeModel()
+        # If no fee_model passed, route through FeeManager using the active
+        # broker + XAUUSD normal scenario. This is still honest (named profile
+        # via the registry) whereas the old default ICMarketsMetalFeeModel()
+        # was the 90× slippage bug source (see feedback_select_fee_profile_first).
+        # Research callers should still pass an explicit fee_model for full
+        # traceability.
+        if fee_model is None:
+            try:
+                from src.fees import FeeManager
+                fee_model = FeeManager.resolve(symbol="XAUUSD", style="swing", scenario="normal")
+            except Exception:
+                # Last resort: bare default (preserves non-breakingness if
+                # FeeManager/broker registry is not yet installed)
+                fee_model = ICMarketsMetalFeeModel()
+        self._fee_model = fee_model
         self._path_model = path_model or BrownianBridgeModel(run_id=run_id)
         self._m3s = m3s
         self._run_id = run_id

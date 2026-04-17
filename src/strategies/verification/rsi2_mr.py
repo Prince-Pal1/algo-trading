@@ -19,6 +19,7 @@ import pandas as pd
 
 class RSI2MeanRevStrategy(BaseStrategy):
     """RSI(2) mean reversion — long-only, no SL/TP."""
+    fee_style = "intraday"
 
     def __init__(
         self,
