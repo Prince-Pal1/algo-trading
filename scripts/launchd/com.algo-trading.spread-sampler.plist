@@ -5,17 +5,13 @@
     <key>Label</key>
     <string>com.algo-trading.spread-sampler</string>
 
-    <!-- 240-minute XAUUSD spread capture during London/NY peak overlap.
-         Weekly so we get spread drift data over time, not just a one-off. -->
+    <!-- Weekly workflow: 240-min XAUUSD capture through London/NY overlap,
+         then auto-generate the calibration report against the backtest profile.
+         The wrapper handles both stages and logs to data/logs/spread_weekly.log. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Library/Frameworks/Python.framework/Versions/3.11/bin/python3</string>
-        <string>-u</string>
-        <string>scripts/ctrader_spread_sampler.py</string>
-        <string>--minutes</string>
-        <string>240</string>
-        <string>--symbol</string>
-        <string>XAUUSD</string>
+        <string>/bin/bash</string>
+        <string>scripts/ctrader_spread_weekly.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
