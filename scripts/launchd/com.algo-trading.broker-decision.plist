@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.algo-trading.broker-decision</string>
+
+    <!-- Weekly broker-decision analyzer: consumes all cTrader spread samples
+         accumulated by the Monday sampler and emits a verdict
+         (STAY / RECALIBRATE / CONSIDER_SWITCH / RECOMMEND_SWITCH / DATA_INSUFFICIENT).
+         Fires Tuesday 20:00 IST (= 14:30 UTC), ~2h after Monday sampler ends at 22:30 IST. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>cd /Users/prince/algo-trading &amp;&amp; /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 -u scripts/broker_decision_analyzer.py; EC=$?; if [ "$EC" = "1" ]; then osascript -e "display notification \"Broker decision needs your attention. Run: cat data/broker_decision_report.md\" with title \"Algo Trading\" sound name \"Glass\""; fi; exit $EC</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/prince/algo-trading</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>2</integer>
+        <key>Hour</key>
+        <integer>20</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/prince/algo-trading/data/logs/broker_decision.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/prince/algo-trading/data/logs/broker_decision_err.log</string>
+</dict>
+</plist>
