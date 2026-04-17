@@ -1,10 +1,11 @@
 # Algo Trading — Roadmap & Phase Status
 
-**Last updated:** 2026-04-15 (Session 22 Day 2 — post task #117 G.8 strategy storage system: 2-table versioned registry (`strategies` + `strategy_versions`) in `data/trades.db` with auto-capture from `run_deep_backtest()`, max-return cell picker + vanity flag, CLI `scripts/strategies.py` list/show/register. 10 discovered tasks shipped on `feat/gold-refactor` today: #109/#110/#111 SWIFT matrix+validation+WF, #112 Deep Backtest framework, #113 leverage research, #114 leverage_mode + TUI, #115 Phase 2.5 zero-tolerance, #116 empirical validation, #79 G.7 attribution, #117 G.8 strategy storage)
-**Current phase:** TWO parallel work streams:
-- **3b-2 M3S** + **3c meta-labeling** in shadow mode on `main` — clock-blocked toward the 2026-04-16 auto-promotion cron. Unchanged from yesterday. M3S shadow clock day 2/4 (compressed from 7).
-- **Phase G Gold Leveraged Stack** on `feat/gold-refactor` — tasks #109-#115 shipped, then #79 G.7 attribution dashboard completed. Institutional sub-book stays at 2 strategies: `donchian_gold` deployable at L=15 RISK_SCALED (+140%/yr, 60% alpha / 40% amplification) + `vol_momentum_gold` deployable at L=10-15 MARGIN_CAPPED as diversifier (research over-projected for RISK_SCALED — see task #116). 1233+ tests passing.
-**Next action:** 2026-04-17 ~09:30 merge window — fast-forward `feat/gold-refactor` → `main`. G.7 ships with the merge. Next research queue items: task #116 (better leveraged strategy research, pending), task #78 G.6 (adaptive leverage governor ML, pending — needs live trade history). Interim: `cat data/project_status.md` for main's single-pane status; `./scripts/promote_m3s_authoritative.sh --dry-run` re-runs all 4 gates on main.
+**Last updated:** 2026-04-17 (Session 22 Day 4 — second feat/gold-refactor → main merge: 32 commits / 18.9k lines / +839 tests. M3S authoritative + meta-label advisory mode also captured.)
+**Current phase:** All Session 22 sprint work now on main:
+- **3b-2 M3S** is **AUTHORITATIVE** (commit `01e5d39`, Day 3 flip).
+- **3c meta-labeling** is in **ADVISORY mode** (commit `a6fc4ff`, `shadow_mode=false`, `veto_threshold=0.30`). Live veto gate is cold-start blocked (0-1 live rows per strategy, needs ≥20). Will self-resolve in 2-4 weeks at current 5/day signal rate.
+- **Phase G Gold Leveraged Stack** + Session 22 dashboard/storage infrastructure all merged via `b242a73` (today): hierarchical Strategies page (task #133 v6 facets_json), broker-grouped fees (#141), 181-test extreme dashboard suite (#146), dark-theme/progress-bar/combined-history (#151), swift_alma_v2 (#131/#132). 1525 tests passing on main.
+**Next action:** Monitor meta-label live gate (`python3 scripts/meta_label_shadow_check.py --verbose`) until any strategy hits ≥20 live rows, then `./scripts/promote_meta_label.sh --to live`. Research queue: task #116 better leveraged strategy + task #78 G.6 adaptive leverage governor (needs live trade history). Phase 4: pending Spotware cTrader KYC.
 
 > **Authority note:** This file is the **only** authoritative source for phase status. If any other file contradicts this, that other file is wrong — fix it to link here. See `CLAUDE.md` § Autonomous Workflow Protocol.
 
@@ -56,7 +57,8 @@ Master plan: `~/.claude/plans/parallel-noodling-goblet.md`. Branch: `feat/gold-r
 | G.2f | Tier 5 strategies (candle_burst, news_fade, hedged_structure) | ✅ COMPLETE | `19592de` | 13 | All 3 aggressive strategies + state machine |
 | G.2c | Inline leverage gates + RCU portfolio view + AGGRESSIVE_RETAIL profile | ✅ COMPLETE | `f891e57` | 14 | InlineLeverageGates + VersionedPortfolioView + profiles.aggressive_retail |
 | G.2g | Split sweep: Calmar-optimal institutional_pct | ✅ COMPLETE | `05494c8` | 1 | run_multi engine path + run_split_sweep.py; optimal = 0.95 (1h data, untuned aggressive) |
-| Merge | feat/gold-refactor → main | 📋 SCHEDULED | — | — | 2026-04-17 ~09:30 after Day 4 sprint cron |
+| Merge | feat/gold-refactor → main (wave 1: SWIFT/cost-fix/WF) | ✅ COMPLETE | `4dd1cce` | — | 2026-04-14 (3 days early) |
+| Merge | feat/gold-refactor → main (wave 2: dashboard/storage/swift_alma_v2/extreme tests) | ✅ COMPLETE | `b242a73` | 1525 | 2026-04-17 — 32 commits, +18.9k lines, +839 tests |
 | Tuning | donchian_gold tuning + XAUUSD M5 download + Tier 5 flagged not-alpha-ready | ✅ COMPLETE | `c575fef` | — | donchian_gold tuned: +38.16% / 12% DD / Calmar 1.675 / Sharpe 1.275 on 1h. Tier 5 strategies need dedicated alpha research (infrastructure correct, entry triggers unviable). Split sweep post-tuning: institutional_pct=0.95 → +14.55% / 20% DD / Calmar +0.382 |
 | Phase 4 skeleton | IC Markets cTrader feed + executor + OAuth helper (pip install ctrader-open-api) | ✅ COMPLETE | `083c50a` | 15 | `icmarkets_feed.py` + `icmarkets_executor.py` + `ctrader_token_helper.py` + `.env.example` all built. Unit tests with mocks green. App registered at openapi.ctrader.com; credentials in hand; sandbox scopes require "Active" KYC status (up to 3 business days). |
 | **G.2h** | **Parallel KYC-wait sprint** (7 sub-items, plan in `parallel-noodling-goblet.md`) | 🟡 IN PROGRESS | — | — | During Spotware KYC wait, ship: shadow orchestrator, M1 download, vol_momentum_gold, LeverageBudgetAllocator, walk-forward retune, M5 donchian retune, Tier 5 infra validation, preflight smoke |
