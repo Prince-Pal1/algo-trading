@@ -282,6 +282,36 @@ class RiskManager:
         """Resolve current mode to multipliers."""
         return resolve_mode(self.state.active_mode, self.state.custom_multipliers)
 
+    def projected_cost(
+        self,
+        signal: Signal,
+        *,
+        style: str | None = None,
+        qty_lots: float | None = None,
+        hold_hours: float | None = None,
+    ):
+        """Return the FeeManager cost projection for a signal.
+
+        Info-only — does NOT affect gating (the evaluate() hot path is
+        unchanged). Callers use this to log/surface the expected trading
+        cost so the dashboard, signal audit, and backtest reports can
+        attribute $ costs to each intended trade.
+
+        If `style` is None, defaults to "intraday" (same default as
+        BaseStrategy.fee_style). Callers that know the strategy's style
+        (e.g. via signal.strategy_name → strategy registry) should pass it.
+
+        Returns a CostProjection dataclass. Raises if the symbol isn't
+        in any broker's registry.
+        """
+        from src.fees import cost_for_signal
+        return cost_for_signal(
+            signal=signal,
+            style=style or "intraday",
+            qty_lots=qty_lots,
+            hold_hours=hold_hours,
+        )
+
     def get_status(self) -> dict:
         """Return current risk state for monitoring."""
         return {

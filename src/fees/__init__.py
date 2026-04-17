@@ -42,6 +42,11 @@ from src.fees.active import (
     get_active_broker_for_instrument_class,
     set_active_broker,
 )
+from src.fees.helpers import (
+    cost_for_signal,
+    cost_for_strategy_signal,
+    explain_for_signal,
+)
 from src.fees.manager import CostProjection, FeeManager
 from src.fees.scenario import ScenarioContext, ScenarioName, detect, detect_simple
 
@@ -52,6 +57,9 @@ __all__ = [
     "FeeManager",
     "ScenarioContext",
     "ScenarioName",
+    "cost_for_signal",
+    "cost_for_strategy_signal",
+    "explain_for_signal",
     "detect",
     "detect_simple",
     "get_broker",
