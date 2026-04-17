@@ -17,6 +17,24 @@ KYC came through ~2026-04-17. Walked the full Phase 4 setup:
 
 **Phase 4 connection:** ✅ live-validated. Ready for G.3 Day 1.
 
+## Session 22 Day 5 — Fee Manager system (2026-04-18)
+
+Built a broker-aware, scenario-aware, style-aware fee system after Prince asked for "as much as necessary to make this most accurate and precise."
+
+7-phase build, committed per phase:
+- **A** (`b2f6de0`): Broker registry + per-broker TOMLs + active-broker pointer. 29 tests.
+- **B** (`7b7449f`): Scenario auto-detector (news/volatile/illiquid/normal) + FeeManager.resolve()/project_cost()/explain(). 37 tests.
+- **C** (`e16ae95`): BaseStrategy.fee_style (scalping/intraday/swing/position/arbitrage). 14 concrete strategies declared. LeveragedBacktestEngine default routes through FeeManager. 19 tests.
+- **D** (`adf50bf`): cost_for_signal() helper + RiskManager.projected_cost(). 10 tests.
+- **E** (`9c3b13f`): trade_cost_attribution side-table + stamp_round_trip() writer. 8 tests.
+- **F** (`d9c911a`): Streamlit sidebar banner shows active broker + scenario on every page. scripts/set_active_broker.py CLI.
+- **G** (this): docs/FEE_SYSTEM.md + ROADMAP + STATE.
+
+Net result: ~103 new fee-system tests, 1 new package (src/fees/), 3 per-broker TOML files (migrated from flat broker_fees.toml), 2 new CLI scripts, 1 dashboard banner, 1 side-table. Full test suite 1591+ passing.
+
+**Architecture reference:** docs/FEE_SYSTEM.md.
+**Single source for phase status:** ROADMAP.md (new "Fee system A–G" rows).
+
 ---
 
 ## Current Position
