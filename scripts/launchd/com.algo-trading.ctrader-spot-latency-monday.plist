@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.algo-trading.ctrader-spot-latency-monday</string>
+
+    <!--
+      One-shot: fires Monday 2026-04-20 04:03 IST (30 min after XAUUSD
+      market reopens at Sunday 22:00 UTC). Purpose: collect cTrader
+      spot-event latency for apples-to-apples vs Binance WS (scripts/
+      binance_speed_test.py median 48.7ms on 2026-04-18).
+
+      StartCalendarInterval uses local time. No KeepAlive — after the
+      run, the plist remains loaded but won't fire again (DoM pins it
+      to Apr 20). Delete manually after reviewing the report:
+        launchctl bootout gui/$(id -u)/com.algo-trading.ctrader-spot-latency-monday
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>cd /Users/prince/algo-trading &amp;&amp; /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 scripts/ctrader_spot_latency.py &gt; data/logs/ctrader_spot_latency_monday.log 2&gt;&amp;1 &amp;&amp; /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 scripts/binance_speed_test.py &gt;&gt; data/logs/ctrader_spot_latency_monday.log 2&gt;&amp;1</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/prince/algo-trading</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>3</integer>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Day</key>
+        <integer>20</integer>
+        <key>Month</key>
+        <integer>4</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/prince/algo-trading/data/logs/ctrader_spot_latency_monday_out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/prince/algo-trading/data/logs/ctrader_spot_latency_monday_err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>/Users/prince/algo-trading</string>
+    </dict>
+</dict>
+</plist>
