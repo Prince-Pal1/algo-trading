@@ -1,0 +1,188 @@
+# Broker: Binance / platform: perpetual_futures
+#
+# Authored 2026-04-19 for strategies that economically require perpetual
+# futures execution (funding_mean_reversion, stat_arb_eth_sol, any strat
+# that depends on shorting or funding-rate capture).
+#
+# Source: https://www.binance.com/en/fee/futureFee (VIP 0 / Regular tier).
+# These fees apply to USD-M perpetual futures (COIN-M has a different
+# schedule not modelled here).
+
+[broker]
+id = "binance_perpetual_futures"
+name = "Binance"
+platform = "perpetual_futures"
+regulator = "various (offshore entity — Binance.com)"
+country = "Cayman Islands / multi-jurisdictional"
+api_type = "binance_fapi+futures_ws"
+account_types = ["USD-M Perpetual"]
+min_deposit_usd = 0.0
+base_currencies = ["USDT", "USDC", "BUSD", "BNB"]
+notes = """
+USD-M perpetual futures. Target broker for strategies that either need
+to short (stat-arb pair, liquidation fade that goes short) OR whose
+economic edge depends on the funding-rate spread itself
+(funding_mean_reversion, funding_carry v2).
+
+Fee structure: percent_of_notional (0.02% maker / 0.04% taker at VIP 0).
+Roughly 2.5× CHEAPER than Binance spot (0.10% per side). For
+high-turnover strategies that collect 20+ bps of alpha per trade, the
+futures-spot fee gap is the difference between surviving net-of-cost
+(futures) and losing to commissions (spot).
+
+Live execution is NOT wired yet — this profile is used for backtest +
+validation accuracy only. When Binance Futures executor is built
+(src/execution/binance_futures_executor.py, pending task), the
+`active_broker.toml` pointer will flip for perp-strategies.
+"""
+
+[leverage_max]
+crypto = 75.0        # Binance USD-M max is 125× for BTC on promo, 20–75× default across alts.
+fx_majors = 0.0
+xauusd_metals = 0.0
+
+[instruments.crypto]
+symbol_aliases = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "NEARUSDT",
+    "APTUSDT", "LINKUSDT", "MATICUSDT",
+]
+contract_size = 1.0
+min_lot = 0.00001
+max_lot = 10000.0
+lot_step = 0.00001
+
+[instruments.crypto.scenarios.normal]
+description = "Binance USD-M Perpetual Futures, Regular tier (VIP 0): 0.020% maker / 0.040% taker."
+sources = [
+    "https://www.binance.com/en/fee/futureFee",
+    "https://www.binance.com/en/support/faq/what-are-binance-futures-trading-fees-360033544231",
+]
+notes = """
+Dominant cost is the 4-8bp round-trip commission. Typical perp spread
+is 1bp or less for BTC/ETH and 2-5bp for smaller altcoins. Slippage
+is tight on IOC orders because Binance's perp book is deep.
+"""
+
+[instruments.crypto.scenarios.normal.spread]
+base_spread_pips = 1.0
+normal_slip_pips = 1.0
+atr_vol_mult = 0.0
+news_spread_mult = 3.0
+news_slip_mult = 3.0
+pip_size = 0.0001
+
+[instruments.crypto.scenarios.normal.commission]
+type = "percent_of_notional"
+taker_fraction_of_notional = 0.0004   # 0.040%
+maker_fraction_of_notional = 0.0002   # 0.020%
+contract_size = 1.0
+min_commission_usd = 0.0
+
+[instruments.crypto.scenarios.news_active]
+description = "Binance perp during high-impact news — spread widens 3×, commission unchanged."
+
+[instruments.crypto.scenarios.news_active.spread]
+base_spread_pips = 3.0
+normal_slip_pips = 3.0
+atr_vol_mult = 0.0
+news_spread_mult = 3.0
+news_slip_mult = 3.0
+pip_size = 0.0001
+load_news_calendar = true
+
+[instruments.crypto.scenarios.news_active.commission]
+type = "percent_of_notional"
+taker_fraction_of_notional = 0.0004
+maker_fraction_of_notional = 0.0002
+contract_size = 1.0
+
+[instruments.crypto.scenarios.illiquid]
+description = "Binance perp during low-liquidity Asian overnight — spread × 3.5."
+
+[instruments.crypto.scenarios.illiquid.spread]
+base_spread_pips = 3.5
+normal_slip_pips = 3.5
+atr_vol_mult = 0.0
+news_spread_mult = 3.0
+news_slip_mult = 3.0
+pip_size = 0.0001
+
+[instruments.crypto.scenarios.illiquid.commission]
+type = "percent_of_notional"
+taker_fraction_of_notional = 0.0004
+maker_fraction_of_notional = 0.0002
+contract_size = 1.0
+
+[instruments.crypto.scenarios.volatile]
+description = "Binance perp during high-vol regime — spread × 2."
+
+[instruments.crypto.scenarios.volatile.spread]
+base_spread_pips = 2.0
+normal_slip_pips = 2.0
+atr_vol_mult = 0.0
+news_spread_mult = 3.0
+news_slip_mult = 3.0
+pip_size = 0.0001
+
+[instruments.crypto.scenarios.volatile.commission]
+type = "percent_of_notional"
+taker_fraction_of_notional = 0.0004
+maker_fraction_of_notional = 0.0002
+contract_size = 1.0
+
+[instruments.crypto.scenarios.stress]
+description = "Binance perp stress test — 25% commission uplift + 2× spread."
+
+[instruments.crypto.scenarios.stress.spread]
+base_spread_pips = 2.0
+normal_slip_pips = 2.0
+atr_vol_mult = 0.0
+news_spread_mult = 3.0
+news_slip_mult = 3.0
+pip_size = 0.0001
+
+[instruments.crypto.scenarios.stress.commission]
+type = "percent_of_notional"
+taker_fraction_of_notional = 0.0005   # 0.050% (25% uplift)
+maker_fraction_of_notional = 0.00025
+contract_size = 1.0
+
+[instruments.crypto.scenarios.vip_3]
+description = "Binance perp VIP 3 (30d volume ≥ $100M + BNB ≥ 100): 0.015% maker / 0.030% taker."
+
+[instruments.crypto.scenarios.vip_3.spread]
+base_spread_pips = 1.0
+normal_slip_pips = 1.0
+atr_vol_mult = 0.0
+news_spread_mult = 3.0
+news_slip_mult = 3.0
+pip_size = 0.0001
+
+[instruments.crypto.scenarios.vip_3.commission]
+type = "percent_of_notional"
+taker_fraction_of_notional = 0.0003
+maker_fraction_of_notional = 0.00015
+contract_size = 1.0
+
+[instruments.crypto.scenarios.bnb_discount]
+description = "Binance perp Regular tier with BNB fee payment (10% discount on futures, not 25% like spot): 0.018% maker / 0.036% taker."
+notes = """
+Note: BNB discount on futures is 10%, NOT 25% like spot. Binance
+differentiates. Only worth it if your BNB balance is being maintained
+anyway for spot discount.
+"""
+
+[instruments.crypto.scenarios.bnb_discount.spread]
+base_spread_pips = 1.0
+normal_slip_pips = 1.0
+atr_vol_mult = 0.0
+news_spread_mult = 3.0
+news_slip_mult = 3.0
+pip_size = 0.0001
+
+[instruments.crypto.scenarios.bnb_discount.commission]
+type = "percent_of_notional"
+taker_fraction_of_notional = 0.00036   # 0.040% × 0.9
+maker_fraction_of_notional = 0.00018
+contract_size = 1.0
