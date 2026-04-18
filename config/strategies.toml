@@ -159,3 +159,24 @@ gap_filter_pct = 0.15
 regime_ma_window = 100
 rank_cache_path = "data/historical/momentum_rank_cache.parquet"
 cooldown_bars = 0
+
+[donchian_gold]
+# G.3 Day 1-7: shadow paper on IC Markets cTrader demo. L=1 (ramps per
+# G.3 schedule: Day 8-14 L=5, Day 15-21 L=10, Day 22-28 L=25, Day 29-30 L=80).
+# Phase 4 WF baseline: Calmar 13.68 OOS, Sharpe 2.93, 5/6 folds profitable.
+enabled = true
+risk_profile = "MODERATE"
+markets = ["XAUUSD"]
+timeframe = "1h"
+leverage_range = [1.0, 1.0]
+max_risk_per_trade = 0.01
+
+[vol_momentum_gold]
+# G.3 Day 1-7: shadow paper on IC Markets cTrader demo. L=1 (ramps per G.3 schedule).
+# Phase 4 WF baseline: Calmar 11.22 OOS, Sharpe 1.98, 4/6 folds profitable.
+enabled = true
+risk_profile = "MODERATE"
+markets = ["XAUUSD"]
+timeframe = "1h"
+leverage_range = [1.0, 1.0]
+max_risk_per_trade = 0.01

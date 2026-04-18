@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.algo-trading.engine</string>
+    <string>com.algo-trading.engine-gold</string>
 
     <key>ProgramArguments</key>
     <array>
@@ -11,7 +11,9 @@
         <string>-m</string>
         <string>src.main</string>
         <string>--broker</string>
-        <string>binance</string>
+        <string>ic_markets_ctrader</string>
+        <string>--engine-name</string>
+        <string>gold</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -27,10 +29,10 @@
     <integer>30</integer>
 
     <key>StandardOutPath</key>
-    <string>/Users/prince/algo-trading/data/logs/engine.log</string>
+    <string>/Users/prince/algo-trading/data/logs/engine_gold.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/prince/algo-trading/data/logs/engine_err.log</string>
+    <string>/Users/prince/algo-trading/data/logs/engine_gold_err.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>

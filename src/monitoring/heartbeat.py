@@ -38,6 +38,7 @@ class Heartbeat:
         risk_client=None,
         stale_threshold_mult: float = 2.0,
         timeframe_seconds: int = 3600,  # default 1h
+        heartbeat_path: Path | None = None,
     ):
         """
         Args:
@@ -46,6 +47,9 @@ class Heartbeat:
             risk_client: Optional RiskClient for kill switch activation.
             stale_threshold_mult: Multiplier for timeframe to detect stale data.
             timeframe_seconds: Primary timeframe in seconds.
+            heartbeat_path: Override the default heartbeat.json path. Lets
+                multiple engines (e.g., crypto + gold) coexist with disjoint
+                heartbeat files.
         """
         self._get_stats = get_stats
         self._risk_client = risk_client
@@ -53,6 +57,7 @@ class Heartbeat:
         self._start_time = time.time()
         self._running = False
         self._kill_active = False
+        self._path = heartbeat_path or HEARTBEAT_PATH
 
     def stop(self) -> None:
         self._running = False
@@ -60,7 +65,7 @@ class Heartbeat:
     async def run(self) -> None:
         """Main heartbeat loop — runs until stop() is called."""
         self._running = True
-        HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
 
         while self._running:
             try:
@@ -109,7 +114,7 @@ class Heartbeat:
             "status": status,
         }
 
-        HEARTBEAT_PATH.write_bytes(orjson.dumps(heartbeat, option=orjson.OPT_INDENT_2 | orjson.OPT_SERIALIZE_NUMPY))
+        self._path.write_bytes(orjson.dumps(heartbeat, option=orjson.OPT_INDENT_2 | orjson.OPT_SERIALIZE_NUMPY))
 
     def _check_kill_file(self) -> None:
         """Check for data/KILL file — emergency stop."""

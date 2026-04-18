@@ -411,8 +411,8 @@ class RedisCache:
 class Storage:
     """Unified access to all storage tiers."""
 
-    def __init__(self) -> None:
-        self.trade_log = TradeLog()
+    def __init__(self, db_path: str | None = None) -> None:
+        self.trade_log = TradeLog(db_path=db_path)
         self.parquet = ParquetStore()
         self.redis = RedisCache()
 

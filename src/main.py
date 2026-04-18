@@ -16,15 +16,26 @@ import signal
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
+
+# Load .env into os.environ before any module reads CTRADER_* vars.
+# launchd doesn't auto-source .env and dotenv-free imports would fail.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:
+    pass
 
 from src.data.candle_builder import CandleBuilder
 from src.data.feature_engine import FeatureEngine
 from src.data.feeds.binance_ws import BinanceWebSocketFeed
 from src.data.feeds.funding_synthetic_feed import FundingSyntheticFeed
+from src.data.feeds.icmarkets_feed import ICMarketsConfig, ICMarketsFeed
 from src.data.storage import Storage
 from src.data.warmup import warmup
+from src.fees.active import get_active_broker_id
 from src.execution.paper_executor import PaperExecutor
 from src.m3s.signal_filter.audit import CloseInfo, audit_close, audit_signal
 from src.m3s.signal_filter.features import build_meta_features
@@ -58,25 +69,52 @@ class TradingEngine:
         timeframes: list[str],
         indicators: list[str],
         needed_pairs: set[tuple[str, str]] | None = None,
+        broker_id: str | None = None,
+        engine_name: str = "",
     ):
         self.symbols = symbols
         self.timeframes = timeframes
         self.needed_pairs = needed_pairs
+        self.engine_name = engine_name
+        # Per-engine suffix used to isolate heartbeat + trades DB across
+        # two engines (crypto on Binance + gold on cTrader) running in
+        # the same repo. Empty = legacy single-engine paths.
+        self._suffix = f"_{engine_name}" if engine_name else ""
 
         # ── Components ──
-        binance_cfg = get_config().get_exchange("binance")
-        use_testnet = binance_cfg.get("testnet", False)
-        self.feed = BinanceWebSocketFeed(
-            symbols=symbols,
-            timeframes=timeframes,
-            testnet=use_testnet,
-            needed_pairs=needed_pairs,
-        )
-        log.info("feed_configured", testnet=use_testnet,
-                 kline_streams=len(needed_pairs) if needed_pairs else "all")
+        # Broker: caller override wins; otherwise read config/active_broker.toml.
+        # IC Markets cTrader is the XAUUSD path; Binance is the altcoin path.
+        # Upstream filtering (_get_needed_pairs_from_config with broker_id)
+        # already scoped symbols/needed_pairs to this broker's universe.
+        if broker_id is None:
+            broker_id = get_active_broker_id()
+        self.broker_id = broker_id
+        if broker_id == "ic_markets_ctrader":
+            self.feed = ICMarketsFeed(
+                config=ICMarketsConfig.from_env(),
+                symbols=[s.upper() for s in symbols],
+                timeframes=timeframes,
+            )
+            log.info("feed_configured", broker=broker_id,
+                     symbols=[s.upper() for s in symbols], timeframes=timeframes)
+        else:
+            binance_cfg = get_config().get_exchange("binance")
+            use_testnet = binance_cfg.get("testnet", False)
+            self.feed = BinanceWebSocketFeed(
+                symbols=symbols,
+                timeframes=timeframes,
+                testnet=use_testnet,
+                needed_pairs=needed_pairs,
+            )
+            log.info("feed_configured", broker=broker_id, testnet=use_testnet,
+                     kline_streams=len(needed_pairs) if needed_pairs else "all")
         self.candle_builder = CandleBuilder(timeframes=timeframes)
         self.feature_engine = FeatureEngine(indicators=indicators)
-        self.storage = Storage()
+        # Separate trades DB per engine so equity/positions don't collide
+        # when two engines run side-by-side. Empty suffix = legacy default.
+        self.storage = Storage(
+            db_path=f"data/trades{self._suffix}.db" if self._suffix else None,
+        )
 
         # ── Strategy + Risk + Execution (wired in start()) ──
         self.strategy_router: StrategyRouter | None = None
@@ -142,7 +180,10 @@ class TradingEngine:
 
         mode_name = str(m3s_cfg.get("mode", "STANDARD")).upper()
         shadow_mode = bool(m3s_cfg.get("shadow_mode", True))
-        db_path = str(m3s_cfg.get("db_path", "data/m3s.sqlite"))
+        # Per-engine m3s DB — two engines can't share a single sqlite file
+        # without their base_equity + allocator state stomping each other.
+        default_m3s_db = f"data/m3s{self._suffix}.sqlite" if self._suffix else "data/m3s.sqlite"
+        db_path = str(m3s_cfg.get("db_path", default_m3s_db)) if not self._suffix else default_m3s_db
         cadence_hours = float(m3s_cfg.get("rebalance_cadence_hours", 24.0))
 
         try:
@@ -239,7 +280,7 @@ class TradingEngine:
             return self._audit_conn
         try:
             import sqlite3
-            db_path = "data/trades.db"
+            db_path = f"data/trades{self._suffix}.db" if self._suffix else "data/trades.db"
             self._audit_conn = sqlite3.connect(db_path, check_same_thread=False)
             # Ensure schema exists even if ResultStore hasn't been used yet
             from src.backtest.result_store import _BACKTEST_SCHEMA
@@ -376,6 +417,12 @@ class TradingEngine:
         flow through `_handle_carry_signal` → risk_client → paper_executor.
         Runs as an async task and shuts down cleanly with the engine.
         """
+        # Funding carry is a Binance-universe strategy; skip entirely on
+        # the cTrader gold engine to avoid double-polling / cross-engine
+        # trade writes.
+        if self.broker_id != "binance":
+            log.info("funding_feed_skipped", reason="broker_not_binance", broker=self.broker_id)
+            return
         cfg = get_config()
         strat_cfg = cfg.get_strategy("funding_carry")
         if not strat_cfg.get("enabled", False):
@@ -637,13 +684,19 @@ class TradingEngine:
 
         log.info("pipeline_wired", flow="feed → candle_builder → feature_engine → strategies")
 
-        # Start heartbeat monitoring
+        # Start heartbeat monitoring. When two engines run side-by-side,
+        # each writes to its own heartbeat file so the watchdog can track
+        # them independently.
+        heartbeat_path = (
+            Path(f"data/heartbeat{self._suffix}.json") if self._suffix else None
+        )
         self._heartbeat = Heartbeat(
             get_stats=self._get_heartbeat_stats,
             risk_client=self.risk_client,
+            heartbeat_path=heartbeat_path,
         )
         self._heartbeat_task = asyncio.create_task(self._heartbeat.run())
-        log.info("heartbeat_started")
+        log.info("heartbeat_started", path=str(heartbeat_path) if heartbeat_path else "data/heartbeat.json")
 
         # Start the feed (blocks until stop)
         await self.feed.start()
@@ -761,22 +814,56 @@ def parse_args() -> argparse.Namespace:
         ],
         help="Indicators to compute",
     )
+    parser.add_argument(
+        "--broker", default=None,
+        help="Override active broker (ic_markets_ctrader | binance). "
+             "Defaults to config/active_broker.toml.",
+    )
+    parser.add_argument(
+        "--engine-name", default="",
+        help="Engine label for multi-engine setups. When set, isolates "
+             "heartbeat (data/heartbeat_<name>.json) and trades DB "
+             "(data/trades_<name>.db) per engine.",
+    )
     return parser.parse_args()
 
 
-def _get_symbols_from_config() -> list[str]:
+_CTRADER_NATIVE_SYMBOLS = {"XAUUSD", "XAGUSD", "EURUSD", "GBPUSD", "USDJPY"}
+
+
+def _symbol_belongs_to_broker(symbol: str, broker_id: str) -> bool:
+    """Return True if this symbol should be routed through the given broker.
+
+    IC Markets cTrader handles FX + metals (upper-case). Binance handles
+    crypto spot pairs (lower-case, *USDT). Everything else is broker-neutral
+    and only matched to Binance by default — the altcoin universe is the
+    historical home.
+    """
+    s = symbol.upper()
+    if broker_id == "ic_markets_ctrader":
+        return s in _CTRADER_NATIVE_SYMBOLS
+    # binance (default)
+    return s not in _CTRADER_NATIVE_SYMBOLS
+
+
+def _get_symbols_from_config(broker_id: str | None = None) -> list[str]:
     """Pull enabled strategy symbols from strategies.toml (excluding synthetics)."""
-    pairs = _get_needed_pairs_from_config()
-    return sorted({sym.lower() for sym, _tf in pairs}) or ["btcusdt"]
+    if broker_id is None:
+        broker_id = get_active_broker_id()
+    pairs = _get_needed_pairs_from_config(broker_id=broker_id)
+    symbols = {sym for sym, _tf in pairs}
+    if broker_id == "ic_markets_ctrader":
+        return sorted(s.upper() for s in symbols) or ["XAUUSD"]
+    return sorted(s.lower() for s in symbols) or ["btcusdt"]
 
 
-def _get_timeframes_from_config() -> list[str]:
+def _get_timeframes_from_config(broker_id: str | None = None) -> list[str]:
     """Pull enabled strategy timeframes from strategies.toml (excluding synthetics)."""
-    pairs = _get_needed_pairs_from_config()
+    pairs = _get_needed_pairs_from_config(broker_id=broker_id)
     return sorted({tf for _sym, tf in pairs}) or ["1m"]
 
 
-def _get_needed_pairs_from_config() -> set[tuple[str, str]]:
+def _get_needed_pairs_from_config(broker_id: str | None = None) -> set[tuple[str, str]]:
     """Pull exact (symbol, timeframe) pairs needed by enabled strategies.
 
     Used to avoid Cartesian-product waste: if only ETHUSDT needs 5m,
@@ -784,11 +871,18 @@ def _get_needed_pairs_from_config() -> set[tuple[str, str]]:
 
     Synthetic symbols (those containing "-CARRY", "-SYNTH", etc.) are
     excluded — they're served by dedicated feeds, not by the normal
-    Binance WS subscription.
+    Binance WS / cTrader subscription.
+
+    Filtered by active broker: with IC Markets cTrader active, only
+    XAUUSD-class pairs return; with Binance active, the cTrader-native
+    pairs are excluded. This is what keeps the engine from trying to
+    subscribe to XAUUSD on a Binance WebSocket.
     """
     cfg = get_config()
+    if broker_id is None:
+        broker_id = get_active_broker_id()
     pairs: set[tuple[str, str]] = set()
-    for name, strat in cfg.strategies.items():
+    for _name, strat in cfg.strategies.items():
         if not strat.get("enabled", False):
             continue
         tf = strat.get("timeframe")
@@ -797,23 +891,30 @@ def _get_needed_pairs_from_config() -> set[tuple[str, str]]:
         for market in strat.get("markets", []):
             m = market.upper()
             if "-CARRY" in m or "-SYNTH" in m:
-                continue  # skip synthetic symbols — served by dedicated feeds
-            pairs.add((market.lower(), tf))
+                continue  # synthetic symbols — served by dedicated feeds
+            if not _symbol_belongs_to_broker(market, broker_id):
+                continue  # owned by a different broker
+            # IC Markets symbols are upper-case (XAUUSD); Binance lower (btcusdt).
+            normalized = m if broker_id == "ic_markets_ctrader" else market.lower()
+            pairs.add((normalized, tf))
     return pairs
 
 
 
 
 async def run(args: argparse.Namespace) -> None:
-    symbols = args.symbols or _get_symbols_from_config()
-    timeframes = args.timeframes or _get_timeframes_from_config()
-    needed_pairs = _get_needed_pairs_from_config()
+    broker_id = args.broker or get_active_broker_id()
+    symbols = args.symbols or _get_symbols_from_config(broker_id=broker_id)
+    timeframes = args.timeframes or _get_timeframes_from_config(broker_id=broker_id)
+    needed_pairs = _get_needed_pairs_from_config(broker_id=broker_id)
 
     engine = TradingEngine(
         symbols=symbols,
         timeframes=timeframes,
         indicators=args.indicators,
         needed_pairs=needed_pairs,
+        broker_id=broker_id,
+        engine_name=args.engine_name,
     )
 
     # Handle Ctrl+C gracefully
@@ -850,13 +951,18 @@ def main() -> None:
     print(f"  Mode: {get_config().mode}")
     print(f"  Press Ctrl+C to stop\n")
 
-    try:
-        import uvloop
-        uvloop.install()
-        log.info("uvloop_installed")
-    except ImportError:
-        pass
-
+    # uvloop is incompatible with Twisted's reactor. Gold engine (cTrader)
+    # runs Twisted's SelectReactor in a worker thread and the main loop on
+    # stdlib asyncio; crypto engine keeps uvloop for tick throughput.
+    if args.broker != "ic_markets_ctrader":
+        try:
+            import uvloop
+            uvloop.install()
+            log.info("uvloop_installed")
+        except ImportError:
+            pass
+    else:
+        log.info("uvloop_skipped", reason="ic_markets_ctrader_uses_threaded_reactor")
     asyncio.run(run(args))
 
 
