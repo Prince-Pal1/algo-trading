@@ -57,14 +57,12 @@ adx_trend_threshold = 20
 max_risk_per_trade = 0.015
 
 [vol_momentum]
-# TEMPORARILY DISABLED 2026-04-17 — discovered that one VolMomentumStrategy
-# instance handles 3 symbols but the `_closes` deque, `_position`, and
-# `_bars_*` counters are shared across them. Cross-symbol contamination
-# produced bogus momentum values (ADA's "past close" resolving to DOGE's
-# recent price). Full writeup + root cause in:
-#   docs/investigations/2026-04-17_vol_momentum_stale_buffer.md
-# Re-enable after per-symbol state refactor ships.
-enabled = false
+# Re-enabled 2026-04-17 after router-level per-symbol isolation shipped.
+# Each market in the list below now gets its own strategy instance, so the
+# internal `_closes` / `_position` / `_bars_*` state is no longer shared
+# across DOGEUSDT/ADAUSDT/DOTUSDT. Implementation: router.from_config
+# detects `len(markets) > 1` and instantiates N copies scoped to one market.
+enabled = true
 risk_profile = "SAFE"
 # Vol-scaled momentum on high-volatility coins
 markets = ["DOGEUSDT", "ADAUSDT", "DOTUSDT"]

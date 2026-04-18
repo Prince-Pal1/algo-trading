@@ -83,6 +83,22 @@ class StrategyRouter:
         """Factory: create router with all enabled strategies from strategies.toml.
 
         Uses the STRATEGY_REGISTRY to map config section names to strategy classes.
+
+        Multi-market isolation: when a config entry has `markets = [A, B, C, ...]`
+        with more than one symbol, the router instantiates ONE strategy object
+        PER symbol and registers each to its single market. This prevents
+        accidental cross-symbol state sharing in strategies whose internal
+        buffers (e.g. `_closes` deque, `_position`, `_bars_since_exit`) are
+        per-instance attributes rather than per-symbol dicts.
+
+        Before this isolation landed (2026-04-17), vol_momentum's single
+        instance handled DOGEUSDT/ADAUSDT/DOTUSDT candles through the same
+        `_closes` deque and the 168-bar momentum lookback cross-contaminated
+        between symbols — ADA's "past close" would resolve to whatever
+        symbol happened to write 168 appends ago. See
+        docs/investigations/2026-04-17_vol_momentum_stale_buffer.md.
+
+        Strategies with `len(markets) == 1` or `markets` unset are unaffected.
         """
         from src.utils.config import get_config
 
@@ -99,8 +115,27 @@ class StrategyRouter:
                 log.warning("strategy_not_found", name=name, available=list(STRATEGY_REGISTRY.keys()))
                 continue
 
-            strategy = strategy_cls.from_config(name)
-            router.register(strategy)
+            markets = strat_cfg.get("markets", [])
+            if len(markets) > 1:
+                # Per-symbol instantiation — each market gets its own state.
+                for market in markets:
+                    strategy = strategy_cls.from_config(name)
+                    # Override the strategy's market list to a single-element
+                    # list so per-instance state is implicitly scoped to one
+                    # symbol. Same name preserved so downstream consumers
+                    # (signal_audit, risk_decisions, meta-label training)
+                    # continue to see a single logical strategy.
+                    strategy.markets = [market.upper()]
+                    router.register(strategy)
+                log.info(
+                    "strategy_multi_market_isolated",
+                    name=name,
+                    instances=len(markets),
+                    markets=markets,
+                )
+            else:
+                strategy = strategy_cls.from_config(name)
+                router.register(strategy)
 
         log.info(
             "router_ready",
