@@ -1,0 +1,242 @@
+# Broker: Binance / platform: spot
+#
+# Authored 2026-04-18 after fetching the official Binance fee schedule
+# (https://www.binance.com/en/fee/schedule). Source:
+#   Regular User (VIP 0): 0.100% maker / 0.100% taker
+#   BNB discount: 25% off both legs when paying fees in BNB
+#   VIP 1-9 tiers scale with 30-day USD volume + BNB holdings.
+#
+# This file is the broker-first view used by src.fees.FeeManager. The
+# backtest engine reads it via make_fee_model("binance_spot_<cls>_<scenario>")
+# once a profile name is registered in src/backtest/fee_profiles.py.
+
+[broker]
+id = "binance_spot"
+name = "Binance"
+platform = "spot"
+regulator = "various (offshore entity — Binance.com)"
+country = "Cayman Islands / multi-jurisdictional"
+api_type = "binance_ws+rest"
+account_types = ["Regular", "VIP 1–9"]
+min_deposit_usd = 0.0
+base_currencies = ["USDT", "USDC", "BUSD", "BTC", "ETH", "BNB"]
+notes = """
+Primary broker for the altcoin engine (bb_rsi_mr / donchian_ensemble_adx
+/ vol_momentum / funding_carry). Spot only — perpetuals use a separate
+Binance Futures endpoint not modelled here. All altcoin strategies are
+benchmarked against this fee profile; XAUUSD-class instruments route
+through ic_markets_ctrader instead (see _symbol_belongs_to_broker in
+src/main.py).
+
+Fee structure is PERCENT-OF-NOTIONAL, unlike IC Markets' fixed-per-lot
+(MT4) or volume-based-per-$100k (cTrader). See
+src/backtest/costs.py::commission_usd for the dispatch.
+
+Live tier status: `Regular` (VIP 0) on a fresh account — 0.1% maker +
+taker. When 30-day trading volume crosses $1m USD (or holds ≥5 BNB),
+promote the active scenario to `vip_1` profile. Tier promotion is an
+operational concern, not a code change — flip the active-profile name
+and FeeManager picks up the new rates.
+"""
+
+[leverage_max]
+crypto = 1.0       # Spot only — no leverage on this profile.
+fx_majors = 0.0    # Binance spot does not offer FX pairs.
+xauusd_metals = 0.0
+
+[instruments.crypto]
+symbol_aliases = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "NEARUSDT",
+    "APTUSDT",
+]
+contract_size = 1.0   # 1 "contract" = 1 coin unit; notional = qty × price.
+min_lot = 0.00001
+max_lot = 9000.0
+lot_step = 0.00001
+
+[instruments.crypto.scenarios.normal]
+description = "Binance spot, Regular tier (VIP 0): 0.100% maker / 0.100% taker — the default for any account with <$1M 30-day volume and <5 BNB held."
+sources = [
+    "https://www.binance.com/en/fee/schedule",
+    "https://www.binance.com/en/fee/trading",
+]
+notes = """
+The dominant cost is commission (10 bps round-trip). Spread is
+negligible for majors (1–2 bps on BTCUSDT) and scales wider for
+lower-volume altcoins (2–10 bps on NEARUSDT / APTUSDT). The
+SpreadSlippageConfig encoding below is a CONSERVATIVE flat estimate
+expressed in absolute price units — it is accurate within an order of
+magnitude for mid-priced altcoins ($10–$1000). For a precise backtest,
+reconcile against an observed-spread history from the WebSocket book
+ticker stream (see scripts/binance_speed_test.py patterns).
+
+TODO: per-symbol spread calibration via the live order-book sampler
+(future task #117).
+"""
+
+[instruments.crypto.scenarios.normal.spread]
+# Minimal placeholder: 0.0001 absolute. Near-zero vs commission (0.1% ≫
+# any typical Binance spot spread). See notes above.
+base_spread_pips = 1.0
+normal_slip_pips = 1.0
+atr_vol_mult = 0.0
+news_spread_mult = 3.0
+news_slip_mult = 3.0
+pip_size = 0.0001
+
+[instruments.crypto.scenarios.normal.commission]
+type = "percent_of_notional"
+taker_fraction_of_notional = 0.001   # 0.100%
+maker_fraction_of_notional = 0.001   # 0.100% (identical on VIP 0 spot)
+contract_size = 1.0
+min_commission_usd = 0.0
+
+[instruments.crypto.scenarios.news_active]
+description = "Binance spot during a high-impact BTC/macro news window — spread widens 3×, slippage 3×. Commission unchanged."
+sources = ["Derived — Binance does not publish per-scenario fees; commission is fixed."]
+notes = """
+Use during FOMC / NFP / CPI windows and for known BTC-specific news
+events (ETF approvals, exchange hack disclosures). Note that commission
+is unchanged — crypto exchanges don't spread-widen for regulatory
+events; only the order-book depth thins, which this captures as widened
+spread + slip.
+"""
+
+[instruments.crypto.scenarios.news_active.spread]
+base_spread_pips = 3.0
+normal_slip_pips = 3.0
+atr_vol_mult = 0.0
+news_spread_mult = 3.0
+news_slip_mult = 3.0
+pip_size = 0.0001
+load_news_calendar = true
+
+[instruments.crypto.scenarios.news_active.commission]
+type = "percent_of_notional"
+taker_fraction_of_notional = 0.001
+maker_fraction_of_notional = 0.001
+contract_size = 1.0
+
+[instruments.crypto.scenarios.illiquid]
+description = "Binance spot during low-liquidity regimes (Asian overnight for altcoins, weekends on non-stable pairs) — spread × 3.5 vs normal."
+notes = "Applied uniformly vs normal following the IC Markets illiquid template. Revisit with live order-book depth sampler."
+
+[instruments.crypto.scenarios.illiquid.spread]
+base_spread_pips = 3.5
+normal_slip_pips = 3.5
+atr_vol_mult = 0.0
+news_spread_mult = 3.0
+news_slip_mult = 3.0
+pip_size = 0.0001
+
+[instruments.crypto.scenarios.illiquid.commission]
+type = "percent_of_notional"
+taker_fraction_of_notional = 0.001
+maker_fraction_of_notional = 0.001
+contract_size = 1.0
+
+[instruments.crypto.scenarios.volatile]
+description = "Binance spot in volatile regime (current ATR > 1.5× 30-bar rolling) — spread × 2 vs normal."
+notes = "Captures order-book thinning during momentum sprints. Commission unchanged."
+
+[instruments.crypto.scenarios.volatile.spread]
+base_spread_pips = 2.0
+normal_slip_pips = 2.0
+atr_vol_mult = 0.0
+news_spread_mult = 3.0
+news_slip_mult = 3.0
+pip_size = 0.0001
+
+[instruments.crypto.scenarios.volatile.commission]
+type = "percent_of_notional"
+taker_fraction_of_notional = 0.001
+maker_fraction_of_notional = 0.001
+contract_size = 1.0
+
+[instruments.crypto.scenarios.stress]
+description = "Binance spot pessimistic stress test — 2× normal spread + slip + 25% commission margin. For worst-case strategy validation."
+notes = """
+Like ic_markets_ctrader.xauusd_metals.stress: survive this scenario and
+the strategy's alpha is robust to cost estimation error. Commission
+bumped 0.100% → 0.125% to model a surprise-tier-change or latency-
+tax event (e.g., Binance raises fees or latency spikes mid-order).
+"""
+
+[instruments.crypto.scenarios.stress.spread]
+base_spread_pips = 2.0
+normal_slip_pips = 2.0
+atr_vol_mult = 0.0
+news_spread_mult = 3.0
+news_slip_mult = 3.0
+pip_size = 0.0001
+
+[instruments.crypto.scenarios.stress.commission]
+type = "percent_of_notional"
+taker_fraction_of_notional = 0.00125   # 25% uplift on normal 0.1%
+maker_fraction_of_notional = 0.00125
+contract_size = 1.0
+
+# ── VIP-tier reference (not active by default) ─────────────────────────
+# These scenarios exist for backtesting "what if we hit VIP N" — switch
+# to them via the active-broker TOML override mechanism once live
+# volume crosses the thresholds documented in notes.
+
+[instruments.crypto.scenarios.vip_1]
+description = "Binance spot VIP 1 tier (30d volume ≥ $1M USD + BNB ≥ 5): 0.090% maker / 0.100% taker."
+notes = "Only active leg improves — taker stays at regular tier rate. Include this once your 30-day spot volume nears the threshold."
+
+[instruments.crypto.scenarios.vip_1.spread]
+base_spread_pips = 1.0
+normal_slip_pips = 1.0
+atr_vol_mult = 0.0
+news_spread_mult = 3.0
+news_slip_mult = 3.0
+pip_size = 0.0001
+
+[instruments.crypto.scenarios.vip_1.commission]
+type = "percent_of_notional"
+taker_fraction_of_notional = 0.001
+maker_fraction_of_notional = 0.00090
+contract_size = 1.0
+
+[instruments.crypto.scenarios.vip_3]
+description = "Binance spot VIP 3 tier (30d volume ≥ $20M + BNB ≥ 100): 0.040% maker / 0.060% taker."
+notes = "Practically: halves the altcoin engine's cost drag. Institutional threshold — unlikely for personal account near-term."
+
+[instruments.crypto.scenarios.vip_3.spread]
+base_spread_pips = 1.0
+normal_slip_pips = 1.0
+atr_vol_mult = 0.0
+news_spread_mult = 3.0
+news_slip_mult = 3.0
+pip_size = 0.0001
+
+[instruments.crypto.scenarios.vip_3.commission]
+type = "percent_of_notional"
+taker_fraction_of_notional = 0.00060
+maker_fraction_of_notional = 0.00040
+contract_size = 1.0
+
+[instruments.crypto.scenarios.bnb_discount]
+description = "Binance spot Regular tier with BNB fee payment (25% discount): 0.075% maker / 0.075% taker."
+notes = """
+Activated by enabling 'Pay fees with BNB' in Binance account settings.
+Requires maintaining a BNB balance. Worth ~25bps on 10bps commission = 2.5bps savings
+per round-trip. For a $10k account doing 100 trades/month at avg $500 notional, that
+saves $12.50/month — worth doing if you're happy parking $100 in BNB.
+"""
+
+[instruments.crypto.scenarios.bnb_discount.spread]
+base_spread_pips = 1.0
+normal_slip_pips = 1.0
+atr_vol_mult = 0.0
+news_spread_mult = 3.0
+news_slip_mult = 3.0
+pip_size = 0.0001
+
+[instruments.crypto.scenarios.bnb_discount.commission]
+type = "percent_of_notional"
+taker_fraction_of_notional = 0.00075   # 0.100% × 0.75
+maker_fraction_of_notional = 0.00075
+contract_size = 1.0

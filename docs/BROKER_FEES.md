@@ -33,7 +33,9 @@ engine_pine = LeveragedBacktestEngine(
 )
 ```
 
-## The 7 profiles currently defined
+## The profiles currently defined
+
+### IC Markets (gold + FX)
 
 | Profile | Broker | Platform | Instrument | Scenario | Per-trade cost (1 lot @ $4500) |
 |---|---|---|---|---|---|
@@ -44,6 +46,23 @@ engine_pine = LeveragedBacktestEngine(
 | `ic_markets_ctrader_fx_majors_normal` | IC Markets | cTrader | FX majors | normal | ~$6 round trip on EURUSD-class pairs |
 | `ic_markets_mt4_fx_majors_normal` | IC Markets | MT4 | FX majors | normal | ~$7 round trip — comparable to cTrader for FX |
 | `pine_zero_cost` | (none) | (none) | (any) | pine_faithful | $0 — TradingView strategy tester defaults |
+
+### Binance (crypto spot — altcoin engine)
+
+Added 2026-04-18. The altcoin engine (crypto book on `com.algo-trading.engine`) runs on Binance spot; every backtest of a crypto strategy must select one of these. All use the `percent_of_notional` commission type (0.1% × 2 legs = 10bps round-trip at Regular tier). Access via `src/fees` broker registry → `get_broker("binance_spot").resolve_profile(instrument_class="crypto", scenario=...)`.
+
+| Scenario | Maker | Taker | Use when |
+|---|---|---|---|
+| `normal` | 0.100% | 0.100% | Default — VIP 0 / Regular tier |
+| `bnb_discount` | 0.075% | 0.075% | Account pays fees in BNB (25% off) |
+| `vip_1` | 0.090% | 0.100% | 30-day volume ≥ $1M USD + BNB ≥ 5 |
+| `vip_3` | 0.040% | 0.060% | 30-day volume ≥ $20M + BNB ≥ 100 |
+| `news_active` | 0.100% | 0.100% | FOMC / CPI / ETF-approval windows (spread widens 3×, commission unchanged) |
+| `illiquid` | 0.100% | 0.100% | Asian overnight + low-volume altcoins (spread × 3.5) |
+| `volatile` | 0.100% | 0.100% | ATR > 1.5× 30-bar rolling (spread × 2) |
+| `stress` | 0.125% | 0.125% | Pessimistic 25%-uplifted commission for robustness testing |
+
+**Cost example:** 0.5 BTC @ $65k on `normal` → $32,500 notional × 0.1% × 2 = **$65 round-trip**. Dominant cost is commission; spread is negligible on major altcoin USDT pairs (1–2bp on BTCUSDT). See `config/brokers/binance_spot.toml` for full TOML.
 
 ## Calibration sources
 

@@ -173,3 +173,78 @@ class TestSymbolRouting:
         assert b.supports_symbol("XAUUSD") is True
         assert b.supports_symbol("GBPUSD") is True
         assert b.supports_symbol("BTCUSDT") is False
+
+
+class TestBinanceSpot:
+    """Binance spot broker profile — the altcoin engine's cost model."""
+
+    def test_loads_from_registry(self):
+        assert "binance_spot" in list_brokers()
+
+    def test_basic_metadata(self):
+        b = get_broker("binance_spot")
+        assert b.id == "binance_spot"
+        assert b.platform == "spot"
+        assert "USDT" in b.base_currencies
+        assert b.min_deposit_usd == 0.0
+
+    def test_crypto_instrument_class_present(self):
+        b = get_broker("binance_spot")
+        assert "crypto" in b.instrument_profiles
+        ip = b.instrument_profiles["crypto"]
+        assert "BTCUSDT" in ip.symbol_aliases
+        assert "ETHUSDT" in ip.symbol_aliases
+
+    def test_normal_scenario_is_regular_tier(self):
+        """VIP 0 / Regular user: 0.1% both legs."""
+        b = get_broker("binance_spot")
+        p = b.resolve_profile(instrument_class="crypto", scenario="normal")
+        assert p is not None
+        sched = p.commission_schedule
+        assert sched.taker_fraction_of_notional == 0.001
+        assert sched.maker_fraction_of_notional == 0.001
+        assert sched.per_100k_notional_usd is None
+        assert sched.per_lot_per_side_usd is None
+
+    def test_vip_3_tier_distinguishes_maker_taker(self):
+        b = get_broker("binance_spot")
+        p = b.resolve_profile(instrument_class="crypto", scenario="vip_3")
+        assert p is not None
+        sched = p.commission_schedule
+        assert sched.taker_fraction_of_notional == 0.0006
+        assert sched.maker_fraction_of_notional == 0.0004
+
+    def test_bnb_discount_is_25pct_off(self):
+        b = get_broker("binance_spot")
+        p = b.resolve_profile(instrument_class="crypto", scenario="bnb_discount")
+        assert p is not None
+        assert p.commission_schedule.taker_fraction_of_notional == 0.00075
+        assert p.commission_schedule.maker_fraction_of_notional == 0.00075
+
+    def test_stress_applies_25pct_uplift(self):
+        b = get_broker("binance_spot")
+        p = b.resolve_profile(instrument_class="crypto", scenario="stress")
+        assert p is not None
+        assert p.commission_schedule.taker_fraction_of_notional == 0.00125
+
+    def test_all_expected_scenarios_present(self):
+        b = get_broker("binance_spot")
+        ip = b.instrument_profiles["crypto"]
+        scenarios = set(ip.scenarios_available())
+        for expected in ("normal", "news_active", "illiquid", "volatile",
+                         "stress", "vip_1", "vip_3", "bnb_discount"):
+            assert expected in scenarios, f"{expected} missing from {scenarios}"
+
+    def test_spot_has_no_leverage(self):
+        b = get_broker("binance_spot")
+        assert b.leverage_max.get("crypto", 0.0) == 1.0
+
+    def test_commission_round_trip_matches_fee_schedule(self):
+        """End-to-end: 0.5 BTC @ $65k on normal Binance → $65 round-trip (0.1% × 2)."""
+        from src.backtest.costs import commission_usd
+        b = get_broker("binance_spot")
+        p = b.resolve_profile(instrument_class="crypto", scenario="normal")
+        cost = commission_usd(
+            quantity_units=0.5, schedule=p.commission_schedule, reference_price=65000.0,
+        )
+        assert cost == pytest.approx(65.0)

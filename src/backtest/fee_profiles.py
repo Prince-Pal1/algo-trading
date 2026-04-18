@@ -143,8 +143,10 @@ def _build_commission_schedule(raw: dict[str, Any]) -> CommissionSchedule:
     """Construct CommissionSchedule from a TOML profile's [commission] table.
 
     Dispatches on `type`:
-      - "fixed_per_lot": MT4-style (`per_lot_per_side_usd`)
-      - "volume_based":  cTrader-style (`per_100k_notional_usd`)
+      - "fixed_per_lot":         MT4-style (`per_lot_per_side_usd`)
+      - "volume_based":          cTrader-style (`per_100k_notional_usd`)
+      - "percent_of_notional":   Crypto spot exchanges like Binance
+        (`taker_fraction_of_notional`, optional `maker_fraction_of_notional`)
     """
     schedule_type = raw.get("type", "fixed_per_lot")
     if schedule_type == "fixed_per_lot":
@@ -161,10 +163,22 @@ def _build_commission_schedule(raw: dict[str, Any]) -> CommissionSchedule:
             contract_size=float(raw["contract_size"]),
             min_commission_usd=float(raw.get("min_commission_usd", 0.0)),
         )
+    elif schedule_type == "percent_of_notional":
+        taker_frac = float(raw["taker_fraction_of_notional"])
+        maker_frac_raw = raw.get("maker_fraction_of_notional")
+        maker_frac = float(maker_frac_raw) if maker_frac_raw is not None else None
+        return CommissionSchedule(
+            per_lot_per_side_usd=None,
+            per_100k_notional_usd=None,
+            maker_fraction_of_notional=maker_frac,
+            taker_fraction_of_notional=taker_frac,
+            contract_size=float(raw.get("contract_size", 1.0)),
+            min_commission_usd=float(raw.get("min_commission_usd", 0.0)),
+        )
     else:
         raise ValueError(
             f"Unknown commission schedule type: {schedule_type!r}. "
-            f"Expected 'fixed_per_lot' or 'volume_based'."
+            f"Expected 'fixed_per_lot', 'volume_based', or 'percent_of_notional'."
         )
 
 

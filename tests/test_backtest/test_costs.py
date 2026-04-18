@@ -198,10 +198,100 @@ class TestCommission:
         assert commission_usd(quantity_units=-1.0, schedule=schedule) == 0.0
 
     def test_invalid_schedule_no_pricing_set(self):
-        """Schedule with neither pricing field set should raise."""
-        bad = CommissionSchedule(per_lot_per_side_usd=None, per_100k_notional_usd=None)
+        """Schedule with no pricing field set should raise."""
+        bad = CommissionSchedule(
+            per_lot_per_side_usd=None,
+            per_100k_notional_usd=None,
+            taker_fraction_of_notional=None,
+        )
         with pytest.raises(ValueError, match="must set either"):
             commission_usd(quantity_units=100.0, schedule=bad, reference_price=4500.0)
+
+    # ── Crypto percent-of-notional pricing (Binance) ──
+
+    def test_binance_btc_round_trip_taker(self):
+        """Binance Regular: 0.1% taker × 2 sides × notional.
+        0.5 BTC @ $65k = $32,500 notional → $32.50/side × 2 = $65 RT.
+        """
+        schedule = CommissionSchedule(
+            per_lot_per_side_usd=None,
+            per_100k_notional_usd=None,
+            maker_fraction_of_notional=0.001,
+            taker_fraction_of_notional=0.001,
+            contract_size=1.0,
+        )
+        cost = commission_usd(
+            quantity_units=0.5, schedule=schedule, reference_price=65000.0,
+        )
+        assert cost == pytest.approx(65.0)
+
+    def test_binance_maker_cheaper_when_tiered(self):
+        """VIP 3: maker 0.04% / taker 0.06%.
+        0.5 BTC @ $65k → maker $26, taker $39.
+        """
+        schedule = CommissionSchedule(
+            per_lot_per_side_usd=None,
+            per_100k_notional_usd=None,
+            maker_fraction_of_notional=0.0004,
+            taker_fraction_of_notional=0.0006,
+            contract_size=1.0,
+        )
+        taker = commission_usd(
+            quantity_units=0.5, schedule=schedule, reference_price=65000.0,
+        )
+        maker = commission_usd(
+            quantity_units=0.5, schedule=schedule, reference_price=65000.0, is_maker=True,
+        )
+        assert taker == pytest.approx(39.0)
+        assert maker == pytest.approx(26.0)
+        assert maker < taker
+
+    def test_binance_defaults_to_taker_when_maker_undefined(self):
+        """Safe default: schedule with only taker set uses taker for maker orders too."""
+        schedule = CommissionSchedule(
+            per_lot_per_side_usd=None,
+            per_100k_notional_usd=None,
+            maker_fraction_of_notional=None,
+            taker_fraction_of_notional=0.001,
+            contract_size=1.0,
+        )
+        cost = commission_usd(
+            quantity_units=0.5, schedule=schedule, reference_price=65000.0, is_maker=True,
+        )
+        assert cost == pytest.approx(65.0)  # Falls back to taker 0.1%
+
+    def test_binance_requires_reference_price(self):
+        """Percent-of-notional without reference_price raises."""
+        schedule = CommissionSchedule(
+            per_lot_per_side_usd=None,
+            per_100k_notional_usd=None,
+            taker_fraction_of_notional=0.001,
+            contract_size=1.0,
+        )
+        with pytest.raises(ValueError, match="reference_price required"):
+            commission_usd(quantity_units=0.5, schedule=schedule)
+
+    def test_binance_bnb_discount_is_25pct(self):
+        """BNB payment discount: 0.1% × 0.75 = 0.075%.
+        1 ETH @ $2400 = $2,400 → regular $4.80 RT, BNB $3.60 RT.
+        """
+        regular = CommissionSchedule(
+            per_lot_per_side_usd=None, per_100k_notional_usd=None,
+            taker_fraction_of_notional=0.001, contract_size=1.0,
+        )
+        bnb = CommissionSchedule(
+            per_lot_per_side_usd=None, per_100k_notional_usd=None,
+            taker_fraction_of_notional=0.00075, contract_size=1.0,
+        )
+        regular_cost = commission_usd(
+            quantity_units=1.0, schedule=regular, reference_price=2400.0,
+        )
+        bnb_cost = commission_usd(
+            quantity_units=1.0, schedule=bnb, reference_price=2400.0,
+        )
+        assert regular_cost == pytest.approx(4.80)
+        assert bnb_cost == pytest.approx(3.60)
+        assert bnb_cost / regular_cost == pytest.approx(0.75)
 
 
 # ── Round-trip spread cost ──────────────────────────────────────────────

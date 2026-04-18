@@ -273,6 +273,13 @@ class CommissionSchedule:
     """
     per_lot_per_side_usd: float | None = None  # MT4 fixed (e.g. $3.50)
     per_100k_notional_usd: float | None = 3.0  # cTrader volume-based (default)
+    # Crypto exchange style: commission as a fraction of notional
+    # (e.g. Binance spot: maker 0.001 = 0.1%, taker 0.001 = 0.1%).
+    # When set, per_lot_per_side_usd + per_100k_notional_usd are ignored.
+    # Order-type flag on individual fills decides maker vs taker in
+    # commission_usd(); default behaviour when unknown assumes taker (worst case).
+    maker_fraction_of_notional: float | None = None
+    taker_fraction_of_notional: float | None = None
     contract_size: float = 100.0  # XAUUSD 1 lot = 100 oz
     min_commission_usd: float = 0.0
 
@@ -305,20 +312,27 @@ def commission_usd(
     quantity_units: float,
     schedule: CommissionSchedule,
     reference_price: float | None = None,
+    is_maker: bool = False,
 ) -> float:
     """Round-trip commission for a position of `quantity_units`.
 
-    Dispatches on schedule type:
-      - per_lot_per_side_usd set → MT4-style fixed per-lot pricing
-        (reference_price ignored)
-      - per_100k_notional_usd set → cTrader-style volume-based pricing
-        (reference_price REQUIRED)
+    Dispatches on schedule type (first match wins):
+      1. percent-of-notional (crypto) → `taker_fraction_of_notional` set.
+         Fee = notional × fraction × 2 (round-trip). When `is_maker=True`
+         and `maker_fraction_of_notional` is set, uses that instead.
+      2. volume-based (cTrader) → `per_100k_notional_usd` set.
+      3. fixed per-lot (MT4) → `per_lot_per_side_usd` set.
 
     Args:
-        quantity_units: position size in instrument units (oz for XAUUSD).
-        schedule: CommissionSchedule (must set exactly one pricing field).
+        quantity_units: position size in instrument units (oz for XAUUSD,
+            coin count for crypto — e.g. 0.5 BTC).
+        schedule: CommissionSchedule (must set exactly one pricing mode).
         reference_price: current price used to compute notional value.
-            Required for volume-based schedules; ignored for per-lot.
+            Required for volume-based + percent-of-notional schedules;
+            ignored for fixed per-lot.
+        is_maker: only meaningful for percent-of-notional. When True and
+            the schedule supplies maker_fraction_of_notional, uses the
+            maker rate; otherwise uses taker (safe default).
 
     Returns:
         USD commission for the full round-trip (entry + exit).
@@ -326,7 +340,21 @@ def commission_usd(
     if quantity_units <= 0:
         return 0.0
 
-    if schedule.per_100k_notional_usd is not None:
+    if schedule.taker_fraction_of_notional is not None:
+        # Percent-of-notional (crypto spot exchanges like Binance)
+        if reference_price is None or reference_price <= 0:
+            raise ValueError(
+                "reference_price required for percent-of-notional commission "
+                "schedules. Pass current fill_price to commission_usd()."
+            )
+        if is_maker and schedule.maker_fraction_of_notional is not None:
+            frac = schedule.maker_fraction_of_notional
+        else:
+            frac = schedule.taker_fraction_of_notional
+        notional_usd = quantity_units * reference_price
+        per_leg_usd = notional_usd * frac
+        per_leg_usd = max(schedule.min_commission_usd, per_leg_usd)
+    elif schedule.per_100k_notional_usd is not None:
         # Volume-based (cTrader)
         if reference_price is None or reference_price <= 0:
             raise ValueError(
@@ -343,7 +371,8 @@ def commission_usd(
     else:
         raise ValueError(
             "CommissionSchedule must set either per_lot_per_side_usd "
-            "(MT4 style) or per_100k_notional_usd (cTrader style)."
+            "(MT4), per_100k_notional_usd (cTrader), or "
+            "taker_fraction_of_notional (crypto)."
         )
 
     return 2.0 * per_leg_usd
