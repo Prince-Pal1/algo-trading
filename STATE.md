@@ -1,6 +1,25 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-04-18 (Session 22 Day 4-5 — Spotware KYC approved; live cTrader demo connection validated end-to-end. OAuth helper patched for moved auth URL. Discovered ctidTraderAccountId vs traderLogin distinction. G.3 Day 1 launch unblocked.)
+**Last updated:** 2026-04-18 (Session 23 Day 1 — G.3 Day 1 LAUNCHED live on cTrader demo via dual-engine topology; meta-label 6h polling plist + gate-clear notification wired; swift_alma_v2 killed across 5 leverage modes under task #116.)
+
+## Session 23 Day 1 — G.3 Day 1 launch + dual-engine + task #116 kill (2026-04-18)
+
+Three parallel workstreams from the Session 22 handoff executed in a single session:
+
+**Track A — G.3 Day 1 LAUNCHED at 2026-04-18 07:35 UTC.** Gold engine live on IC Markets cTrader demo, HEALTHY, emitting XAUUSD 1h candles + features through donchian_gold + vol_momentum_gold. Dual-engine topology: crypto engine (Binance altcoins + funding_carry) + gold engine (XAUUSD institutional book) coexist on shared risk server + m3s.sqlite-per-engine + trades.db-per-engine. Key infrastructure landed:
+- `src/main.py` broker-aware feed factory (`--broker` + `--engine-name` CLI args, reads `config/active_broker.toml`, splits `_get_needed_pairs_from_config` filter per broker to route XAUUSD via cTrader and altcoins via Binance).
+- `src/data/storage.py` `Storage(db_path=...)` kwarg; `src/monitoring/heartbeat.py` `Heartbeat(heartbeat_path=...)` kwarg. Per-engine paths: `data/heartbeat_<name>.json`, `data/trades_<name>.db`, `data/m3s_<name>.sqlite`.
+- `src/data/feeds/icmarkets_feed.py` completed from Phase-4 skeleton to full cTrader client: 5-stage auth walk (AppAuth → GetAccountList → AccountAuth → SymbolsList → SubscribeSpots → SubscribeLiveTrendbar); Twisted reactor runs in a worker thread to isolate from asyncio; SpotEvent bid/ask → Tick and `ProtoOATrendbar` → Candle dispatch via `asyncio.run_coroutine_threadsafe` on the main loop; `_send_quiet(client, req)` wraps `client.send()` with a Deferred errback to absorb 5s subscribe-ack timeouts cleanly. Fixed hardcoded proto-period mapping (H1 is 9 not 8, etc.).
+- `config/strategies.toml` gains `[donchian_gold]` + `[vol_momentum_gold]` sections with Day 1-7 settings (L=1, MODERATE, max_risk 1%).
+- `~/Library/LaunchAgents/com.algo-trading.engine-gold.plist` new; existing `com.algo-trading.engine.plist` gets `--broker binance` explicit.
+- uvloop disabled when broker=ic_markets_ctrader (incompatible with Twisted's default SelectReactor running in the worker thread).
+- Blocker encountered mid-session: XAUUSD weekend market is closed (Fri 22:00 UTC → Sun 22:00 UTC). Live tick delivery confirmed on the first candle at 07:35 UTC (pre-close cached value) — continuous flow resumes Sunday 22:00 UTC open.
+
+**Track B — Meta-label live-gate monitoring.** `~/Library/LaunchAgents/com.algo-trading.meta-label-shadow-check.plist` (6h cadence, matches m3s-shadow-check) + `scripts/meta_label_shadow_gate_watch.sh`. Wrapper runs the shadow-check, parses `data/meta_label_shadow_status.json`, evaluates the phase-5 live gate locally (HEALTHY + any strategy with PASS rolling_auc ∧ n≥20), fires a one-shot `osascript` macOS notification when the gate transitions BLOCKED → READY, and records `data/meta_label_gate_cleared.flag` for idempotency. Current state BLOCKED_COLD_START (0-1 live rows across all 4 strategies). Self-resolves in 2-4 weeks at current signal rate.
+
+**Track C — swift_alma_v2 cross-mode WF verdict (task #116).** `scripts/run_swift_alma_v2_task116.sh` ran `deep_backtest.py` across all 5 leverage modes on 1h × [90,365]d XAUUSD @ L=10 with MT4 fees + 7-fold WF (gate Calmar ≥ 0.5). Result: **all 5 modes RESEARCH_ONLY** — invariant Calmar −0.221 (ann −2.2%), margin_capped Calmar −0.217 (ann −0.2%), vol_targeted Calmar −0.229, risk_scaled FAILED on Phase 2.5 P&L-scaling assertion, kelly_fractional Calmar −0.000 (half-Kelly, WR=0.40, PR=1.5). Strategy is **NOT deployment-ready**. Reports at `reports/deep_backtest_swift_alma_v2_task116/`. Next session: write `docs/strategy_obituaries/strategy_swift_alma_v2.md`, add to `project_dead_strategies.md` memory, close task #116 in ROADMAP, open task #116b for a replacement leveraged-strategy research cycle.
+
+**Still open after this session:** XAUUSD live tick flow starts Sunday 22:00 UTC (weekend closure). G.3 Day 1-7 ramp schedule to Day 8-14 L=5 + aggressive 1% on 2026-04-25 onward. swift_alma_v2 obituary + graveyard entry writeup. Task #116b replacement research (could inherit session-filter + regime-gate design from swift_alma_v2 but scrap the ALMA-crossover core).
 
 ## Session 22 Day 5 — IC Markets cTrader live wiring (2026-04-18)
 
@@ -49,12 +68,15 @@ Net result: ~103 new fee-system tests, 1 new package (src/fees/), 3 per-broker T
 
 ## Current Position
 
-**Active phase:** All Session 22 sprint deliverables now on main:
-- **Phase 3b-2 M3S** is **AUTHORITATIVE** (commit `01e5d39`).
-- **Phase 3c meta-labeling** is in **ADVISORY mode** (commit `a6fc4ff` flips `shadow_mode=false`, `veto_threshold=0.30`). Live veto gate cold-start blocked (≥20 live rows per strategy required, currently 0-1). Will self-resolve in 2-4 weeks at 5/day signal rate.
-- **Phase G Gold Leveraged Stack** + dashboard/storage infra all merged via `b242a73` (today): hierarchical Strategies page (task #133, schema v6 facets_json), broker-grouped fees (#141), 181-test extreme dashboard suite (#146), dark theme + combined comparison + progress bar + glossary (#151), swift_alma_v2 (#131/#132). Earlier wave (`4dd1cce`, 2026-04-14) shipped SWIFT/cost-fix/walk-forward retunes.
-**Next session target:** Monitor meta-label live gate via `python3 scripts/meta_label_shadow_check.py --verbose`. Once any strategy hits ≥20 live rows, flip with `./scripts/promote_meta_label.sh --to live`. Research queue: task #116 (better leveraged strategy), task #78 G.6 (adaptive leverage governor ML — needs live trade history). Phase 4 cTrader paper-clock pending Spotware KYC.
-**Engine status:** Paper trading running via launchd, HEALTHY. M3S authoritative, meta-label advisory.
+**Active phase:** Session 23 Day 1 deliverables shipped:
+- **G.3 Day 1-7** **IN PROGRESS** since 2026-04-18 07:35 UTC. Dual-engine topology via `com.algo-trading.engine` (`--broker binance`) + new `com.algo-trading.engine-gold` (`--broker ic_markets_ctrader --engine-name gold`). Gold engine HEALTHY; received its first live XAUUSD candle @ 4830.56 before weekend market close. Continuous flow resumes Sun 22:00 UTC.
+- **Meta-label 6h polling plist** `com.algo-trading.meta-label-shadow-check` + `scripts/meta_label_shadow_gate_watch.sh` wrapper live. Current gate state BLOCKED_COLD_START; fires macOS notification once any strategy hits ≥20 live rows with PASS rolling_auc.
+- **Task #116 swift_alma_v2** WF across all 5 leverage modes complete → all RESEARCH_ONLY. Obituary + graveyard entry pending.
+- **Phase 3b-2 M3S** AUTHORITATIVE (commit `01e5d39`).
+- **Phase 3c meta-labeling** ADVISORY mode (commit `a6fc4ff`). Live veto gate cold-start blocked (0-1 rows).
+- **Phase G Gold Leveraged Stack** + dashboard/storage infra merged via `b242a73`.
+**Next session target:** Watch G.3 Day 1-7 tick flow when Sunday open arrives; write `docs/strategy_obituaries/strategy_swift_alma_v2.md` + add entry to `project_dead_strategies.md`; close task #116 in ROADMAP; open task #116b for replacement leveraged-strategy research (could inherit regime/session filters from v2, scrap ALMA core).
+**Engine status:** Dual-engine HEALTHY. Crypto engine (PID variable) Binance altcoins + funding_carry, equity $10,143.67, 43k+ ticks/h. Gold engine (PID variable) IC Markets cTrader demo, $10k initial equity, 2 spot ticks + 1 candle pre-weekend-close, asleep until Monday open.
 **Test suite:** 1525 passing on main (post-merge). Dashboard fee-dropdown tests required local `data/trades.db` to be seeded with v6 `strategy_versions.facets_json` rows (copied from gold worktree's db + 62 deep_backtest reports — gitignored data, working-tree-specific).
 **Portfolio:** bb_rsi_mr_opt 40% / donchian_ensemble_adx 30% / vol_momentum 30% + funding_carry live on main. Gold institutional sub-book: `donchian_gold` (L=15 RISK_SCALED, return engine) + `vol_momentum_gold` (L=10-15 MARGIN_CAPPED, diversifier). SWIFT excluded per task #111 verdict.
 **Meta-label training:** 2,819 harvested audit rows from backtests; 4 LR models trained with 24-key feature schema; LightGBM rejected by A/B sanity check. (Unchanged from yesterday.)
