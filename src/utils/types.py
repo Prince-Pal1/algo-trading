@@ -98,6 +98,29 @@ class OrderBookSnapshot(msgspec.Struct):
     timestamp: int
 
 
+# ── Event-driven (Binance Futures !forceOrder stream) ──────────────────────
+
+
+class LiquidationEvent(msgspec.Struct, frozen=True):
+    """A forced-liquidation fill emitted by a perpetual futures exchange.
+
+    Binance publishes these on the `!forceOrder@arr` stream for USD-M
+    perpetuals. Each event is one side of a liquidated position (the
+    exchange filled the position as a market order to cover margin).
+
+    Fields map to Binance's ProtoForceOrder payload:
+      side="BUY"  means a short got liquidated (exchange bought to cover)
+      side="SELL" means a long got liquidated (exchange sold to cover)
+    """
+    symbol: str
+    side: str               # "BUY" (short liq'd) or "SELL" (long liq'd)
+    price: float            # avg fill price
+    quantity: float         # quantity in base units (e.g. BTC)
+    notional_usd: float     # price × quantity
+    timestamp: int          # unix ms
+    exchange: str = "binance_futures"
+
+
 # ── Signals ────────────────────────────────────────────────────────────────
 
 
