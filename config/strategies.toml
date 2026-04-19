@@ -159,6 +159,34 @@ long_only = false
 regime_filter_window = 90
 min_funding_std_bps = 0.3
 
+[liquidation_cascade]
+# Session 23 Strategy 3 — liquidation cascade reversion (Backlog #6).
+# Fades forced-liquidation cascades on BTCUSDT 1m. Detects via extreme
+# negative 1m return z-score (>4σ) with abs move >50 bps; enters LONG,
+# exits on SL -200/TP +100/30-min time-stop. Economic viability
+# requires Binance perpetual futures fees (0.04%/side); on spot
+# (0.10%/side), commission drag eats most of the edge.
+#
+# Stage 1 research (2026-04-19, 6.5mo BTC 1m):
+#   71 cascade events detected (10.7/month)
+#   66.2% retrace 50% within 30 min
+#   Best config (SL -200/TP +100/30m): Sharpe +0.138 per trade,
+#     57.7% win rate, +9.6% gross over 6.5mo
+# Stages 2-7 pending. Shipping in shadow AFTER Stage 7 pass.
+enabled = false
+risk_profile = "SAFE"
+markets = ["BTCUSDT"]
+timeframe = "1m"
+max_risk_per_trade = 0.01
+cascade_sigma = 4.0
+cascade_min_move_bps = 50.0
+rolling_window_bars = 1440           # 1 day of 1m bars for std reference
+sl_bps = 200.0                       # stop 200 bps below entry
+tp_bps = 100.0                       # take profit 100 bps above entry
+max_hold_bars = 30                   # 30-min time stop
+cooldown_bars = 60                   # 1h gap between trades
+long_only = true                     # only fade down-cascades for now
+
 [clenow_momentum]
 # Strategy B — Cross-Sectional Altcoin Momentum (Clenow) — 💀 KILLED AT B.3
 # Obituary: docs/strategy_obituaries/strategy_b_clenow_momentum.md

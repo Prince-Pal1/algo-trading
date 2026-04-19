@@ -240,6 +240,17 @@ def _load_strategies() -> None:
     except ImportError:
         pass
 
+    # Session 23 Strategy 3 — liquidation cascade reversion. Event-driven
+    # edge on BTCUSDT 1m: fade forced-liquidation overshoots when a
+    # cascade fires (extreme -σ 1m return z-score).
+    try:
+        from src.strategies.event_driven.liquidation_cascade import (
+            LiquidationCascadeStrategy,
+        )
+        register_strategy("liquidation_cascade", LiquidationCascadeStrategy)
+    except ImportError:
+        pass
+
     # Task #141 — smoke_demo is a minimal SMA crossover used ONLY by
     # scripts/smoke_test_dashboard.py to exercise the full pipeline
     # end-to-end. Registered so the dashboard page 7 picker lists it.

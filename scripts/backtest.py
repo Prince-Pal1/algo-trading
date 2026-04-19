@@ -31,6 +31,7 @@ from src.strategies.scalping.ema_crossover_wf import WalkForwardEMA
 from src.strategies.trend_following.donchian_ensemble import DonchianEnsembleStrategy
 from src.strategies.stat_arb.btc_neutral_mr import BTCNeutralMRStrategy
 from src.strategies.momentum.vol_momentum import VolMomentumStrategy
+from src.strategies.event_driven.liquidation_cascade import LiquidationCascadeStrategy
 from src.utils.types import Signal, SignalAction
 
 
@@ -210,6 +211,19 @@ BACKTEST_PRESETS: dict[str, dict] = {
             slow_min=30, slow_max=200, slow_step=10,
             fee_per_trade=0.001, hard_stop_pct=0.05,
             long_only=True,
+        ),
+        "indicators": [],
+    },
+    # Session 23 Strategy 3 — liquidation cascade reversion.
+    # Stage 1 research showed best config: SL -200 / TP +100 bps / 30m hold.
+    # Strategy computes 1-minute returns + rolling std internally; no
+    # indicators needed from feature_engine.
+    "liquidation_cascade": {
+        "factory": lambda tf: LiquidationCascadeStrategy(
+            name="liquidation_cascade", markets=["BTCUSDT"], timeframe=tf,
+            cascade_sigma=4.0, cascade_min_move_bps=50.0,
+            rolling_window_bars=1440, sl_bps=200.0, tp_bps=100.0,
+            max_hold_bars=30, cooldown_bars=60, long_only=True,
         ),
         "indicators": [],
     },
