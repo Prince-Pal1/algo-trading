@@ -149,8 +149,11 @@ def stage_6_portfolio(df: pd.DataFrame, schedule) -> dict:
     }
 
 
-def stage_7_wf(df: pd.DataFrame, schedule, n_folds: int = 7) -> dict:
+def stage_7_wf(df: pd.DataFrame, schedule, n_folds: int = 7,
+               strategy_params: dict | None = None) -> dict:
     print(f"\n=== Stage 7 — {n_folds}-fold Walk-Forward OOS ===\n")
+    if strategy_params:
+        print(f"  strategy params override: {strategy_params}\n")
     chunks = np.array_split(df, n_folds)
     fold_results = []
     all_trade_returns: list[float] = []
@@ -160,7 +163,7 @@ def stage_7_wf(df: pd.DataFrame, schedule, n_folds: int = 7) -> dict:
         if len(chunk_df) < 100:  # need warmup
             print(f"  fold {i+1}: skipped (only {len(chunk_df)} bars)")
             continue
-        trades = simulate(chunk_df, fee_schedule=schedule)
+        trades = simulate(chunk_df, fee_schedule=schedule, strategy_params=strategy_params)
         if not trades:
             print(f"  fold {i+1}: 0 trades in window")
             fold_results.append({"fold": i+1, "n": 0, "return_pct": 0.0,
@@ -217,9 +220,23 @@ def main() -> int:
     parser.add_argument("--broker", default="binance_perpetual_futures")
     parser.add_argument("--scenario", default="normal")
     parser.add_argument("--folds", type=int, default=7)
+    parser.add_argument("--min-std-bps", type=float, default=0.0,
+                        help="Regime filter threshold (30-day funding std in bps). 0 = off.")
+    parser.add_argument("--quantile-window", type=int, default=90)
+    parser.add_argument("--high-quantile", type=float, default=0.90)
+    parser.add_argument("--atr-sl-mult", type=float, default=2.5)
+    parser.add_argument("--cooldown-bars", type=int, default=2)
     parser.add_argument("--out", type=Path,
                         default=Path("reports/funding_mr_stage34/wf_portfolio.json"))
     args = parser.parse_args()
+    params = dict(
+        quantile_window=args.quantile_window,
+        high_quantile=args.high_quantile, low_quantile=1 - args.high_quantile,
+        mid_quantile=0.50,
+        atr_sl_mult=args.atr_sl_mult, max_hold_bars=6,
+        cooldown_bars=args.cooldown_bars,
+        min_funding_std_bps=args.min_std_bps,
+    )
 
     print("=== Funding MR Stage 6 + 7 validation ===\n")
     df = load_data()
@@ -230,7 +247,7 @@ def main() -> int:
     ).commission_schedule
 
     s6 = stage_6_portfolio(df, schedule)
-    s7 = stage_7_wf(df, schedule, n_folds=args.folds)
+    s7 = stage_7_wf(df, schedule, n_folds=args.folds, strategy_params=params)
 
     verdict = "PASS" if (s6["corr_gate"] and s7["fold_gate"] and s7["calmar_gate"]) else "PARTIAL"
     print(f"\n=== OVERALL Stage 6+7: {verdict} ===")

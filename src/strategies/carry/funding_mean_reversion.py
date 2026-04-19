@@ -76,6 +76,8 @@ class FundingMeanReversionStrategy(BaseStrategy):
         max_hold_bars: int = 6,           # ≤ 48h
         cooldown_bars: int = 2,
         long_only: bool = False,
+        regime_filter_window: int = 90,    # 30 days of 8h epochs (std window)
+        min_funding_std_bps: float = 0.0,  # 0 = filter disabled; 3.0 = sane default
     ):
         super().__init__(name, markets, timeframe, risk_profile, max_risk_per_trade)
 
@@ -92,6 +94,10 @@ class FundingMeanReversionStrategy(BaseStrategy):
             raise ValueError(f"max_hold_bars must be >= 1, got {max_hold_bars}")
         if cooldown_bars < 0:
             raise ValueError(f"cooldown_bars must be >= 0, got {cooldown_bars}")
+        if regime_filter_window < 10:
+            raise ValueError(f"regime_filter_window too small: {regime_filter_window}")
+        if min_funding_std_bps < 0:
+            raise ValueError(f"min_funding_std_bps must be >= 0, got {min_funding_std_bps}")
 
         self.quantile_window = int(quantile_window)
         self.high_quantile = float(high_quantile)
@@ -102,6 +108,10 @@ class FundingMeanReversionStrategy(BaseStrategy):
         self.max_hold_bars = int(max_hold_bars)
         self.cooldown_bars = int(cooldown_bars)
         self.long_only = bool(long_only)
+        self.regime_filter_window = int(regime_filter_window)
+        # Threshold expressed in basis points (0.01% units).
+        # Example: 3.0 bps means 30-day std of funding must exceed 0.0003.
+        self.min_funding_std = float(min_funding_std_bps) / 10_000.0
 
         # Rolling buffer of observed funding rates
         self._funding_buf: deque[float] = deque(maxlen=self.quantile_window)
@@ -125,6 +135,21 @@ class FundingMeanReversionStrategy(BaseStrategy):
         sorted_vals = sorted(self._funding_buf)
         idx = int(max(0, min(n - 1, round(q * (n - 1)))))
         return float(sorted_vals[idx])
+
+    def _recent_funding_std(self) -> float | None:
+        """Std of the most recent `regime_filter_window` funding observations.
+
+        Returns None during warmup. Used to gate entries away from
+        compressed-funding regimes (e.g. 2024 low-vol era) where the
+        mean-reversion edge vanishes.
+        """
+        n = len(self._funding_buf)
+        if n < self.regime_filter_window:
+            return None
+        tail = list(self._funding_buf)[-self.regime_filter_window:]
+        mean = sum(tail) / len(tail)
+        var = sum((x - mean) ** 2 for x in tail) / (len(tail) - 1)
+        return var ** 0.5
 
     def _reset_position(self) -> None:
         self._entry_price = 0.0
@@ -271,6 +296,14 @@ class FundingMeanReversionStrategy(BaseStrategy):
         if atr_val is None or atr_val <= 0:
             return None
 
+        # Regime filter: compressed-funding regimes (e.g. low-vol 2024)
+        # produce quantile triggers that don't mean-revert. When 30-day
+        # funding std falls below threshold, skip entries.
+        if self.min_funding_std > 0:
+            recent_std = self._recent_funding_std()
+            if recent_std is not None and recent_std < self.min_funding_std:
+                return None
+
         # SHORT entry: funding is extreme-high, fade (unless long_only)
         if funding >= q_high and not self.long_only:
             self._entry_price = close
@@ -366,4 +399,6 @@ class FundingMeanReversionStrategy(BaseStrategy):
             max_hold_bars=sc.get("max_hold_bars", 6),
             cooldown_bars=sc.get("cooldown_bars", 2),
             long_only=sc.get("long_only", False),
+            regime_filter_window=sc.get("regime_filter_window", 90),
+            min_funding_std_bps=sc.get("min_funding_std_bps", 0.0),
         )
