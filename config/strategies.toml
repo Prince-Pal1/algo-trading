@@ -212,12 +212,14 @@ cooldown_bars = 0
 # G.3 schedule: Day 8-14 L=5, Day 15-21 L=10, Day 22-28 L=25, Day 29-30 L=80).
 # Phase 4 WF baseline: Calmar 13.68 OOS, Sharpe 2.93, 5/6 folds profitable.
 #
-# DISABLED 2026-04-22: cTrader partial-bar bug caused 86 flip-flop trades
-# over 42h (−1.84% account). Root cause: icmarkets_feed.py emits every
-# trendbar update as closed=True; strategies re-evaluate on every partial
-# bar update. Fix in progress (feed + feature_engine dedup). Re-enable
-# after Layer 4 tests pass + 24h clean observation.
-enabled = false
+# Re-enabled 2026-04-22 after cTrader partial-bar fix (commit 79a84c9).
+# Root cause: icmarkets_feed.py hardcoded closed=True on every trendbar
+# update, causing strategies to re-evaluate 17+ times per 1h bar. Fixed
+# with per-(symbol, tf) in-progress-bar tracker (emit only on bar
+# transition) + FeatureEngine timestamp-monotonicity dedup.
+# 24h observation window 2026-04-22 → 2026-04-23: expect ≤10 trades
+# (not 86/42h) and no flip-flop pairs <5min apart.
+enabled = true
 risk_profile = "MODERATE"
 markets = ["XAUUSD"]
 timeframe = "1h"
@@ -227,8 +229,8 @@ max_risk_per_trade = 0.01
 [vol_momentum_gold]
 # G.3 Day 1-7: shadow paper on IC Markets cTrader demo. L=1 (ramps per G.3 schedule).
 # Phase 4 WF baseline: Calmar 11.22 OOS, Sharpe 1.98, 4/6 folds profitable.
-# DISABLED 2026-04-22 — see [donchian_gold] note above.
-enabled = false
+# Re-enabled 2026-04-22 — see [donchian_gold] note above for fix details.
+enabled = true
 risk_profile = "MODERATE"
 markets = ["XAUUSD"]
 timeframe = "1h"
