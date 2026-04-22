@@ -97,6 +97,21 @@ class TradingEngine:
             )
             log.info("feed_configured", broker=broker_id,
                      symbols=[s.upper() for s in symbols], timeframes=timeframes)
+        elif broker_id == "binance_perpetual_futures":
+            # USD-M perpetuals use fstream.binance.com / stream.binancefuture.com
+            # Testnet routing driven by BINANCE_FUTURES_TESTNET env var.
+            import os
+            use_testnet = os.environ.get("BINANCE_FUTURES_TESTNET", "true").lower() == "true"
+            self.feed = BinanceWebSocketFeed(
+                symbols=symbols,
+                timeframes=timeframes,
+                testnet=use_testnet,
+                needed_pairs=needed_pairs,
+                use_futures_stream=True,
+            )
+            log.info("feed_configured", broker=broker_id, testnet=use_testnet,
+                     use_futures_stream=True,
+                     kline_streams=len(needed_pairs) if needed_pairs else "all")
         else:
             binance_cfg = get_config().get_exchange("binance")
             use_testnet = binance_cfg.get("testnet", False)
@@ -525,7 +540,7 @@ class TradingEngine:
         return {
             "tick_count": self._tick_count,
             "candle_count": self._candle_count,
-            "open_positions": len(self.paper_executor._positions) if self.paper_executor else 0,
+            "open_positions": len(getattr(self.paper_executor, "_positions", {})) if self.paper_executor else 0,
             "equity": self.paper_executor.equity if self.paper_executor else 0,
             "last_candle_time": self._last_candle_time,
             "risk_server_ok": self.risk_client is not None,
@@ -636,12 +651,50 @@ class TradingEngine:
         # Initialize storage
         await self.storage.init()
 
-        # Initialize strategy router + paper executor + risk client
-        self.paper_executor = PaperExecutor(storage=self.storage)
-        restored = self.paper_executor.restore_state()
-        if restored:
-            log.info("paper_positions_restored", count=restored,
-                     equity=round(self.paper_executor.equity, 2))
+        # Initialize strategy router + executor (paper OR live futures) + risk client.
+        # For Binance perpetual futures, the executor talks to real Binance endpoints
+        # with real API keys — requires explicit allow_live_trading=true in the
+        # [engine_perp] section of config/settings.toml.
+        if self.broker_id == "binance_perpetual_futures":
+            from src.execution.binance_futures_client import (
+                BinanceFuturesClient,
+                BinanceFuturesConfig,
+                BinanceFuturesUserDataFeed,
+            )
+            from src.execution.binance_futures_account import BinanceFuturesAccountManager
+            from src.execution.binance_futures_executor import BinanceFuturesExecutor
+
+            futures_cfg = BinanceFuturesConfig.from_env()
+            self._binance_client = BinanceFuturesClient(futures_cfg)
+            await self._binance_client.__aenter__()
+            self._binance_account = BinanceFuturesAccountManager(self._binance_client)
+            self._binance_user_stream = BinanceFuturesUserDataFeed(self._binance_client)
+
+            # Safety flags from config (default: paranoid — caps + testnet)
+            settings = cfg.settings if hasattr(cfg, "settings") else {}
+            engine_perp = settings.get("engine_perp", {}) if isinstance(settings, dict) else {}
+            allow_live = bool(engine_perp.get("allow_live_trading", False))
+            max_notional = float(engine_perp.get("max_order_notional_usd", 200.0))
+
+            self.paper_executor = BinanceFuturesExecutor(
+                self._binance_client, self._binance_account, self._binance_user_stream,
+                allow_live_trading=allow_live,
+                max_order_notional_usd=max_notional,
+                rate_limit_per_symbol_per_min=10,
+                fill_timeout_s=5.0,
+            )
+            await self.paper_executor.init()  # ping + account check + reconcile positions
+            # User-data WS runs as a background task for fill confirmations
+            self._user_stream_task = asyncio.create_task(self._binance_user_stream.start())
+            log.info("binance_futures_executor_started",
+                     testnet=futures_cfg.testnet, allow_live=allow_live,
+                     max_notional=max_notional)
+        else:
+            self.paper_executor = PaperExecutor(storage=self.storage)
+            restored = self.paper_executor.restore_state()
+            if restored:
+                log.info("paper_positions_restored", count=restored,
+                         equity=round(self.paper_executor.equity, 2))
         self.strategy_router = StrategyRouter.from_config(storage=self.storage)
 
         # Connect to risk server (fail-closed if unreachable)
@@ -708,14 +761,34 @@ class TradingEngine:
         # 1. Stop feed (no new data)
         await self.feed.stop()
 
-        # 2. Persist paper executor state (positions + equity)
-        if self.paper_executor:
+        # 2. Persist paper executor state (positions + equity).
+        # BinanceFuturesExecutor doesn't need this — positions live on Binance's
+        # side (reconciled via REST on boot) and _persist_* methods don't exist.
+        if self.paper_executor and hasattr(self.paper_executor, "_persist_equity"):
             self.paper_executor._persist_equity()
             for pos in self.paper_executor._positions.values():
                 self.paper_executor._persist_position(pos)
             log.info("paper_state_persisted",
                      positions=len(self.paper_executor._positions),
                      equity=round(self.paper_executor.equity, 2))
+
+        # 2b. Shut down Binance Futures client + user-data stream
+        if hasattr(self, "_binance_user_stream") and self._binance_user_stream is not None:
+            try:
+                await self._binance_user_stream.stop()
+            except Exception as e:
+                log.warning("user_stream_stop_failed", error=str(e))
+            if hasattr(self, "_user_stream_task") and self._user_stream_task is not None:
+                self._user_stream_task.cancel()
+                try:
+                    await self._user_stream_task
+                except asyncio.CancelledError:
+                    pass
+        if hasattr(self, "_binance_client") and self._binance_client is not None:
+            try:
+                await self._binance_client.__aexit__(None, None, None)
+            except Exception as e:
+                log.warning("binance_client_close_failed", error=str(e))
 
         # 3. Persist M3S state and stop scheduler (sub-phase 0.8)
         if self.m3s is not None and self.m3s_store is not None:
@@ -776,7 +849,7 @@ class TradingEngine:
             ticks=self._tick_count,
             candles=self._candle_count,
             features=self._feature_count,
-            executor_stats=self.paper_executor.stats if self.paper_executor else {},
+            executor_stats=getattr(self.paper_executor, "stats", {}) if self.paper_executor else {},
         )
 
     def print_status(self) -> None:
@@ -834,16 +907,38 @@ _CTRADER_NATIVE_SYMBOLS = {"XAUUSD", "XAGUSD", "EURUSD", "GBPUSD", "USDJPY"}
 def _symbol_belongs_to_broker(symbol: str, broker_id: str) -> bool:
     """Return True if this symbol should be routed through the given broker.
 
-    IC Markets cTrader handles FX + metals (upper-case). Binance handles
-    crypto spot pairs (lower-case, *USDT). Everything else is broker-neutral
-    and only matched to Binance by default — the altcoin universe is the
-    historical home.
+    IC Markets cTrader handles FX + metals (upper-case). Binance (spot or
+    perpetual-futures) handles crypto pairs (lower-case, *USDT). Everything
+    else is broker-neutral and only matched to Binance by default — the
+    altcoin universe is the historical home.
     """
     s = symbol.upper()
     if broker_id == "ic_markets_ctrader":
         return s in _CTRADER_NATIVE_SYMBOLS
-    # binance (default)
+    # binance (spot OR perpetual_futures) — both handle crypto USDT pairs
     return s not in _CTRADER_NATIVE_SYMBOLS
+
+
+def _strategy_belongs_to_broker(strat_cfg: dict, broker_id: str) -> bool:
+    """True if a strategy should run on the given broker.
+
+    Strategies can explicitly declare `broker = "binance_perpetual_futures"`
+    in their config section to force-route to the perp engine. Without an
+    explicit field, falls back to symbol-based routing (crypto → Binance
+    spot, XAUUSD-class → IC Markets).
+    """
+    explicit = strat_cfg.get("broker")
+    if explicit:
+        return explicit == broker_id
+    # Default: symbol-based routing. Spot binance is the DEFAULT bucket
+    # for crypto when no explicit broker is set, so perp-engine only picks
+    # up strategies that explicitly request it.
+    if broker_id == "binance_perpetual_futures":
+        return False  # don't auto-route anything here without explicit opt-in
+    markets = strat_cfg.get("markets", [])
+    if not markets:
+        return False
+    return _symbol_belongs_to_broker(markets[0], broker_id)
 
 
 def _get_symbols_from_config(broker_id: str | None = None) -> list[str]:
@@ -885,6 +980,8 @@ def _get_needed_pairs_from_config(broker_id: str | None = None) -> set[tuple[str
     for _name, strat in cfg.strategies.items():
         if not strat.get("enabled", False):
             continue
+        if not _strategy_belongs_to_broker(strat, broker_id):
+            continue  # routed to a different broker via explicit or symbol-based rules
         tf = strat.get("timeframe")
         if not tf:
             continue
@@ -892,8 +989,6 @@ def _get_needed_pairs_from_config(broker_id: str | None = None) -> set[tuple[str
             m = market.upper()
             if "-CARRY" in m or "-SYNTH" in m:
                 continue  # synthetic symbols — served by dedicated feeds
-            if not _symbol_belongs_to_broker(market, broker_id):
-                continue  # owned by a different broker
             # IC Markets symbols are upper-case (XAUUSD); Binance lower (btcusdt).
             normalized = m if broker_id == "ic_markets_ctrader" else market.lower()
             pairs.add((normalized, tf))

@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.algo-trading.engine-perp</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Frameworks/Python.framework/Versions/3.11/bin/python3</string>
+        <string>-m</string>
+        <string>src.main</string>
+        <string>--broker</string>
+        <string>binance_perpetual_futures</string>
+        <string>--engine-name</string>
+        <string>perp</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/prince/algo-trading</string>
+
+    <!-- NOT RunAtLoad. We want this to require an explicit `launchctl kickstart`
+         after config validation, NOT auto-start on system boot. Prevents a
+         reboot from silently reviving a misconfigured live-trading engine. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- KeepAlive stays true so crashes during live trading restart the
+         engine with watchdog-style recovery. Paired with BinanceFuturesExecutor's
+         init() reconciling positions from Binance's side on every restart. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/prince/algo-trading/data/logs/engine_perp.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/prince/algo-trading/data/logs/engine_perp_err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>/Users/prince/algo-trading</string>
+    </dict>
+</dict>
+</plist>

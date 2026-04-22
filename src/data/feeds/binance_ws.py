@@ -34,10 +34,20 @@ OnCandle = Callable[[Candle], Coroutine[Any, Any, None]]
 
 
 class BinanceWebSocketFeed:
-    """Async Binance WebSocket client for trade ticks and kline streams."""
+    """Async Binance WebSocket client for trade ticks and kline streams.
 
+    Supports two stream families:
+      - Spot (default): stream.binance.com / testnet.binance.vision
+      - USD-M Perpetual Futures (use_futures_stream=True):
+        fstream.binance.com / stream.binancefuture.com
+    """
+
+    # Spot URLs
     BASE_URL = "wss://stream.binance.com:9443/ws"
     TESTNET_URL = "wss://testnet.binance.vision/ws"
+    # Futures URLs (USD-M Perpetual)
+    FUTURES_BASE_URL = "wss://fstream.binance.com/ws"
+    FUTURES_TESTNET_URL = "wss://stream.binancefuture.com/ws"
     RECONNECT_BASE = 1.0   # initial backoff seconds
     RECONNECT_MAX = 60.0   # max backoff seconds
     RECONNECT_JITTER = 0.1 # 10% jitter
@@ -48,10 +58,12 @@ class BinanceWebSocketFeed:
         timeframes: list[str] | None = None,
         testnet: bool = True,
         needed_pairs: set[tuple[str, str]] | None = None,
+        use_futures_stream: bool = False,
     ):
         self.symbols = [s.lower() for s in symbols]
         self.timeframes = timeframes or ["1m"]
         self.testnet = testnet
+        self.use_futures_stream = use_futures_stream
         self._ws: ClientConnection | None = None
         self._running = False
         self._reconnect_delay = self.RECONNECT_BASE
@@ -81,17 +93,21 @@ class BinanceWebSocketFeed:
                     streams.append(f"{sym}@kline_{tf}")
         return streams
 
+    def _base_url(self) -> str:
+        """Select the right WebSocket base based on testnet + spot/futures flags."""
+        if self.use_futures_stream:
+            return self.FUTURES_TESTNET_URL if self.testnet else self.FUTURES_BASE_URL
+        return self.TESTNET_URL if self.testnet else self.BASE_URL
+
     @property
     def _url(self) -> str:
-        base = self.TESTNET_URL if self.testnet else self.BASE_URL
         streams = self._build_streams()
-        return f"{base}/{'/'.join(streams)}"
+        return f"{self._base_url()}/{'/'.join(streams)}"
 
     @property
     def _combined_url(self) -> str:
         """Use combined stream endpoint for multiple streams."""
-        base = self.TESTNET_URL if self.testnet else self.BASE_URL
-        base = base.replace("/ws", "/stream")
+        base = self._base_url().replace("/ws", "/stream")
         streams = self._build_streams()
         return f"{base}?streams={'/'.join(streams)}"
 

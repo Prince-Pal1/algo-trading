@@ -78,3 +78,22 @@ scale_sharpness = 8.0
 scale_mode = false
 reload_interval_seconds = 60
 model_dir = "data/models/meta_label"
+
+
+[engine_perp]
+# Config for the Binance USD-M Perpetual Futures live engine
+# (launchd plist com.algo-trading.engine-perp.plist). ONLY read when
+# --broker binance_perpetual_futures is passed to src.main.
+#
+# SAFETY: allow_live_trading MUST be true for BinanceFuturesExecutor to
+# even construct. Default here is false — must be an explicit opt-in
+# after testnet validation clears. Even with true, max_order_notional_usd
+# caps every order + a 10/min rate limit + 5s fill timeout apply.
+#
+# Additional env vars required in .env (NOT in this file — keys don't
+# belong in version control):
+#   BINANCE_FUTURES_API_KEY
+#   BINANCE_FUTURES_API_SECRET
+#   BINANCE_FUTURES_TESTNET=true  (keep true until manual gate to mainnet)
+allow_live_trading = false
+max_order_notional_usd = 200.0
