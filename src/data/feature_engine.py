@@ -279,13 +279,36 @@ class FeatureEngine:
             lambda: pd.DataFrame(columns=["open", "high", "low", "close", "volume", "timestamp"])
         )
 
+        # Per-(symbol, timeframe) last-processed candle timestamp. Defense-
+        # in-depth against any feed that regresses (e.g. cTrader's trendbar
+        # stream prior to the 2026-04-22 partial-bar fix). Monotonically
+        # increasing timestamps per pair is a hard invariant here — any
+        # candle with ts <= last is silently dropped.
+        self._last_ts: dict[tuple[str, str], int] = {}
+
         # Callback: emits (symbol, timeframe, latest_row_with_indicators)
         self.on_features: OnFeatures | None = None
         self._update_count = 0
+        self._dedup_dropped_count = 0
 
     async def handle_candle(self, candle: Candle) -> None:
         """Add candle to buffer, compute indicators, emit features."""
         key = (candle.symbol, candle.timeframe)
+
+        # Timestamp-monotonicity gate (defense against duplicate / stale feed events).
+        # First candle for a pair always passes (last_ts is None). Subsequent
+        # candles must have strictly greater timestamp.
+        last_ts = self._last_ts.get(key)
+        if last_ts is not None and candle.timestamp <= last_ts:
+            self._dedup_dropped_count += 1
+            log.debug(
+                "feature_engine_dedup_drop",
+                symbol=candle.symbol, tf=candle.timeframe,
+                ts=candle.timestamp, last_ts=last_ts,
+            )
+            return
+        self._last_ts[key] = candle.timestamp
+
         df = self._buffers[key]
 
         # In-place append — avoids full DataFrame copy from pd.concat

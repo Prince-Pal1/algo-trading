@@ -167,3 +167,75 @@ class TestNanHandling:
         row = collector.features[-1][2]
         # Should have close but indicators should be NaN or absent (not crash)
         assert row["close"] == 104.0
+
+
+class TestTimestampDedup:
+    """Regression tests for the 2026-04-22 cTrader partial-bar fix —
+    defense-in-depth at the FeatureEngine layer.
+    """
+
+    async def test_duplicate_timestamp_dropped(self):
+        """Same (symbol, tf, timestamp) fed twice → second one silently dropped."""
+        engine = FeatureEngine(indicators=["ema_9"])
+        collector = FeatureCollector()
+        engine.on_features = collector
+
+        c = _candle("BTCUSDT", "1h", 100.0, idx=5)  # ts = 18_000_000
+        await engine.handle_candle(c)
+        assert len(collector.features) == 1
+        assert engine._dedup_dropped_count == 0
+
+        # Second emission with same timestamp
+        await engine.handle_candle(c)
+        assert len(collector.features) == 1  # not emitted
+        assert engine._dedup_dropped_count == 1
+
+    async def test_backwards_timestamp_dropped(self):
+        """A candle with ts < last is dropped, not treated as a re-emission."""
+        engine = FeatureEngine(indicators=["ema_9"])
+        collector = FeatureCollector()
+        engine.on_features = collector
+
+        await engine.handle_candle(_candle("BTCUSDT", "1h", 100.0, idx=10))  # ts=36M
+        await engine.handle_candle(_candle("BTCUSDT", "1h", 99.0, idx=5))    # ts=18M < 36M
+        assert len(collector.features) == 1
+        assert engine._dedup_dropped_count == 1
+
+    async def test_different_pairs_have_independent_dedup(self):
+        """Dedup is per-(symbol, tf) — BTCUSDT ts=X doesn't block ETHUSDT ts=X."""
+        engine = FeatureEngine(indicators=["ema_9"])
+        collector = FeatureCollector()
+        engine.on_features = collector
+
+        await engine.handle_candle(_candle("BTCUSDT", "1h", 100.0, idx=5))
+        await engine.handle_candle(_candle("ETHUSDT", "1h", 200.0, idx=5))  # same ts, different symbol
+        assert len(collector.features) == 2
+        assert engine._dedup_dropped_count == 0
+
+        # But a second BTCUSDT at idx=5 IS dropped
+        await engine.handle_candle(_candle("BTCUSDT", "1h", 101.0, idx=5))
+        assert len(collector.features) == 2
+        assert engine._dedup_dropped_count == 1
+
+    async def test_different_timeframes_have_independent_dedup(self):
+        """Same symbol, different timeframe → independent dedup."""
+        engine = FeatureEngine(indicators=["ema_9"])
+        collector = FeatureCollector()
+        engine.on_features = collector
+
+        await engine.handle_candle(_candle("BTCUSDT", "1h", 100.0, idx=5))
+        # Same symbol + ts but different tf → not a duplicate
+        await engine.handle_candle(_candle("BTCUSDT", "1m", 100.0, idx=5))
+        assert len(collector.features) == 2
+        assert engine._dedup_dropped_count == 0
+
+    async def test_monotonic_progression_all_emit(self):
+        """Strictly increasing timestamps all pass through."""
+        engine = FeatureEngine(indicators=["ema_9"])
+        collector = FeatureCollector()
+        engine.on_features = collector
+
+        for i in range(10):
+            await engine.handle_candle(_candle("BTCUSDT", "1h", 100.0 + i, i))
+        assert len(collector.features) == 10
+        assert engine._dedup_dropped_count == 0

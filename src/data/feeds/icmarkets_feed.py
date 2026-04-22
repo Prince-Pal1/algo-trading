@@ -114,6 +114,15 @@ class ICMarketsFeed:
         self._running = False
         self._symbol_id_map: dict[str, int] = {}
 
+        # Per-(symbol, timeframe) latest trendbar — held until a NEW bar
+        # timestamp arrives, at which point the previous bar is emitted as
+        # finalized. cTrader's live-trendbar stream emits multiple updates
+        # per bar (partial bars) with the same utcTimestampInMinutes but
+        # accumulating volume/high/low/close. Without this tracker every
+        # partial update flows downstream as `closed=True`, which caused
+        # the 2026-04-22 rapid-flip-flop bug.
+        self._in_progress_bar: dict[tuple[str, str], "Candle"] = {}
+
         self.on_tick: OnTick | None = None
         self.on_candle: OnCandle | None = None
 
@@ -274,15 +283,25 @@ class ICMarketsFeed:
                     except Exception as e:
                         log.warning("icmarkets_tick_dispatch_failed", error=str(e))
         # ── Candle path (embedded trendbars) ──
+        # cTrader emits multiple partial updates per bar with the same
+        # timestamp. Only emit when a NEW bar timestamp arrives, meaning
+        # the previous bar is now finalized. Track the latest trendbar
+        # per (symbol, tf) in self._in_progress_bar.
         if self.on_candle is not None and loop is not None:
             for tb in event.trendbar:
                 candle = self._trendbar_to_candle(tb, symbol_name)
                 if candle is None:
                     continue
-                try:
-                    asyncio.run_coroutine_threadsafe(self.on_candle(candle), loop)
-                except Exception as e:
-                    log.warning("icmarkets_candle_dispatch_failed", error=str(e))
+                key = (candle.symbol, candle.timeframe)
+                prev = self._in_progress_bar.get(key)
+                if prev is not None and candle.timestamp > prev.timestamp:
+                    # New bar started — emit the previous one (finalized).
+                    try:
+                        asyncio.run_coroutine_threadsafe(self.on_candle(prev), loop)
+                    except Exception as e:
+                        log.warning("icmarkets_candle_dispatch_failed", error=str(e))
+                # Track the latest state of the current (in-progress) bar.
+                self._in_progress_bar[key] = candle
 
     def _trendbar_to_candle(self, tb, symbol_name: str) -> "Candle | None":
         """Decode a ProtoOATrendbar into a Candle.
