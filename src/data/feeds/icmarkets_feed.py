@@ -24,6 +24,7 @@ try:
         ProtoOAGetAccountListByAccessTokenRes,
         ProtoOASpotEvent,
         ProtoOASubscribeLiveTrendbarReq,
+        ProtoOASubscribeLiveTrendbarRes,
         ProtoOASubscribeSpotsReq,
         ProtoOASubscribeSpotsRes,
         ProtoOASymbolByIdReq,
@@ -215,6 +216,9 @@ class ICMarketsFeed:
             self._send_quiet(client, req)
             # Also subscribe to live trendbars for each configured timeframe
             # so the engine receives pre-assembled candles (no 1h wait).
+            # 2026-05-05: track pending subscribes; loudly log unacked ones —
+            # silent failure here caused 87h gold-engine STALE outage.
+            self._pending_trendbar_subs = set()
             for tf in self._timeframes:
                 period = _TIMEFRAME_TO_PROTO.get(tf)
                 if period is None:
@@ -224,11 +228,26 @@ class ICMarketsFeed:
                     tb_req.ctidTraderAccountId = self._ctid_trader_account_id
                     tb_req.symbolId = sid
                     tb_req.period = period
-                    self._send_quiet(client, tb_req)
+                    log.info("icmarkets_trendbar_subscribe_sent", symbol_id=sid, period=period, tf=tf)
+                    self._pending_trendbar_subs.add((sid, period))
+                    self._send_loud(client, tb_req, label=f"trendbar:{tf}:sid{sid}")
+            self._schedule_trendbar_ack_audit()
             return
 
         if isinstance(msg, ProtoOASubscribeSpotsRes):
             log.info("icmarkets_spot_subscribed")
+            return
+
+        if isinstance(msg, ProtoOASubscribeLiveTrendbarRes):
+            # ProtoOASubscribeLiveTrendbarRes carries no symbolId/period
+            # (just an ack). Drain one entry from pending — order roughly
+            # matches send order, so we drain in arbitrary FIFO. Operator
+            # cares about COUNT match, not pairing.
+            sid_period = None
+            if getattr(self, "_pending_trendbar_subs", None):
+                sid_period = self._pending_trendbar_subs.pop()
+            log.info("icmarkets_trendbar_subscribed", drained=str(sid_period),
+                     pending=len(getattr(self, "_pending_trendbar_subs", set())))
             return
 
         if isinstance(msg, ProtoOASpotEvent):
@@ -259,6 +278,46 @@ class ICMarketsFeed:
                 type=type(req).__name__,
                 reason=str(err.value) if hasattr(err, "value") else str(err),
             ))
+
+    def _send_loud(self, client: "Client", req, *, label: str) -> None:
+        """Like _send_quiet but errback logs at WARNING with a label.
+
+        Use for subscribe paths whose silent failure produces engine
+        degradation invisible in logs (e.g. trendbar subscribe — see
+        2026-05-05 87h gold engine outage).
+        """
+        d = client.send(req)
+        if d is not None:
+            d.addErrback(lambda err: log.warning(
+                "icmarkets_send_errback_loud",
+                label=label,
+                type=type(req).__name__,
+                reason=str(err.value) if hasattr(err, "value") else str(err),
+            ))
+
+    def _schedule_trendbar_ack_audit(self, delay_s: float = 30.0) -> None:
+        """Audit pending trendbar subscribes after delay_s.
+
+        If `_pending_trendbar_subs` is still non-empty after the window,
+        log a WARNING — Spotware accepted the subscribe req but never
+        sent the LiveTrendbarRes ack. Engine is degraded to tick-only
+        mode; trendbar candles will not arrive on this connection.
+        """
+        try:
+            from twisted.internet import reactor
+            reactor.callLater(delay_s, self._audit_pending_trendbar_subs)
+        except Exception as e:
+            log.warning("icmarkets_audit_schedule_failed", error=str(e))
+
+    def _audit_pending_trendbar_subs(self) -> None:
+        pending = getattr(self, "_pending_trendbar_subs", set())
+        if pending:
+            log.warning(
+                "icmarkets_trendbar_subscribe_unacked",
+                pending_count=len(pending),
+                pending=list(pending),
+                action="engine running tick-only — trendbar candles WILL NOT ARRIVE on this connection",
+            )
 
     def _handle_spot_event(self, event: "ProtoOASpotEvent") -> None:
         symbol_id = event.symbolId

@@ -40,7 +40,12 @@ max_risk_per_trade = 0.01       # 1% equity risk per trade
 max_notional_pct = 2.0          # max position = 2x equity
 
 [donchian_ensemble_adx]
-enabled = true
+# Disabled 2026-05-05 — 2 closed trades both ~−$100 (−$200 total, 0% WR), 2 still
+# open (ETH @ 2363, BNB @ 631 from May 4). Sample too small but per-trade loss
+# pattern concerning. Let the 2 opens close on their stops/targets via manual
+# close (Phase 3 of triage), then audit before re-enable.
+# See docs/investigations/2026-05-05_strategy_triage.md
+enabled = false
 risk_profile = "SAFE"
 # Trend-following works best on high-momentum, liquid altcoins
 markets = ["ETHUSDT", "BNBUSDT", "NEARUSDT", "AVAXUSDT", "XRPUSDT"]
@@ -105,7 +110,12 @@ max_trades_per_day = 2
 #   A.5 M3S integration: PASS
 #   Real data backtest (4.3 years): Sharpe 0.533 (soft pass, above 0.3 kill),
 #     +2.62% total return, 62 trades, max DD 0.36%
-enabled = true                  # ACTIVATED Session 22 after real-data backtest
+# Disabled 2026-05-05 — 5 trades, 0% WR, −$25.24, avg 62h hold. Either funding
+# rates regime-shifted or the entry filter is too eager. No edge captured live
+# despite real-data backtest Sharpe 0.533 + WF-OOS pass. Re-evaluate after a
+# 90d backtest replay against current regime.
+# See docs/investigations/2026-05-05_strategy_triage.md
+enabled = false
 risk_profile = "SAFE"
 markets = ["BTCUSDT-CARRY"]
 timeframe = "8h"
@@ -212,6 +222,11 @@ cooldown_bars = 0
 # G.3 schedule: Day 8-14 L=5, Day 15-21 L=10, Day 22-28 L=25, Day 29-30 L=80).
 # Phase 4 WF baseline: Calmar 13.68 OOS, Sharpe 2.93, 5/6 folds profitable.
 #
+# 2026-05-05 watch-list: live 8 trades / 8 days, 12.5% WR, avg duration 0.3h
+# (18 min) suggests stops too tight for gold tick noise. Re-tune sl_atr_mult
+# (currently default — see strategy implementation) after vol_momentum_gold
+# triage. Not disabled yet — sample size is small and loss is bounded.
+#
 # Re-enabled 2026-04-22 after cTrader partial-bar fix (commit 79a84c9).
 # Root cause: icmarkets_feed.py hardcoded closed=True on every trendbar
 # update, causing strategies to re-evaluate 17+ times per 1h bar. Fixed
@@ -230,7 +245,16 @@ max_risk_per_trade = 0.01
 # G.3 Day 1-7: shadow paper on IC Markets cTrader demo. L=1 (ramps per G.3 schedule).
 # Phase 4 WF baseline: Calmar 11.22 OOS, Sharpe 1.98, 4/6 folds profitable.
 # Re-enabled 2026-04-22 — see [donchian_gold] note above for fix details.
-enabled = true
+#
+# Disabled 2026-05-05 — 39 trades / 8 days, PF 0.11, 10.3% WR, −$166.75 total.
+# Crypto-twin `vol_momentum` at PF 3.60 same period — failure is gold-specific
+# (5.6× the trade frequency on hostile-to-strategy gold tick noise). Don't
+# re-enable until a `deep_backtest --strategy vol_momentum_gold --window 90d`
+# explains the divergence + a parameter fix shows PF > 1.2.
+# See docs/investigations/2026-05-05_strategy_triage.md
+# Open orphan: SHORT XAUUSD 0.1173 @ $4678.06 (Apr 27, frozen during 87h STALE).
+# Must be closed manually in trades_gold.db (Phase 3 of triage).
+enabled = false
 risk_profile = "MODERATE"
 markets = ["XAUUSD"]
 timeframe = "1h"

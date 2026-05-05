@@ -1,6 +1,40 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-04-18 (Session 23 Day 1 — G.3 Day 1 LAUNCHED live on cTrader demo via dual-engine topology; meta-label 6h polling plist + gate-clear notification wired; swift_alma_v2 killed across 5 leverage modes under task #116.)
+**Last updated:** 2026-05-05 (Session 24 — Live triage + engine stall fix: gold engine 87h STALE rooted in silent cTrader trendbar subscribe failure; patched icmarkets_feed.py + rewrote watchdog to multi-engine kickstart-based; disabled vol_momentum_gold + funding_carry + donchian_ensemble_adx; closed 3 orphan positions for net realized +$11.26.)
+
+## Session 24 — Live triage + engine stall fix (2026-05-05)
+
+After 8.5 days of paper trading, two interlocking failures surfaced: gold engine was STALE 87h with no alert, and 4 of 5 strategies were unprofitable. Combined portfolio at session start: $19,683.93 / −1.6%.
+
+**Track A — Gold engine 87h STALE root-caused + patched.** Investigation traced last gold candle to 2026-05-01 20:00 UTC. After Sun 22:27 UTC reconnect, spot ticks resubscribed cleanly but trendbar candles never returned. Root cause: `src/data/feeds/icmarkets_feed.py` had no handler for `ProtoOASubscribeLiveTrendbarRes` — silent subscribe failures degraded the engine to tick-only mode invisibly. Patches:
+- Added `ProtoOASubscribeLiveTrendbarRes` import + dispatch (logs `icmarkets_trendbar_subscribed` with pending count).
+- Added `_send_loud()` helper that errback-logs at WARNING (vs the existing `_send_quiet`'s debug level) for trendbar subscribe path.
+- Added 30s pending-subscribe sanity audit via Twisted `reactor.callLater` — logs `icmarkets_trendbar_subscribe_unacked` with `action="engine running tick-only — trendbar candles WILL NOT ARRIVE on this connection"` if acks don't drain.
+- Added `icmarkets_trendbar_subscribe_sent` info log per outgoing subscribe.
+
+**Track B — Watchdog v2 (multi-engine + launchctl kickstart).** Original `scripts/watchdog.py` only checked `data/heartbeat.json` (crypto), used a broken PID-file kill mechanism (no PID file ever written by the engines — `data/pids/` empty since project start), and had a 1800s candle-stale threshold that fires every hour spuriously for 1h-candle engines. Rewrote to:
+- Iterate over `[crypto, gold]` engine list; each entry has `heartbeat_path` + `launchd_label`.
+- Bumped `CANDLE_STALE_KICK_THRESHOLD` from 1800s → 7200s (1h candles need 2× grace).
+- Replaced `os.kill(pid, ...)` with `launchctl kickstart -k gui/<uid>/<label>` — works without PID files; KeepAlive=true respawns automatically.
+- Added macOS `osascript` notification on STALE alongside `alerts.log` write.
+- Added 600s kick cooldown to prevent thrash.
+
+**Track C — Strategy triage.** 5 of 5 production strategies analyzed via `scripts/generate_portfolio_report.py`:
+- ✅ `vol_momentum` (crypto): 7 trades, PF 3.60, +$111.13 — only structural winner. KEPT, scale-up planned next sprint.
+- 💀 `vol_momentum_gold`: 39 trades / 8 days (5.4× crypto twin frequency on hostile gold tick noise), PF 0.11, −$166.75. **DISABLED.** Gate: `deep_backtest --strategy vol_momentum_gold --window 90d` must show OOS PF > 1.2 to re-enable.
+- 💀 `funding_carry`: 5 trades, 0% WR, −$25.24. Live runs 14× more frequently than backtest — entry filter too eager OR regime drift OR feed misalignment. **DISABLED.** Gate: 90d backtest replay Sharpe > 0.3 OOS.
+- 💀 `donchian_ensemble_adx`: 2 closed (both −$100ish), 0% WR, 2 open. **DISABLED.** Re-evaluate in 2 weeks.
+- ⚠️ `donchian_gold`: 8 trades, 12.5% WR, avg duration 0.3h (stops too tight for gold tick noise). **KEPT + watch-listed.** Re-tune `sl_atr_mult` next sprint.
+
+**Track D — Open position cleanup.** 3 orphaned positions surfaced after disabling owning strategies (engine doesn't run on_candle for disabled strategies, so positions can't auto-exit). New utility `scripts/operational/close_orphan_positions.py` (gated by `--apply`, requires engines stopped, writes DB backup before mutation). Synthetic close at current paper-position `current_price`:
+- `vol_momentum_gold` SHORT XAUUSD 0.117 @ 4678 → BUY @ 4557 = **+$13.41**
+- `donchian_ensemble_adx` BUY ETHUSDT 0.387 @ 2363 → SELL @ 2380 = **+$5.17**
+- `donchian_ensemble_adx` BUY BNBUSDT 2.386 @ 631 → SELL @ 628 = **−$7.32**
+- Combined realized: **+$11.26**
+
+**Final state:** crypto $9,883.16 / gold $9,812.03 / combined $19,695.19 (−1.52% from $20k initial). 0 open positions across both engines. Watchdog v2 + patched icmarkets_feed live. Investigation writeups at `docs/investigations/2026-05-05_portfolio_postmortem.md` + `docs/investigations/2026-05-05_strategy_triage.md`. Backups at `data/trades.db.bak.20260505T114004Z` + `data/trades_gold.db.bak.20260505T114005Z`.
+
+**Still open after this session:** Backtest replays of disabled strategies (vol_momentum_gold + funding_carry, donchian_gold sl_atr_mult sweep) before re-enable decision. M3S allocator wire-into-live-sizing. STATE/ROADMAP cadence enforcement.
 
 ## Session 23 Day 1 — G.3 Day 1 launch + dual-engine + task #116 kill (2026-04-18)
 

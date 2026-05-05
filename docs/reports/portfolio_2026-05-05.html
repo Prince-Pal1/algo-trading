@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Portfolio Report — 2026-05-05</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; max-width: 1400px; margin: 0 auto; padding: 24px; line-height: 1.5; }
+  h1 { color: #f0f6fc; border-bottom: 2px solid #30363d; padding-bottom: 12px; }
+  h2 { color: #58a6ff; margin-top: 36px; padding-top: 12px; border-top: 1px solid #21262d; }
+  h3 { color: #d2a8ff; margin: 0 0 12px 0; font-size: 14px; }
+  .summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 24px 0; }
+  .card { background: #161b22; padding: 20px; border-radius: 8px; border: 1px solid #30363d; }
+  .card.portfolio { border-color: #58a6ff; background: #0e1a2c; }
+  .big { font-size: 32px; font-weight: 700; margin: 8px 0; }
+  .small { font-size: 12px; color: #8b949e; margin-bottom: 8px; }
+  .kv { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #21262d; font-size: 13px; }
+  .kv:last-child { border-bottom: none; }
+  .pos { color: #56d364; }
+  .neg { color: #f85149; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 13px; }
+  th { background: #161b22; color: #58a6ff; text-align: left; padding: 10px; border-bottom: 2px solid #30363d; }
+  td { padding: 8px 10px; border-bottom: 1px solid #21262d; }
+  tr:hover { background: #161b22; }
+  .engine-tag { background: #1c2128; border: 1px solid #30363d; padding: 2px 6px; border-radius: 4px; font-size: 11px; color: #8b949e; margin-left: 4px; }
+  .chart-wrap { background: #161b22; padding: 20px; border-radius: 8px; border: 1px solid #30363d; margin: 16px 0; }
+  canvas { max-width: 100%; height: 360px; }
+  .scroll { overflow-x: auto; }
+  .footer { text-align: center; color: #8b949e; margin-top: 40px; padding-top: 20px; border-top: 1px solid #21262d; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<h1>📊 Portfolio Report — Algo Trading</h1>
+<p>Generated 2026-05-05 08:52 UTC · Closed round-trips: 61 · Open positions: 0</p>
+
+<h2>1️⃣ Portfolio Summary</h2>
+<div class='summary'>
+    <div class='card portfolio'>
+        <h3>Combined Portfolio</h3>
+        <div class='big neg'>$19,683.93</div>
+        <div class='small'>Initial: $20,000.00</div>
+        <div class='kv'><span>Total Return</span> <span class='neg'>-1.58%</span></div>
+        <div class='kv'><span>Total Trades</span> <span>61</span></div>
+        <div class='kv'><span>Wins / Losses</span> <span class='pos'>7</span> / <span class='neg'>54</span></div>
+        <div class='kv'><span>Win Rate</span> <span>11.5%</span></div>
+        <div class='kv'><span>Realized P&L</span> <span class='neg'>$-314.94</span></div>
+    </div>
+    
+        <div class='card'>
+            <h3>Crypto Engine (Binance)</h3>
+            <div class='big neg'>$9,885.31</div>
+            <div class='small'>Initial: $10,000.00</div>
+            <div class='kv'><span>Return</span> <span class='neg'>-1.15%</span></div>
+            <div class='kv'><span>Trades</span> <span>30</span></div>
+            <div class='kv'><span>Max DD</span> <span class='neg'>$-258.35 (2.5%)</span></div>
+        </div>
+    
+        <div class='card'>
+            <h3>Gold Engine (cTrader)</h3>
+            <div class='big neg'>$9,798.62</div>
+            <div class='small'>Initial: $10,000.00</div>
+            <div class='kv'><span>Return</span> <span class='neg'>-2.01%</span></div>
+            <div class='kv'><span>Trades</span> <span>95</span></div>
+            <div class='kv'><span>Max DD</span> <span class='neg'>$-200.83 (2.0%)</span></div>
+        </div>
+</div>
+
+<h2>2️⃣ Equity Curves</h2>
+<div class='chart-wrap'>
+    <canvas id='equityChart'></canvas>
+</div>
+
+<h2>3️⃣ Per-Strategy Breakdown</h2>
+<div class='scroll'>
+<table>
+<thead>
+<tr>
+    <th>Strategy</th>
+    <th>Trades</th>
+    <th>Win Rate</th>
+    <th>Total P&L</th>
+    <th>Avg P&L</th>
+    <th>Avg Win</th>
+    <th>Avg Loss</th>
+    <th>Best</th>
+    <th>Worst</th>
+    <th>Profit Factor</th>
+    <th>Avg Duration</th>
+</tr>
+</thead>
+<tbody>
+
+        <tr>
+            <td><strong>vol_momentum</strong> <span class='engine-tag'>crypto</span></td>
+            <td>7</td>
+            <td class='neg'>28.6%</td>
+            <td class='pos'>+$111.13</td>
+            <td>+$15.88</td>
+            <td class='pos'>+$76.92</td>
+            <td class='neg'>$-8.54</td>
+            <td class='pos'>+$152.46</td>
+            <td class='neg'>$-11.59</td>
+            <td class='pos'>3.60</td>
+            <td>35.3h</td>
+        </tr>
+        <tr>
+            <td><strong>funding_carry</strong> <span class='engine-tag'>crypto</span></td>
+            <td>5</td>
+            <td class='neg'>0.0%</td>
+            <td class='neg'>$-25.24</td>
+            <td>$-5.05</td>
+            <td class='pos'>+$0.00</td>
+            <td class='neg'>$-5.05</td>
+            <td class='pos'>$-0.36</td>
+            <td class='neg'>$-8.78</td>
+            <td class='neg'>0.00</td>
+            <td>62.2h</td>
+        </tr>
+        <tr>
+            <td><strong>donchian_gold</strong> <span class='engine-tag'>gold</span></td>
+            <td>8</td>
+            <td class='neg'>12.5%</td>
+            <td class='neg'>$-34.08</td>
+            <td>$-4.26</td>
+            <td class='pos'>+$1.14</td>
+            <td class='neg'>$-5.03</td>
+            <td class='pos'>+$1.14</td>
+            <td class='neg'>$-6.04</td>
+            <td class='neg'>0.03</td>
+            <td>0.3h</td>
+        </tr>
+        <tr>
+            <td><strong>vol_momentum_gold</strong> <span class='engine-tag'>gold</span></td>
+            <td>39</td>
+            <td class='neg'>10.3%</td>
+            <td class='neg'>$-166.75</td>
+            <td>$-4.28</td>
+            <td class='pos'>+$5.19</td>
+            <td class='neg'>$-5.36</td>
+            <td class='pos'>+$9.99</td>
+            <td class='neg'>$-11.94</td>
+            <td class='neg'>0.11</td>
+            <td>2.7h</td>
+        </tr>
+        <tr>
+            <td><strong>donchian_ensemble_adx</strong> <span class='engine-tag'>crypto</span></td>
+            <td>2</td>
+            <td class='neg'>0.0%</td>
+            <td class='neg'>$-200.00</td>
+            <td>$-100.00</td>
+            <td class='pos'>+$0.00</td>
+            <td class='neg'>$-100.00</td>
+            <td class='pos'>$-83.71</td>
+            <td class='neg'>$-116.28</td>
+            <td class='neg'>0.00</td>
+            <td>38.0h</td>
+        </tr>
+</tbody>
+</table>
+</div>
+
+<h2>4️⃣ Open Positions (0)</h2>
+<div class='scroll'>
+<table>
+<thead>
+<tr>
+    <th>Engine</th>
+    <th>Strategy</th>
+    <th>Symbol</th>
+    <th>Side</th>
+    <th>Qty</th>
+    <th>Entry</th>
+    <th>Mark</th>
+    <th>uPnL</th>
+    <th>Opened</th>
+</tr>
+</thead>
+<tbody>
+<tr><td colspan='9' style='text-align:center; color:#8b949e;'>No open positions</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2>5️⃣ Recent Closed Trades (last 50)</h2>
+<div class='scroll'>
+<table>
+<thead>
+<tr>
+    <th>Closed</th>
+    <th>Engine</th>
+    <th>Strategy</th>
+    <th>Symbol</th>
+    <th>Side</th>
+    <th>Entry</th>
+    <th>Exit</th>
+    <th>Qty</th>
+    <th>P&L</th>
+    <th>P&L %</th>
+    <th>Duration</th>
+</tr>
+</thead>
+<tbody>
+
+        <tr>
+            <td>2026-05-05 00:01 UTC</td>
+            <td><span class='engine-tag'>crypto</span></td>
+            <td>funding_carry</td>
+            <td>BTCUSDT-CARRY</td>
+            <td>⬆ BUY</td>
+            <td>$106.0386</td>
+            <td>$105.9689</td>
+            <td>4.6330</td>
+            <td class='neg'>$-1.31</td>
+            <td class='neg'>-0.27%</td>
+            <td>47.5h</td>
+        </tr>
+        <tr>
+            <td>2026-05-01 14:00 UTC</td>
+            <td><span class='engine-tag'>crypto</span></td>
+            <td>donchian_ensemble_adx</td>
+            <td>BNBUSDT</td>
+            <td>⬇ SELL</td>
+            <td>$613.6372</td>
+            <td>$622.6045</td>
+            <td>11.3963</td>
+            <td class='neg'>$-116.28</td>
+            <td class='neg'>-1.66%</td>
+            <td>43.0h</td>
+        </tr>
+        <tr>
+            <td>2026-05-01 04:00 UTC</td>
+            <td><span class='engine-tag'>crypto</span></td>
+            <td>donchian_ensemble_adx</td>
+            <td>ETHUSDT</td>
+            <td>⬇ SELL</td>
+            <td>$2238.9621</td>
+            <td>$2283.3266</td>
+            <td>1.7124</td>
+            <td class='neg'>$-83.71</td>
+            <td class='neg'>-2.18%</td>
+            <td>33.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-30 16:00 UTC</td>
+            <td><span class='engine-tag'>crypto</span></td>
+            <td>funding_carry</td>
+            <td>BTCUSDT-CARRY</td>
+            <td>⬆ BUY</td>
+            <td>$106.1268</td>
+            <td>$106.0491</td>
+            <td>22.6840</td>
+            <td class='neg'>$-6.58</td>
+            <td class='neg'>-0.27%</td>
+            <td>40.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-28 00:00 UTC</td>
+            <td><span class='engine-tag'>crypto</span></td>
+            <td>funding_carry</td>
+            <td>BTCUSDT-CARRY</td>
+            <td>⬆ BUY</td>
+            <td>$105.9483</td>
+            <td>$106.0967</td>
+            <td>5.6799</td>
+            <td class='neg'>$-0.36</td>
+            <td class='neg'>-0.06%</td>
+            <td>47.5h</td>
+        </tr>
+        <tr>
+            <td>2026-04-27 13:00 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬆ BUY</td>
+            <td>$4709.7618</td>
+            <td>$4696.1606</td>
+            <td>0.0913</td>
+            <td class='neg'>$-2.10</td>
+            <td class='neg'>-0.49%</td>
+            <td>6.3h</td>
+        </tr>
+        <tr>
+            <td>2026-04-27 01:44 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬆ BUY</td>
+            <td>$4727.9154</td>
+            <td>$4674.2650</td>
+            <td>0.1080</td>
+            <td class='neg'>$-6.81</td>
+            <td class='neg'>-1.33%</td>
+            <td>55.4h</td>
+        </tr>
+        <tr>
+            <td>2026-04-26 20:00 UTC</td>
+            <td><span class='engine-tag'>crypto</span></td>
+            <td>vol_momentum</td>
+            <td>DOTUSDT</td>
+            <td>⬆ BUY</td>
+            <td>$1.2593</td>
+            <td>$1.2697</td>
+            <td>174.3174</td>
+            <td class='pos'>+$1.39</td>
+            <td class='pos'>+0.63%</td>
+            <td>46.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-24 11:59 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬆ BUY</td>
+            <td>$4691.9382</td>
+            <td>$4673.7951</td>
+            <td>0.1031</td>
+            <td class='neg'>$-2.84</td>
+            <td class='neg'>-0.59%</td>
+            <td>10.8h</td>
+        </tr>
+        <tr>
+            <td>2026-04-23 19:13 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4701.0796</td>
+            <td>$4706.2111</td>
+            <td>0.3258</td>
+            <td class='neg'>$-4.74</td>
+            <td class='neg'>-0.31%</td>
+            <td>10.2h</td>
+        </tr>
+        <tr>
+            <td>2026-04-23 18:00 UTC</td>
+            <td><span class='engine-tag'>crypto</span></td>
+            <td>vol_momentum</td>
+            <td>DOTUSDT</td>
+            <td>⬆ BUY</td>
+            <td>$1.2492</td>
+            <td>$1.2228</td>
+            <td>180.9628</td>
+            <td class='neg'>$-5.24</td>
+            <td class='neg'>-2.32%</td>
+            <td>2.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-23 08:14 UTC</td>
+            <td><span class='engine-tag'>crypto</span></td>
+            <td>funding_carry</td>
+            <td>BTCUSDT-CARRY</td>
+            <td>⬆ BUY</td>
+            <td>$106.1579</td>
+            <td>$105.9847</td>
+            <td>22.7908</td>
+            <td class='neg'>$-8.78</td>
+            <td class='neg'>-0.36%</td>
+            <td>152.2h</td>
+        </tr>
+        <tr>
+            <td>2026-04-22 16:00 UTC</td>
+            <td><span class='engine-tag'>crypto</span></td>
+            <td>vol_momentum</td>
+            <td>DOTUSDT</td>
+            <td>⬇ SELL</td>
+            <td>$1.2727</td>
+            <td>$1.2993</td>
+            <td>176.4639</td>
+            <td class='neg'>$-5.13</td>
+            <td class='neg'>-2.29%</td>
+            <td>21.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-22 14:00 UTC</td>
+            <td><span class='engine-tag'>crypto</span></td>
+            <td>vol_momentum</td>
+            <td>ADAUSDT</td>
+            <td>⬇ SELL</td>
+            <td>$0.2469</td>
+            <td>$0.2551</td>
+            <td>1067.2495</td>
+            <td class='neg'>$-9.29</td>
+            <td class='neg'>-3.53%</td>
+            <td>19.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 20:01 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬆ BUY</td>
+            <td>$4679.2157</td>
+            <td>$4676.3645</td>
+            <td>0.3018</td>
+            <td class='neg'>$-3.68</td>
+            <td class='neg'>-0.26%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 20:00 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4667.7463</td>
+            <td>$4680.3259</td>
+            <td>0.1994</td>
+            <td class='neg'>$-4.37</td>
+            <td class='neg'>-0.47%</td>
+            <td>0.3h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 19:44 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4672.3553</td>
+            <td>$4669.6137</td>
+            <td>0.2243</td>
+            <td class='neg'>$-1.48</td>
+            <td class='neg'>-0.14%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 19:43 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4681.9634</td>
+            <td>$4674.3547</td>
+            <td>0.2864</td>
+            <td class='neg'>$-0.50</td>
+            <td class='neg'>-0.04%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 19:42 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4697.0204</td>
+            <td>$4683.8366</td>
+            <td>0.5414</td>
+            <td class='pos'>+$2.06</td>
+            <td class='pos'>+0.08%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 19:41 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4697.8702</td>
+            <td>$4699.2197</td>
+            <td>0.5687</td>
+            <td class='neg'>$-6.11</td>
+            <td class='neg'>-0.23%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 19:40 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4698.2302</td>
+            <td>$4700.0798</td>
+            <td>0.5727</td>
+            <td class='neg'>$-6.44</td>
+            <td class='neg'>-0.24%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 19:01 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬆ BUY</td>
+            <td>$4710.9820</td>
+            <td>$4706.5885</td>
+            <td>0.6034</td>
+            <td class='neg'>$-8.33</td>
+            <td class='neg'>-0.29%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 19:00 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4691.6615</td>
+            <td>$4710.9820</td>
+            <td>0.4156</td>
+            <td class='neg'>$-11.94</td>
+            <td class='neg'>-0.61%</td>
+            <td>0.5h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 18:28 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4692.1214</td>
+            <td>$4693.5385</td>
+            <td>0.4268</td>
+            <td class='neg'>$-4.61</td>
+            <td class='neg'>-0.23%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 18:27 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4692.3113</td>
+            <td>$4693.9986</td>
+            <td>0.4283</td>
+            <td class='neg'>$-4.74</td>
+            <td class='neg'>-0.24%</td>
+            <td>0.1h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 18:23 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4693.2412</td>
+            <td>$4694.1887</td>
+            <td>0.4592</td>
+            <td class='neg'>$-4.75</td>
+            <td class='neg'>-0.22%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 18:22 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4694.0610</td>
+            <td>$4695.1888</td>
+            <td>0.4728</td>
+            <td class='neg'>$-4.97</td>
+            <td class='neg'>-0.22%</td>
+            <td>0.1h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 18:01 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>donchian_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4726.8244</td>
+            <td>$4712.1022</td>
+            <td>0.2154</td>
+            <td class='pos'>+$1.14</td>
+            <td class='pos'>+0.11%</td>
+            <td>2.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 13:57 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4764.2470</td>
+            <td>$4762.7824</td>
+            <td>0.3104</td>
+            <td class='neg'>$-2.50</td>
+            <td class='neg'>-0.17%</td>
+            <td>1.3h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 12:39 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4791.7015</td>
+            <td>$4766.1530</td>
+            <td>0.6245</td>
+            <td class='pos'>+$9.99</td>
+            <td class='pos'>+0.33%</td>
+            <td>8.9h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 03:47 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4815.9866</td>
+            <td>$4793.6185</td>
+            <td>0.6628</td>
+            <td class='pos'>+$8.46</td>
+            <td class='pos'>+0.26%</td>
+            <td>3.1h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 00:39 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4816.1066</td>
+            <td>$4817.9134</td>
+            <td>0.6725</td>
+            <td class='neg'>$-7.69</td>
+            <td class='neg'>-0.24%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-21 00:37 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4816.1966</td>
+            <td>$4818.1134</td>
+            <td>0.6738</td>
+            <td class='neg'>$-7.78</td>
+            <td class='neg'>-0.24%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 19:00 UTC</td>
+            <td><span class='engine-tag'>crypto</span></td>
+            <td>vol_momentum</td>
+            <td>DOTUSDT</td>
+            <td>⬇ SELL</td>
+            <td>$1.2577</td>
+            <td>$1.2843</td>
+            <td>398.9848</td>
+            <td class='neg'>$-11.59</td>
+            <td class='neg'>-2.31%</td>
+            <td>32.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 19:00 UTC</td>
+            <td><span class='engine-tag'>crypto</span></td>
+            <td>vol_momentum</td>
+            <td>ADAUSDT</td>
+            <td>⬇ SELL</td>
+            <td>$0.2456</td>
+            <td>$0.2498</td>
+            <td>2392.0231</td>
+            <td class='neg'>$-11.47</td>
+            <td class='neg'>-1.95%</td>
+            <td>32.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 17:40 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4791.6215</td>
+            <td>$4804.8608</td>
+            <td>0.3399</td>
+            <td class='neg'>$-7.76</td>
+            <td class='neg'>-0.48%</td>
+            <td>2.8h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 14:52 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4798.3101</td>
+            <td>$4793.5385</td>
+            <td>0.4150</td>
+            <td class='neg'>$-2.00</td>
+            <td class='neg'>-0.10%</td>
+            <td>2.2h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 12:38 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4801.3795</td>
+            <td>$4800.3499</td>
+            <td>0.4667</td>
+            <td class='neg'>$-4.00</td>
+            <td class='neg'>-0.18%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 12:36 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4801.5395</td>
+            <td>$4803.3005</td>
+            <td>0.4770</td>
+            <td class='neg'>$-5.42</td>
+            <td class='neg'>-0.24%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 12:01 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬆ BUY</td>
+            <td>$4811.2921</td>
+            <td>$4807.2784</td>
+            <td>0.5514</td>
+            <td class='neg'>$-7.52</td>
+            <td class='neg'>-0.28%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 09:34 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4782.5733</td>
+            <td>$4784.4867</td>
+            <td>0.6383</td>
+            <td class='neg'>$-7.33</td>
+            <td class='neg'>-0.24%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 09:34 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>donchian_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4783.0532</td>
+            <td>$4784.4867</td>
+            <td>0.5191</td>
+            <td class='neg'>$-5.71</td>
+            <td class='neg'>-0.23%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 07:59 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4786.1126</td>
+            <td>$4788.0274</td>
+            <td>0.4948</td>
+            <td class='neg'>$-5.69</td>
+            <td class='neg'>-0.24%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 07:58 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>donchian_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4786.4525</td>
+            <td>$4788.0274</td>
+            <td>0.3822</td>
+            <td class='neg'>$-4.26</td>
+            <td class='neg'>-0.23%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 07:58 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>donchian_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4786.9524</td>
+            <td>$4788.5775</td>
+            <td>0.3940</td>
+            <td class='neg'>$-4.41</td>
+            <td class='neg'>-0.23%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 07:57 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4787.1424</td>
+            <td>$4788.9976</td>
+            <td>0.5229</td>
+            <td class='neg'>$-5.98</td>
+            <td class='neg'>-0.24%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 07:55 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>vol_momentum_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4787.9722</td>
+            <td>$4789.0576</td>
+            <td>0.5580</td>
+            <td class='neg'>$-5.95</td>
+            <td class='neg'>-0.22%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 07:54 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>donchian_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4788.4221</td>
+            <td>$4790.0178</td>
+            <td>0.4280</td>
+            <td class='neg'>$-4.78</td>
+            <td class='neg'>-0.23%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 07:54 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>donchian_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4788.6321</td>
+            <td>$4790.4479</td>
+            <td>0.4346</td>
+            <td class='neg'>$-4.95</td>
+            <td class='neg'>-0.24%</td>
+            <td>0.0h</td>
+        </tr>
+        <tr>
+            <td>2026-04-20 07:52 UTC</td>
+            <td><span class='engine-tag'>gold</span></td>
+            <td>donchian_gold</td>
+            <td>XAUUSD</td>
+            <td>⬇ SELL</td>
+            <td>$4788.8020</td>
+            <td>$4790.6979</td>
+            <td>0.4416</td>
+            <td class='neg'>$-5.07</td>
+            <td class='neg'>-0.24%</td>
+            <td>0.0h</td>
+        </tr>
+</tbody>
+</table>
+</div>
+
+<div class='footer'>
+algo-trading · trades.db (crypto) + trades_gold.db (gold) · Generated by scripts/generate_portfolio_report.py
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+const eqSeries = [{"engine": "crypto", "points": [{"t": 1776153676416, "eq": 10000.0}, {"t": 1776240131229, "eq": 9991.782230652876}, {"t": 1776369600771, "eq": 10144.243506063158}, {"t": 1776711600244, "eq": 10132.774996984404}, {"t": 1776711600332, "eq": 10121.184327268835}, {"t": 1776866400173, "eq": 10111.896821333821}, {"t": 1776873600369, "eq": 10106.764121774957}, {"t": 1776932060814, "eq": 10097.981874853906}, {"t": 1776967200334, "eq": 10092.740033223565}, {"t": 1777233600408, "eq": 10094.128506248497}, {"t": 1777334437258, "eq": 10093.766852873301}, {"t": 1777564853246, "eq": 10087.191539875104}, {"t": 1777608000341, "eq": 10003.47726502031}, {"t": 1777644000274, "eq": 9887.195228407747}, {"t": 1777939280979, "eq": 9885.889867670574}]}, {"engine": "gold", "points": [{"t": 1776649485998, "eq": 10000.0}, {"t": 1776649491284, "eq": 9998.058898394778}, {"t": 1776660444990, "eq": 9998.299449133807}, {"t": 1776669267283, "eq": 9996.548592956115}, {"t": 1776669285358, "eq": 9988.609469047657}, {"t": 1776670280799, "eq": 9982.57314062447}, {"t": 1776670415484, "eq": 9975.200807988682}, {"t": 1776670478671, "eq": 9968.20296609842}, {"t": 1776670582989, "eq": 9961.588041057945}, {"t": 1776671480445, "eq": 9954.74707587087}, {"t": 1776671543843, "eq": 9949.679597785858}, {"t": 1776671656589, "eq": 9944.727462801422}, {"t": 1776671683028, "eq": 9939.945381477295}, {"t": 1776671735025, "eq": 9933.995546325636}, {"t": 1776671855428, "eq": 9928.018482840534}, {"t": 1776671914446, "eq": 9923.605744500624}, {"t": 1776671938423, "eq": 9919.34425159879}, {"t": 1776671984658, "eq": 9913.658989631753}, {"t": 1776677642145, "eq": 9907.948286329116}, {"t": 1776677663416, "eq": 9900.620836177146}, {"t": 1776686476149, "eq": 9893.103953984912}, {"t": 1776688617762, "eq": 9887.682008378559}, {"t": 1776688690293, "eq": 9883.68152615408}, {"t": 1776696747009, "eq": 9881.68129815846}, {"t": 1776706855974, "eq": 9873.920136562901}, {"t": 1776731861934, "eq": 9866.136812646011}, {"t": 1776731974881, "eq": 9858.442999047807}, {"t": 1776743240882, "eq": 9866.89878093369}, {"t": 1776775145795, "eq": 9876.885640154167}, {"t": 1776779861876, "eq": 9874.382748038453}, {"t": 1776794513113, "eq": 9875.52101104443}, {"t": 1776795734097, "eq": 9870.548425655534}, {"t": 1776795803392, "eq": 9865.80231378064}, {"t": 1776796060400, "eq": 9861.059450754496}, {"t": 1776796135191, "eq": 9856.449168923209}, {"t": 1776798000443, "eq": 9844.513114780397}, {"t": 1776798063342, "eq": 9836.17947704938}, {"t": 1776800416916, "eq": 9829.738238829317}, {"t": 1776800483625, "eq": 9823.626758344508}, {"t": 1776800568482, "eq": 9825.685873411403}, {"t": 1776800630675, "eq": 9825.185347136297}, {"t": 1776800695086, "eq": 9823.704954807441}, {"t": 1776801600307, "eq": 9819.332930317065}, {"t": 1776801668425, "eq": 9815.649175777142}, {"t": 1776971623472, "eq": 9810.91266310765}, {"t": 1777031963456, "eq": 9808.07723767628}, {"t": 1777254271205, "eq": 9801.269383577006}, {"t": 1777294800380, "eq": 9799.168551275925}]}];
+const datasets = eqSeries.map(s => ({
+    label: s.engine,
+    data: s.points.map(p => ({ x: p.t, y: p.eq })),
+    borderColor: s.engine === 'crypto' ? '#58a6ff' : '#d2a8ff',
+    backgroundColor: s.engine === 'crypto' ? 'rgba(88,166,255,0.1)' : 'rgba(210,168,255,0.1)',
+    fill: false,
+    tension: 0.1,
+    pointRadius: 2,
+    borderWidth: 2,
+}));
+new Chart(document.getElementById('equityChart'), {
+    type: 'line',
+    data: { datasets },
+    options: {
+        scales: {
+            x: { type: 'linear', position: 'bottom', ticks: { color: '#8b949e', callback: v => new Date(v).toISOString().slice(0,10) } },
+            y: { ticks: { color: '#8b949e', callback: v => '$' + v.toLocaleString() } }
+        },
+        plugins: { legend: { labels: { color: '#c9d1d9' } } },
+        responsive: true,
+        maintainAspectRatio: false,
+    }
+});
+</script>
+
+</body>
+</html>

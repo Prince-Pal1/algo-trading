@@ -1,12 +1,15 @@
 # Algo Trading — Roadmap & Phase Status
 
-**Last updated:** 2026-04-18 (Session 23 Day 1 — G.3 Day 1 launched live on cTrader demo; dual-engine topology; meta-label polling plist live; swift_alma_v2 killed across 5 modes.)
-**Current phase:** Session 23 Day 1 deliverables shipped:
-- **G.3 Day 1** **IN PROGRESS** from 2026-04-18 07:35 UTC. Dual-engine topology: `com.algo-trading.engine` (Binance altcoins, crypto book) + `com.algo-trading.engine-gold` (IC Markets cTrader, XAUUSD institutional book). Live cTrader feed delivering XAUUSD spot ticks + trendbars through the full 5-stage auth walk (AppAuth → GetAccountList → AccountAuth → SymbolsList → SubscribeSpots → SubscribeLiveTrendbar). Both engines HEALTHY.
-- **Meta-label live-gate monitoring**: `com.algo-trading.meta-label-shadow-check.plist` (6h cadence) + `scripts/meta_label_shadow_gate_watch.sh` wrapper fires a macOS notification once any strategy hits ≥20 live rows with PASS rolling_auc. Current state BLOCKED_COLD_START (0-1 rows across strategies).
-- **Task #116 swift_alma_v2 WF verdict**: RESEARCH_ONLY across ALL 5 leverage modes (invariant, margin_capped, vol_targeted, risk_scaled, kelly_fractional). Continuous Calmar ≤ 0 in every mode. Strategy is NOT deployment-ready. Reports in `reports/deep_backtest_swift_alma_v2_task116/`. Obituary + graveyard entry pending Day-2.
-- **3b-2 M3S** AUTHORITATIVE (commit `01e5d39`); **3c meta-labeling** ADVISORY (commit `a6fc4ff`); Phase G stack merged via `b242a73`.
-**Next action:** Watch G.3 Day 1-7 progression (L=1 institutional, aggressive disabled); meta-label plist self-resolves live gate in 2-4 weeks; write swift_alma_v2 obituary + close task #116 + research replacement leveraged strategy under task #116b.
+**Last updated:** 2026-05-05 (Session 24 — Live triage + engine stall fix; gold engine 87h STALE patched; 3 strategies disabled; 3 orphans closed +$11.26; combined portfolio at −1.52%.)
+**Current phase:** Session 24 — Live triage + ops-fix shipped:
+- **Gold engine 87h STALE root-caused + patched.** `src/data/feeds/icmarkets_feed.py` had no handler for `ProtoOASubscribeLiveTrendbarRes` — silent subscribe failure on Sun 22:27 UTC reconnect degraded engine to tick-only invisibly. Added ack handler, `_send_loud()` helper for warning-level errbacks on subscribe path, and 30s pending-subscribe audit via Twisted `reactor.callLater`.
+- **Watchdog v2** (`scripts/watchdog.py`): multi-engine (checks both `heartbeat.json` AND `heartbeat_gold.json`); replaces broken PID-file kill with `launchctl kickstart -k gui/<uid>/<label>`; bumped candle-stale threshold from 1800s → 7200s; macOS notification on STALE; 600s kick cooldown.
+- **Strategy triage** (`config/strategies.toml`): vol_momentum_gold + funding_carry + donchian_ensemble_adx → `enabled = false` with dated re-enable gates; donchian_gold left enabled but watch-listed for sl_atr_mult re-tune; vol_momentum (crypto, only winner, PF 3.60) untouched.
+- **Open positions cleared.** 3 orphans closed via `scripts/operational/close_orphan_positions.py --apply` (DB backup + synthetic close). Net realized +$11.26.
+- **Final state:** crypto $9,883.16 / gold $9,812.03 / combined $19,695.19 (−1.52% from $20k initial). 0 open positions. Watchdog v2 + patched icmarkets_feed live. Investigation writeups at `docs/investigations/2026-05-05_portfolio_postmortem.md` + `docs/investigations/2026-05-05_strategy_triage.md`.
+- Carried over from Session 23: 3b-2 M3S AUTHORITATIVE; 3c meta-labeling ADVISORY; meta-label live gate still BLOCKED_COLD_START; swift_alma_v2 task #116 obituary still pending.
+
+**Next action:** Backtest replay of disabled strategies before re-enable. Priority order: (1) `deep_backtest --strategy vol_momentum_gold --window 90d` with parameter sensitivity sweep — gate PF > 1.2 OOS; (2) `deep_backtest --strategy funding_carry --window 90d` — gate Sharpe > 0.3 OOS; (3) `deep_backtest --strategy donchian_gold` sl_atr_mult sweep {3.0, 4.0, 5.0, 6.0} — gate Calmar > 1.0 OOS. Then research vol_momentum (crypto) scale-up: bump max_risk_per_trade 0.012 → 0.018, OR extend universe beyond DOGE/ADA/DOT.
 
 > **Authority note:** This file is the **only** authoritative source for phase status. If any other file contradicts this, that other file is wrong — fix it to link here. See `CLAUDE.md` § Autonomous Workflow Protocol.
 
@@ -28,6 +31,7 @@
 | 7 | Production Deployment | 7 days unattended on VPS | ❌ NOT STARTED | — | Phase 3-milestone + M3S |
 | 8 | Scale | 3+ strategies portfolio Sharpe >1.5 | 🟡 PARTIAL — 3 strategies live, Sharpe 2.318 in backtest only | Session 10-11, 14-16 | OOS portfolio validation on live paper data |
 | DISCOVERED 2026-04-14 | Watchdog data-staleness patch | Kill engine when `last_candle_age_s > 1800s` even if file mtime is fresh | ✅ COMPLETE | `7c5d000` main / `fcb13b9` gold; ARCHITECTURE.md Known Gotchas 2026-04-14 | — |
+| DISCOVERED 2026-05-05 | Session 24 — Live triage + engine stall fix | Patch silent cTrader trendbar subscribe failure; rewrite watchdog multi-engine + kickstart-based; disable 3 bleeding strategies; close 3 orphan positions cleanly | ✅ COMPLETE | `src/data/feeds/icmarkets_feed.py` ack handler + `_send_loud()` + 30s pending-subscribe audit; `scripts/watchdog.py` v2; `config/strategies.toml` 3 disables; `scripts/operational/close_orphan_positions.py` (+$11.26 realized); `docs/investigations/2026-05-05_*.md` | Backtest replay of disabled strategies before re-enable |
 | **G** | **Gold Leveraged Stack** | Two-book (institutional + aggressive) engine + donchian_gold + vol_momentum_gold + 3 Tier 5 strategies + split sweep + cost-fix sweep + walk-forward retunes | ✅ **G.2 + G.5b + tasks #101-108 COMPLETE — merged to main 2026-04-14** (3 days early) | 44 commits 54c0b62 → a7703e9 | — |
 
 **Legend:** ✅ complete · ❌ not started · 🟡 in progress/partial · **DISCOVERED** = unplanned work surfaced mid-session (Rule 2)
