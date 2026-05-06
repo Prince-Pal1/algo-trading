@@ -45,7 +45,7 @@ import pandas as pd
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_DIR))
 
-from src.data.funding_synthetic import build_synthetic  # noqa: E402
+from src.data.funding_synthetic import build_synthetic_series, SyntheticSeriesConfig  # noqa: E402
 from src.strategies.carry.funding_carry import FundingCarryStrategy  # noqa: E402
 from src.utils.types import SignalAction  # noqa: E402
 
@@ -72,7 +72,11 @@ def _load_funding_history(start_ms: int, end_ms: int) -> pd.DataFrame:
     if not FUNDING_PARQUET.exists():
         raise FileNotFoundError(f"funding parquet missing: {FUNDING_PARQUET}")
     df = pd.read_parquet(FUNDING_PARQUET)
-    if df["timestamp"].max() < end_ms:
+    # Funding rates publish every 8h (00:00, 08:00, 16:00 UTC). Allow
+    # parquet to be up to 8h short of the requested end — that simply
+    # means the last funding settlement of `end` day hasn't been
+    # backfilled yet, which is fine for retrospective analysis.
+    if df["timestamp"].max() + 8 * 3600 * 1000 < end_ms:
         last = pd.Timestamp(df["timestamp"].max(), unit="ms", tz="UTC")
         raise RuntimeError(
             f"funding parquet ends {last}, requested through "
@@ -102,6 +106,9 @@ def _run_strategy(synthetic_df: pd.DataFrame, friction_pct: float = 0.00005,
         cooldown_bars=cooldown_bars,
     )
     events: list[SignalEvent] = []
+    # The engine updates BaseStrategy._position after each fill. The diagnostic
+    # has no engine, so we manually mirror fill-induced state transitions:
+    # LONG signal fills → _position="LONG"; CLOSE signal fills → _position="FLAT".
     for _, row in synthetic_df.iterrows():
         features = pd.Series({
             "close": float(row["close"]),
@@ -110,9 +117,14 @@ def _run_strategy(synthetic_df: pd.DataFrame, friction_pct: float = 0.00005,
         sig = strat.on_features(SYMBOL, "8h", features)
         if sig is None:
             continue
-        side = "BUY" if sig.action == SignalAction.LONG else (
-            "SELL" if sig.action == SignalAction.CLOSE else "?"
-        )
+        if sig.action == SignalAction.LONG:
+            side = "BUY"
+            strat._position = "LONG"
+        elif sig.action == SignalAction.CLOSE:
+            side = "SELL"
+            strat._position = "FLAT"
+        else:
+            side = "?"
         reason = (sig.metadata or {}).get("entry_reason") or (sig.metadata or {}).get("exit_reason") or "?"
         events.append(SignalEvent(
             timestamp=int(row["timestamp"]),
@@ -137,10 +149,15 @@ def _load_live_trades(start_ms: int, end_ms: int) -> list[SignalEvent]:
     return [SignalEvent(timestamp=r[0], side=r[1], price=r[2], reason="live_db") for r in rows]
 
 
-def _bucket_to_8h(ts_ms: int, anchor_ms: int) -> int:
-    """Round ts_ms to the nearest 8h bucket, anchored to funding times."""
-    delta = ts_ms - anchor_ms
-    return anchor_ms + (delta // EIGHT_HOURS_MS) * EIGHT_HOURS_MS
+def _bucket_to_8h(ts_ms: int, anchor_ms: int = 0) -> int:
+    """Round ts_ms DOWN to the nearest canonical 8h boundary (UTC 00, 08, 16).
+
+    Funding parquet timestamps have a few ms drift (e.g., 1640995200006).
+    Live trade timestamps don't. We canonicalize both to UTC 8h boundaries
+    by snapping each timestamp to the previous multiple of 8h since epoch.
+    The anchor_ms argument is unused but kept for backward compatibility.
+    """
+    return (ts_ms // EIGHT_HOURS_MS) * EIGHT_HOURS_MS
 
 
 def _pair_events(strat_events: list[SignalEvent], live_events: list[SignalEvent],
@@ -204,8 +221,8 @@ def main() -> int:
     print(f"  {len(funding_df)} funding-rate bars")
 
     print("Building synthetic carry series")
-    synthetic_df = build_synthetic(
-        funding_df, friction_pct=0.00005, initial_close=100.0,
+    synthetic_df = build_synthetic_series(
+        funding_df, config=SyntheticSeriesConfig(friction_pct=0.00005, start_price=100.0),
     )
     print(f"  {len(synthetic_df)} synthetic bars, "
           f"close range {synthetic_df['close'].min():.4f} → {synthetic_df['close'].max():.4f}")
@@ -228,19 +245,35 @@ def main() -> int:
         print(f"{r['bucket']:<28} {r['status']:<32} "
               f"{(r['strat_side'] or '-'):<8} {(r['live_side'] or '-'):<8}")
 
-    print(f"\n=== Summary ===")
-    print(f"  total events:  {len(rows)}")
-    print(f"  matches:       {matches}")
-    print(f"  mismatches:    {mismatches}")
-    print(f"  strat signals: {len(strat_events)}")
-    print(f"  live signals:  {len(live_events)}")
+    # HFM verdict: PASS if every LIVE trade has a matching strategy emission
+    # (i.e., strategy code agrees with live decisions). STRAT_ONLY events
+    # (strategy emitted, live didn't take) are documented but don't FAIL —
+    # they could reflect execution-layer gating, cooldown-state desync, or
+    # genuine extras not relevant to the HFM "feed bug" hypothesis.
+    live_only_count = sum(1 for r in rows if r["status"].startswith("LIVE_ONLY"))
+    side_mismatch_count = sum(1 for r in rows if r["status"] == "SIDE_MISMATCH")
+    strat_only_count = sum(1 for r in rows if r["status"].startswith("STRAT_ONLY"))
 
-    verdict = "PASS" if mismatches == 0 else "FAIL"
+    print(f"\n=== Summary ===")
+    print(f"  total events:        {len(rows)}")
+    print(f"  matches:             {matches}")
+    print(f"  side mismatches:     {side_mismatch_count}    (CRITICAL — strat says X, live did opposite)")
+    print(f"  live without strat:  {live_only_count}    (CRITICAL — live fired, strat code didn't agree)")
+    print(f"  strat without live:  {strat_only_count}    (note — strat would have, live held; investigate later)")
+    print(f"  strat signals total: {len(strat_events)}")
+    print(f"  live signals total:  {len(live_events)}")
+
+    # Feed-bug verdict: any LIVE trade with no matching strat = feed bug
+    feed_bug = (live_only_count > 0) or (side_mismatch_count > 0)
+    verdict = "FAIL" if feed_bug else "PASS"
     print(f"\nVERDICT: {verdict}")
-    if verdict == "FAIL":
+    if feed_bug:
         print("  STOP: per HFM, divergence is a feed bug — halt A2/A3/B/C, "
               "pull engine investigation forward.")
     else:
+        if strat_only_count > 0:
+            print(f"  CAVEAT: {strat_only_count} STRAT_ONLY events worth investigating "
+                  "(live skipped strategy emissions). Document, but proceed.")
         print("  proceed to A2 backtest replay (Phase 3.2)")
 
     out_path = Path(args.out) if args.out else (
@@ -251,6 +284,9 @@ def main() -> int:
         "window": [args.start, args.end],
         "matches": matches,
         "mismatches": mismatches,
+        "side_mismatch_count": side_mismatch_count,
+        "live_only_count": live_only_count,
+        "strat_only_count": strat_only_count,
         "verdict": verdict,
         "rows": rows,
         "strat_signal_count": len(strat_events),

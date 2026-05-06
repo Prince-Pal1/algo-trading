@@ -2,7 +2,9 @@
 # Workstream A3 — donchian_gold sl/tp ATR-multiplier 2D sweep.
 #
 # Per Super Plan Phase 4.1 + OOS lock 2026-05-06:
-#   - 12-cell 2D grid (HFM expansion of the original sl-only sweep)
+#   - 20-cell 2D grid: sl_atr_mult × max_hold_bars (HFM proposed
+#     tp_atr_mult, but DonchianGoldStrategy doesn't take a TP param —
+#     donchian-style exits on opposite channel break or time stop).
 #   - Tune window: 2024-05-06 → 2025-12-31 (shared Phase G epoch with vol_momentum_gold)
 #   - Holdout window: 2026-04-15 → 2026-05-05 (21 days)
 #   - Fee profile: ic_markets_ctrader_xauusd_normal
@@ -33,7 +35,7 @@ python3 scripts/research/deep_backtest_with_holdout.py \
     --tune-end 2025-12-31 \
     --holdout-start 2026-04-15 \
     --holdout-end 2026-05-05 \
-    --param-grid 'sl_atr_mult=3.0|4.0|5.0|6.0,tp_atr_mult=3.0|5.0|7.0' \
+    --param-grid 'sl_atr_mult=2.0|3.0|4.0|5.0|6.0,max_hold_bars=72|120|168|240' \
     --fee-profile ic_markets_ctrader_xauusd_normal \
     --leverage 1.0 \
     --wf-n-folds 5 \

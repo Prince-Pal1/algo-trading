@@ -59,7 +59,7 @@ Recommended: run backfill TODAY as Phase 1.0, immediately before the holdout-wra
 | Data source | `data/historical/XAUUSD_1h.parquet` (post-backfill) |
 | Fee profile | `ic_markets_ctrader_xauusd_normal` |
 | Verdict gates | Tune WF Calmar > 1.0 (5 folds) AND Holdout Calmar > 1.0 |
-| Param grid | `sl_atr_mult ∈ {3.0, 4.0, 5.0, 6.0}` × `tp_atr_mult ∈ {3.0, 5.0, 7.0}` = 12 cells |
+| Param grid | `sl_atr_mult ∈ {2.0, 3.0, 4.0, 5.0, 6.0}` × `max_hold_bars ∈ {72, 120, 168, 240}` = 20 cells (corrected — see Amendment 3) |
 
 Shared tune epoch with vol_momentum_gold; same windows.
 
@@ -138,5 +138,16 @@ The HFM-recommended A1 param grid `momentum_threshold ∈ {1.5, 2.0, 2.5, 3.0}` 
 This correction was applied BEFORE any committed sweep result file. The trial run with the original grid produced no actionable verdict (infrastructure null, not strategy verdict) and its draft outputs in `reports/a1_vol_momentum_gold_2026-05-07/` (gitignored) are discarded. The HFM anti-temptation rule (ONE sweep, no iteration) applies to the CORRECTED grid: one run, one decision.
 
 This amendment is itself committed BEFORE the corrected sweep is launched. If the corrected sweep is null, write the obituary; do NOT iterate further.
+
+**Amendment 3 — 2026-05-06 (same day, before any committed A3 sweep result):**
+
+The HFM-recommended A3 param grid `sl_atr_mult × tp_atr_mult` was found to use a parameter (`tp_atr_mult`) that does not exist on `DonchianGoldStrategy`. Donchian-style strategies exit on (a) opposite-channel break, (b) stop-loss hit, or (c) time stop — they do NOT use ATR-based take-profit. Attempting the original grid produced `TypeError: unexpected keyword argument 'tp_atr_mult'`.
+
+**Corrected A3 grid (binding):**
+- `sl_atr_mult ∈ {2.0, 3.0, 4.0, 5.0, 6.0}` = 5 values (extended HFM's range to bracket likely winners)
+- `max_hold_bars ∈ {72, 120, 168, 240}` = 4 values (3-10 day time-stop sweep)
+- = **20 cells**
+
+A3 launcher updated. This amendment is committed BEFORE the corrected A3 sweep runs.
 Source plan: `~/.claude/plans/lets-first-make-a-quirky-hartmanis.md` (super plan, approved 2026-05-06).
 HFM memo (consulted): `~/.claude/plans/lets-first-make-a-quirky-hartmanis-agent-ad88756c0e4ce744f.md`.
