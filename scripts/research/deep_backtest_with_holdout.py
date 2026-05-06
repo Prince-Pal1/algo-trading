@@ -275,11 +275,23 @@ def main() -> int:
         tune_summary_path = candidates[-1]
     tune_summary = json.loads(tune_summary_path.read_text())
 
-    # Pull WF best params; fall back to best-cell params if no retune
+    # Extract WF best params: top-level may be null when retune is per-fold;
+    # fall back to per-fold best_params (most-recent fold wins, conservative).
     chosen_params = tune_summary.get("best_params") or {}
-    wf_calmar = (tune_summary.get("walk_forward") or {}).get("avg_calmar")
+    wf = tune_summary.get("walk_forward") or {}
+    if not chosen_params:
+        folds = wf.get("folds") or []
+        # Pick the per-fold best_params from the highest-Calmar fold
+        candidate_folds = [f for f in folds if f.get("best_params")]
+        if candidate_folds:
+            best_fold = max(candidate_folds, key=lambda f: (f.get("calmar") or -1e18))
+            chosen_params = best_fold.get("best_params") or {}
+    # Continuous Calmar (single contiguous WF series) is the conservative gate.
+    wf_calmar = wf.get("continuous_calmar")
+    if wf_calmar is None:
+        wf_calmar = wf.get("mean_calmar")
     print(f"\n[tune] best_params: {chosen_params}")
-    print(f"[tune] WF avg Calmar: {wf_calmar}")
+    print(f"[tune] WF continuous_calmar: {wf.get('continuous_calmar')} mean_calmar: {wf.get('mean_calmar')}")
 
     # ── Holdout pass ────────────────────────────────────────
     sliced, original = _make_sliced_loader(holdout_start_ms, holdout_end_ms)

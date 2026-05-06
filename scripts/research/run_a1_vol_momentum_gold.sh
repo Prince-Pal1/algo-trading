@@ -35,7 +35,7 @@ python3 scripts/research/deep_backtest_with_holdout.py \
     --tune-end 2025-12-31 \
     --holdout-start 2026-04-15 \
     --holdout-end 2026-05-05 \
-    --param-grid 'momentum_threshold=1.5|2.0|2.5|3.0,vol_lookback=10|20|30,cooldown_bars=0|4|8|16' \
+    --param-grid 'momentum_threshold=0.0|0.005|0.01|0.02,vol_lookback=168|240|336,cooldown_bars=0|5|24' \
     --fee-profile ic_markets_ctrader_xauusd_normal \
     --leverage 1.0 \
     --wf-n-folds 5 \

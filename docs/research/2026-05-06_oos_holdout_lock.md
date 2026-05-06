@@ -120,9 +120,23 @@ If this lock is ever modified, the modification commit must include a written ju
 Lock author: Claude Opus 4.7 (via Prince Pal, sole signing authority).
 Lock date: 2026-05-06.
 
-**Amendment 2026-05-06 (same day, before any sweep result):**
+**Amendment 1 — 2026-05-06 (same day, before any sweep result):**
 - Tune-window start adjusted from 2024-04-15 → 2024-05-06 to match the actual XAUUSD parquet data start (2-year Dukascopy download via `scripts/download_xauusd.py --years 2.0`).
 - Holdout-window end adjusted from 2026-05-06 → 2026-05-05. The post-backfill parquet's max timestamp is 2026-05-06 00:00 UTC, which represents the end-of-day-2026-05-05 bar. Using 2026-05-05 in the wrapper's CLI accurately captures all bars through that day without an off-by-one.
 - The no-overlap invariant holds (tune ends 2025-12-31, holdout starts 2026-04-15). No sweep result file existed at the time of this amendment; the audit-trail anchor (`ffa5725`) remains valid.
+
+**Amendment 2 — 2026-05-06 (same day, before any committed sweep result):**
+
+The HFM-recommended A1 param grid `momentum_threshold ∈ {1.5, 2.0, 2.5, 3.0}` was found to use units mismatched to the strategy implementation. `VolMomentumGoldStrategy._compute_momentum()` returns `log(close_now / close_past)` over `momentum_window` bars (default 240 hours). For XAUUSD this typically falls in [-0.05, 0.05] (±5% over 10 days). The HFM's values 1.5-3.0 would require log returns of 150%-300% over the window — physically impossible for normal market conditions. A trial run with the original grid produced 0 trades per cell on the holdout window and an empty `best_params` extraction.
+
+**Corrected grid (binding):**
+- `momentum_threshold ∈ {0.0, 0.005, 0.01, 0.02}` = 4 values (no-gate to 2% threshold over the 10-day momentum window)
+- `vol_lookback ∈ {168, 240, 336}` = 3 values (7-14 day lookback; HFM's {10, 20, 30} would be ~hours not days, far too short for 1h bars)
+- `cooldown_bars ∈ {0, 5, 24}` = 3 values
+- = **36 cells** (down from 48)
+
+This correction was applied BEFORE any committed sweep result file. The trial run with the original grid produced no actionable verdict (infrastructure null, not strategy verdict) and its draft outputs in `reports/a1_vol_momentum_gold_2026-05-07/` (gitignored) are discarded. The HFM anti-temptation rule (ONE sweep, no iteration) applies to the CORRECTED grid: one run, one decision.
+
+This amendment is itself committed BEFORE the corrected sweep is launched. If the corrected sweep is null, write the obituary; do NOT iterate further.
 Source plan: `~/.claude/plans/lets-first-make-a-quirky-hartmanis.md` (super plan, approved 2026-05-06).
 HFM memo (consulted): `~/.claude/plans/lets-first-make-a-quirky-hartmanis-agent-ad88756c0e4ce744f.md`.
