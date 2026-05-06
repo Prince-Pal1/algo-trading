@@ -35,7 +35,7 @@ Recommended: run backfill TODAY as Phase 1.0, immediately before the holdout-wra
 |---|---|
 | Last tune commit | `a7f0f11` (2026-04-14 04:31 IST = 2026-04-13 23:01 UTC) |
 | Tune epoch ends | 2026-04-13 23:00 UTC |
-| Tune window | 2024-04-15 → 2025-12-31 (~20.5 months) |
+| Tune window | 2024-05-06 → 2025-12-31 (~20.5 months) |
 | Gap (held aside, not used) | 2026-01-01 → 2026-04-13 (~3.5 months — the original tune saw this; we exclude it from our re-tune to maximize OOS purity) |
 | Holdout window | 2026-04-15 → 2026-05-06 (22 days, all post-tune-epoch live data) |
 | Data source | `data/historical/XAUUSD_1h.parquet` (post-backfill) |
@@ -53,9 +53,9 @@ Recommended: run backfill TODAY as Phase 1.0, immediately before the holdout-wra
 |---|---|
 | Last tune commit | Same Phase G epoch (`a7f0f11` and predecessors) |
 | Tune epoch ends | 2026-04-13 23:00 UTC |
-| Tune window | 2024-04-15 → 2025-12-31 (~20.5 months) |
+| Tune window | 2024-05-06 → 2025-12-31 (~20.5 months) |
 | Gap (held aside) | 2026-01-01 → 2026-04-13 (~3.5 months) |
-| Holdout window | 2026-04-15 → 2026-05-06 (22 days) |
+| Holdout window | 2026-04-15 → 2026-05-05 (21 days) |
 | Data source | `data/historical/XAUUSD_1h.parquet` (post-backfill) |
 | Fee profile | `ic_markets_ctrader_xauusd_normal` |
 | Verdict gates | Tune WF Calmar > 1.0 (5 folds) AND Holdout Calmar > 1.0 |
@@ -71,7 +71,7 @@ Shared tune epoch with vol_momentum_gold; same windows.
 | Tune epoch ends | 2026-04-08 (last commit before live enable on 2026-04-09) |
 | Tune window | 2022-01-01 → 2025-12-31 (~4 years) |
 | Gap (held aside) | 2026-01-01 → 2026-04-08 (~3.3 months) |
-| Holdout window | 2026-04-10 → 2026-05-06 (27 days) |
+| Holdout window | 2026-04-10 → 2026-05-05 (26 days) |
 | Data source | `data/historical/funding_*.parquet` (assume Binance funding-rate history; verify path exists before A2 runs) |
 | Fee profile | `binance_perpetual_futures` (per memory `feedback_select_fee_profile_first` and the strategy's research notes; spot fees would invalidate edge) |
 | Verdict gates | Tune WF Sharpe > 0.5 (5 folds) AND Holdout Sharpe > 0.3 |
@@ -119,5 +119,10 @@ If this lock is ever modified, the modification commit must include a written ju
 
 Lock author: Claude Opus 4.7 (via Prince Pal, sole signing authority).
 Lock date: 2026-05-06.
+
+**Amendment 2026-05-06 (same day, before any sweep result):**
+- Tune-window start adjusted from 2024-04-15 → 2024-05-06 to match the actual XAUUSD parquet data start (2-year Dukascopy download via `scripts/download_xauusd.py --years 2.0`).
+- Holdout-window end adjusted from 2026-05-06 → 2026-05-05. The post-backfill parquet's max timestamp is 2026-05-06 00:00 UTC, which represents the end-of-day-2026-05-05 bar. Using 2026-05-05 in the wrapper's CLI accurately captures all bars through that day without an off-by-one.
+- The no-overlap invariant holds (tune ends 2025-12-31, holdout starts 2026-04-15). No sweep result file existed at the time of this amendment; the audit-trail anchor (`ffa5725`) remains valid.
 Source plan: `~/.claude/plans/lets-first-make-a-quirky-hartmanis.md` (super plan, approved 2026-05-06).
 HFM memo (consulted): `~/.claude/plans/lets-first-make-a-quirky-hartmanis-agent-ad88756c0e4ce744f.md`.
