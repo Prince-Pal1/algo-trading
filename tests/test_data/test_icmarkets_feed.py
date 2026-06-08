@@ -302,3 +302,119 @@ class TestTrendbarPartialBarFix:
             feed._handle_spot_event(evt_a2)
             assert len(captured) == 1
             assert captured[0].symbol == "XAUUSD"
+
+
+class TestTokenAutoRefresh:
+    """2026-06-08 regression: CH_ACCESS_TOKEN_INVALID must trigger a
+    one-shot refresh-token exchange and resume the auth handshake.
+
+    Before this patch, the feed warned-and-looped forever on token
+    expiry, producing the 21-day silent gold-engine outage
+    (2026-05-18 → 2026-06-08).
+    """
+
+    def _cfg_with_refresh(self) -> ICMarketsConfig:
+        return ICMarketsConfig(
+            client_id="cid", client_secret="csec",
+            access_token="dead_access", account_id=42,
+            refresh_token="live_refresh",
+        )
+
+    def _cfg_no_refresh(self) -> ICMarketsConfig:
+        return ICMarketsConfig(
+            client_id="cid", client_secret="csec",
+            access_token="dead_access", account_id=42,
+            refresh_token="",
+        )
+
+    def test_refresh_token_field_loaded_from_env(self, monkeypatch):
+        monkeypatch.setenv("CTRADER_CLIENT_ID", "c")
+        monkeypatch.setenv("CTRADER_CLIENT_SECRET", "s")
+        monkeypatch.setenv("CTRADER_ACCESS_TOKEN", "a")
+        monkeypatch.setenv("CTRADER_ACCOUNT_ID", "1")
+        monkeypatch.setenv("CTRADER_REFRESH_TOKEN", "rt_value")
+        cfg = ICMarketsConfig.from_env()
+        assert cfg.refresh_token == "rt_value"
+
+    def test_token_expired_with_no_refresh_token_latches_failure(self):
+        feed = ICMarketsFeed(self._cfg_no_refresh(), symbols=["XAUUSD"])
+        client = MagicMock()
+        feed._handle_token_expired(client)
+        assert feed._token_refresh_failed is True
+        client.send.assert_not_called()
+
+    def test_token_expired_refreshes_and_resumes(self, monkeypatch, tmp_path):
+        feed = ICMarketsFeed(self._cfg_with_refresh(), symbols=["XAUUSD"])
+        client = MagicMock()
+
+        calls = {"refresh": 0, "write": 0}
+
+        def fake_refresh(client_id, client_secret, refresh_token, **_):
+            calls["refresh"] += 1
+            assert client_id == "cid"
+            assert refresh_token == "live_refresh"
+            return ("new_access_xyz", "new_refresh_abc")
+
+        def fake_write(path, access, refresh):
+            calls["write"] += 1
+
+        monkeypatch.setattr(
+            "scripts.ctrader_refresh_token.refresh_tokens", fake_refresh
+        )
+        monkeypatch.setattr(
+            "scripts.ctrader_refresh_token._write_env_tokens", fake_write
+        )
+
+        feed._handle_token_expired(client)
+
+        assert calls["refresh"] == 1
+        assert calls["write"] == 1
+        assert feed._config.access_token == "new_access_xyz"
+        assert feed._config.refresh_token == "new_refresh_abc"
+        assert os.environ.get("CTRADER_ACCESS_TOKEN") == "new_access_xyz"
+        # One resume request was sent
+        assert client.send.call_count == 1
+        sent = client.send.call_args[0][0]
+        assert sent.accessToken == "new_access_xyz"
+        assert feed._token_refresh_failed is False
+
+    def test_repeated_token_errors_only_refresh_once(self, monkeypatch):
+        feed = ICMarketsFeed(self._cfg_with_refresh(), symbols=["XAUUSD"])
+        client = MagicMock()
+        calls = {"refresh": 0}
+
+        def fake_refresh(*a, **k):
+            calls["refresh"] += 1
+            return ("a", "b")
+
+        monkeypatch.setattr(
+            "scripts.ctrader_refresh_token.refresh_tokens", fake_refresh
+        )
+        monkeypatch.setattr(
+            "scripts.ctrader_refresh_token._write_env_tokens", lambda *a: None
+        )
+
+        # First call: refreshes
+        feed._handle_token_expired(client)
+        # Spotware sometimes echoes the same error — must not re-refresh
+        # unless the first call actually failed.
+        # Simulate latched state by setting _token_refresh_failed (the
+        # in_flight guard is cleared in `finally`).
+        feed._token_refresh_failed = True
+        feed._handle_token_expired(client)
+        assert calls["refresh"] == 1
+
+    def test_refresh_http_failure_latches_failed(self, monkeypatch):
+        feed = ICMarketsFeed(self._cfg_with_refresh(), symbols=["XAUUSD"])
+        client = MagicMock()
+
+        def boom(*a, **k):
+            raise RuntimeError("token refresh failed: HTTP 400 — refresh_token expired")
+
+        monkeypatch.setattr(
+            "scripts.ctrader_refresh_token.refresh_tokens", boom
+        )
+
+        feed._handle_token_expired(client)
+        assert feed._token_refresh_failed is True
+        client.send.assert_not_called()

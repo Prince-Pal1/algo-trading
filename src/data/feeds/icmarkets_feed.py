@@ -72,6 +72,7 @@ class ICMarketsConfig:
     account_id: int
     host: str = "demo.ctraderapi.com"
     port: int = 5035
+    refresh_token: str = ""
 
     @classmethod
     def from_env(cls) -> "ICMarketsConfig":
@@ -86,6 +87,7 @@ class ICMarketsConfig:
             account_id=account_id,
             host=os.getenv(host_key, default_host),
             port=int(os.getenv("CTRADER_PORT", "5035")),
+            refresh_token=os.getenv("CTRADER_REFRESH_TOKEN", ""),
         )
 
 
@@ -124,6 +126,15 @@ class ICMarketsFeed:
         # the 2026-04-22 rapid-flip-flop bug.
         self._in_progress_bar: dict[tuple[str, str], "Candle"] = {}
 
+        # OAuth refresh state. Spotware access tokens expire ~30 days
+        # after issue. Before 2026-06-08 a token-expired error silently
+        # warned and looped forever (21-day gold engine outage). Now we
+        # attempt one auto-refresh via the stored refresh_token; if
+        # that also fails the engine surfaces a loud fatal so the
+        # operator can re-run the interactive token helper.
+        self._token_refresh_in_flight = False
+        self._token_refresh_failed = False
+
         self.on_tick: OnTick | None = None
         self.on_candle: OnCandle | None = None
 
@@ -153,6 +164,8 @@ class ICMarketsFeed:
 
         if isinstance(msg, ProtoOAErrorRes):
             log.warning("icmarkets_error", code=msg.errorCode, desc=msg.description)
+            if msg.errorCode == "CH_ACCESS_TOKEN_INVALID":
+                self._handle_token_expired(client)
             return
 
         if isinstance(msg, ProtoOAApplicationAuthRes):
@@ -259,6 +272,73 @@ class ICMarketsFeed:
             return
 
         log.debug("icmarkets_msg_unhandled", type=msg_type)
+
+    def _handle_token_expired(self, client: "Client") -> None:
+        """Refresh the OAuth access token and resume the auth handshake.
+
+        Runs on the Twisted reactor thread. A blocking HTTP call here
+        is acceptable — the reactor thread is dedicated to this feed
+        and nothing time-critical depends on it during auth setup.
+
+        Guards against retry loops:
+        - `_token_refresh_in_flight` blocks re-entry during the call
+        - `_token_refresh_failed` latches on hard failure so subsequent
+          CH_ACCESS_TOKEN_INVALID errors (Spotware sometimes echoes the
+          same error multiple times) don't repeat the attempt
+        """
+        if self._token_refresh_failed:
+            return
+        if self._token_refresh_in_flight:
+            return
+        if not self._config.refresh_token:
+            log.error(
+                "icmarkets_token_expired_no_refresh",
+                action="set CTRADER_REFRESH_TOKEN in .env or rerun scripts/ctrader_token_helper.py",
+            )
+            self._token_refresh_failed = True
+            return
+
+        self._token_refresh_in_flight = True
+        try:
+            from scripts.ctrader_refresh_token import refresh_tokens, _write_env_tokens
+            from pathlib import Path
+
+            log.info("icmarkets_token_refresh_start")
+            new_access, new_refresh = refresh_tokens(
+                client_id=self._config.client_id,
+                client_secret=self._config.client_secret,
+                refresh_token=self._config.refresh_token,
+            )
+            # Persist to .env so subsequent process restarts pick up the
+            # rotated pair. Spotware rotates refresh_token on every
+            # exchange — the old refresh_token is dead after this call.
+            _write_env_tokens(Path(".env"), new_access, new_refresh)
+            # Update in-memory state + process env so any other code
+            # path reading CTRADER_ACCESS_TOKEN gets the fresh value.
+            self._config.access_token = new_access
+            self._config.refresh_token = new_refresh
+            os.environ["CTRADER_ACCESS_TOKEN"] = new_access
+            os.environ["CTRADER_REFRESH_TOKEN"] = new_refresh
+            log.info("icmarkets_token_refreshed",
+                     access_preview=f"{new_access[:8]}...{new_access[-6:]}")
+
+            # Resume the auth handshake. We last successfully sent
+            # ProtoOAApplicationAuthRes; the failure was on the
+            # GetAccountListByAccessTokenReq that uses the access token.
+            # Re-send that request with the fresh token; the existing
+            # message-dispatch state machine handles the rest.
+            req = ProtoOAGetAccountListByAccessTokenReq()
+            req.accessToken = new_access
+            self._send_quiet(client, req)
+        except Exception as e:
+            log.error(
+                "icmarkets_token_refresh_failed",
+                error=str(e),
+                action="rerun scripts/ctrader_token_helper.py (browser OAuth) to mint a new refresh token",
+            )
+            self._token_refresh_failed = True
+        finally:
+            self._token_refresh_in_flight = False
 
     def _send_quiet(self, client: "Client", req) -> None:
         """Send a request and swallow the Deferred's TimeoutError.

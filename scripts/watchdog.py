@@ -49,6 +49,13 @@ CHECK_INTERVAL = 90               # seconds between checks
 HEARTBEAT_STALE_WARN = 180        # 3 missed heartbeats — warn
 HEARTBEAT_KICK_THRESHOLD = 360    # 6 missed heartbeats — kick
 CANDLE_STALE_KICK_THRESHOLD = 7200  # 2h — handles 1h-candle natural cadence with grace
+# 2026-06-08: engine alive + heartbeat fresh + tick_count==0 = data-blind.
+# Surfaces auth/config failure modes the file-mtime + candle-age checks
+# both miss (last_candle_age_s is null when no candles ever arrive, so
+# the candle check at line 162 falls through). Caused 21-day silent
+# gold-engine outage when the cTrader access token expired.
+DATA_BLIND_WARN_THRESHOLD_S = 1800
+DATA_BLIND_NOTIFY_COOLDOWN_S = 3600  # don't spam — once per hour at most
 
 ENGINES = [
     {
@@ -68,6 +75,7 @@ KICK_COOLDOWN_S = 600
 
 _running = True
 _last_kick_at: dict[str, float] = {}
+_last_data_blind_notify_at: dict[str, float] = {}
 
 
 def _now_iso() -> str:
@@ -125,6 +133,28 @@ def _read_candle_age_s(heartbeat_path: Path) -> float | None:
         return None
 
 
+def _read_heartbeat_metrics(heartbeat_path: Path) -> dict:
+    """Return {tick_count, uptime_s} from heartbeat or {} on failure."""
+    try:
+        data = json.loads(heartbeat_path.read_text())
+        return {
+            "tick_count": int(data.get("tick_count", 0)),
+            "uptime_s": float(data.get("uptime_s", 0.0)),
+        }
+    except (OSError, ValueError, json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _is_data_blind(metrics: dict) -> bool:
+    """Engine alive (uptime > warmup grace) but receiving zero ticks."""
+    if not metrics:
+        return False
+    return (
+        metrics.get("uptime_s", 0.0) > DATA_BLIND_WARN_THRESHOLD_S
+        and metrics.get("tick_count", 0) == 0
+    )
+
+
 def _check_engine(engine: dict) -> dict:
     label = engine["label"]
     hb_path: Path = engine["heartbeat_path"]
@@ -143,6 +173,7 @@ def _check_engine(engine: dict) -> dict:
         return {"label": label, "status": "ERROR", "heartbeat_age_s": None}
 
     candle_age = _read_candle_age_s(hb_path)
+    metrics = _read_heartbeat_metrics(hb_path)
 
     # File-mtime kick (process liveness)
     if hb_age > HEARTBEAT_KICK_THRESHOLD:
@@ -172,6 +203,23 @@ def _check_engine(engine: dict) -> dict:
         return {"label": label, "status": "KICKED_CANDLE_STALE", "heartbeat_age_s": hb_age,
                 "candle_age_s": candle_age}
 
+    # Data-blind: process alive + heartbeat fresh + zero ticks past warmup.
+    # Don't kick — restarting won't fix expired auth tokens or a wedged
+    # subscribe handshake. Notify the operator so they can act.
+    if _is_data_blind(metrics):
+        last_notify = _last_data_blind_notify_at.get(label, 0.0)
+        if now - last_notify > DATA_BLIND_NOTIFY_COOLDOWN_S:
+            _log_alert("WARN",
+                       f"engine alive but tick_count=0 after uptime {metrics['uptime_s']:.0f}s "
+                       f"(>{DATA_BLIND_WARN_THRESHOLD_S}s) — check feed auth/subscribe",
+                       engine=label)
+            _macos_notify(f"algo-trading: {label} engine DATA_BLIND",
+                          f"alive {metrics['uptime_s']:.0f}s, zero ticks — check feed auth")
+            _last_data_blind_notify_at[label] = now
+        return {"label": label, "status": "DATA_BLIND", "heartbeat_age_s": hb_age,
+                "candle_age_s": candle_age, "uptime_s": metrics.get("uptime_s"),
+                "tick_count": metrics.get("tick_count")}
+
     # Soft warning
     if hb_age > HEARTBEAT_STALE_WARN:
         _log_alert("WARN", f"heartbeat {hb_age:.0f}s old (>{HEARTBEAT_STALE_WARN}s)", engine=label)
@@ -186,7 +234,7 @@ def _write_status(per_engine: list[dict]) -> None:
     STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
     overall = "HEALTHY"
     for e in per_engine:
-        if e["status"] in ("KICKED_HB_STALE", "KICKED_CANDLE_STALE"):
+        if e["status"] in ("KICKED_HB_STALE", "KICKED_CANDLE_STALE", "DATA_BLIND"):
             overall = "DEGRADED"
         elif e["status"] in ("STALE", "NO_HEARTBEAT", "ERROR") and overall == "HEALTHY":
             overall = "WARN"

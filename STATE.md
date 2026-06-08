@@ -1,6 +1,84 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-05-05 (Session 24 — Live triage + engine stall fix: gold engine 87h STALE rooted in silent cTrader trendbar subscribe failure; patched icmarkets_feed.py + rewrote watchdog to multi-engine kickstart-based; disabled vol_momentum_gold + funding_carry + donchian_ensemble_adx; closed 3 orphan positions for net realized +$11.26.)
+**Last updated:** 2026-06-08 (Session 27 — gold engine root-caused: 21-day silent outage from expired cTrader OAuth token + watchdog blind spot. Refreshed tokens, gold engine recovered (135 ticks in 60s), shipped `scripts/ctrader_refresh_token.py` non-interactive refresh helper, patched `icmarkets_feed._handle_token_expired()` for auto-refresh on `CH_ACCESS_TOKEN_INVALID`, patched watchdog v3 with `DATA_BLIND` status check.)
+
+## Session 27 — Gold engine silent outage root-cause + auto-refresh (2026-06-08)
+
+**Trigger:** Prince asked for an engine health check after ~28 days idle.
+
+**Findings:**
+- **Crypto engine HEALTHY**: vol_momentum trading actively, 39 trades in last 7 days, 79 in last 30 days, equity $9,829.75 (−1.70%). 3 open SHORT positions (ADA/DOT/DOGE) at near-breakeven.
+- **Gold engine SILENTLY BROKEN for 21 days**: heartbeat said HEALTHY but `tick_count = 0` since 2026-05-18 05:12 UTC. cTrader OAuth access token expired exactly 30 days after issue (issued 2026-04-18 in Session 23 D1). Engine loop: app-auth OK → `ProtoOAErrorRes(code="CH_ACCESS_TOKEN_INVALID")` → warning log → reconnect → repeat. **379 token errors** in the gap.
+- **Watchdog v2 blind spot**: `last_candle_age_s` was `null` (no candles ever arrived), so the candle-stale kick at `watchdog.py:162` fell through. Heartbeat file mtime stayed fresh (process alive, just data-blind). File-mtime kick at line 148 also stayed silent.
+
+**Fixes shipped:**
+1. **`scripts/ctrader_refresh_token.py`** (new) — non-interactive `grant_type=refresh_token` exchange. Writes rotated access+refresh pair back to `.env`. Used one-shot today to recover the engine (135 ticks in 60s post-restart).
+2. **`src/data/feeds/icmarkets_feed.py::_handle_token_expired()`** — branches on `CH_ACCESS_TOKEN_INVALID`, calls `refresh_tokens()`, persists, updates in-memory config + `os.environ`, resumes the handshake with `GetAccountListByAccessTokenReq`. Guarded by `_token_refresh_in_flight` + `_token_refresh_failed` for at-most-once-per-process semantics. `ICMarketsConfig.refresh_token` field added (loaded from `CTRADER_REFRESH_TOKEN`).
+3. **`scripts/watchdog.py` v3** — new `DATA_BLIND` status (`uptime_s > 1800` AND `tick_count == 0`), WARN log + macOS notify, **NO kick** (kicking won't recover auth failures). Notify cooldown 3600s to prevent spam.
+
+**Tests:** 5 new in `tests/test_data/test_icmarkets_feed.py::TestTokenAutoRefresh` (env loading, no-refresh-token latch, end-to-end refresh+resume, retry-loop guard, HTTP failure latch). 12 new in `tests/test_ops/test_watchdog.py` (metric parsing, DATA_BLIND boundary cases, no-kick verification, notify cooldown). All passing.
+
+**Lessons** (added to ARCHITECTURE.md Known Gotchas + memory): auth that expires on a wall-clock schedule must auto-refresh; "engine alive but receiving zero data past warmup" is its own watchdog signal distinct from `candle_age` (which is undefined when no candles ever arrive).
+
+**Post-fix verification:**
+- Gold heartbeat: uptime_s=60, tick_count=135, status=HEALTHY (was: uptime_s=8347, tick_count=0)
+- Watchdog status: overall=HEALTHY, both engines HEALTHY, gold candle_age_s=42 (was: null)
+- Combined paper equity unchanged at $19,641.78 ($9,829.75 crypto + $9,812.03 gold).
+
+## Session 26 — macOS sleep root-cause + caffeinate wrap (2026-05-11)
+
+The 13h /loop monitor in Session 25 ended with EXIT_STALL (no organic vol_momentum signal in 12.4h) — Prince asked "why is the engine restarting every 30 min?" Investigation found:
+
+**Pattern in engine_err.log:** Every restart preceded by `shutdown_signal_received` → `engine_stopping` (clean SIGTERM, not a crash). 9 of top 10 longest log gaps (1300–2400s of silence) resume with `disconnected` (Binance WS broke), 1 with `shutdown_signal_received`.
+
+**Root cause:** macOS idle-sleep. The launchd plists had no `caffeinate` wrapper, no `LSUIElement` flag, no power-assertion call. `pmset -g` showed `sleep 1` (1-min idle timeout) + `lowpowermode 1`. `pmset -g log` recorded **516 sleep/wakes since boot 2026-05-06** — ~100/day. When the Mac sleeps, the engine process is suspended → heartbeat stops being written → Binance WS socket times out during sleep → on wake the watchdog sees the stale heartbeat (`hb_age > 360s`) and kicks the engine via `launchctl kickstart -k`.
+
+The Session 24 watchdog v2 (2026-05-05) was technically working as designed — kicking stale engines — but the underlying problem was that the engines should never have been allowed to sleep in the first place.
+
+**Fix shipped (Session 26):** wrapped all 4 launchd services with `/usr/bin/caffeinate -i` so the Mac cannot enter idle-sleep while any of them runs. `caffeinate` holds a `PreventUserIdleSystemSleep` assertion for as long as its child process is alive. Plists backed up to `~/Library/LaunchAgents/.bak.20260511/`.
+
+Services wrapped:
+- `com.algo-trading.engine` (crypto, Binance)
+- `com.algo-trading.engine-gold` (XAUUSD, IC Markets cTrader)
+- `com.algo-trading.risk-server`
+- `com.algo-trading.watchdog`
+
+Post-reload verification:
+- `ps aux` shows 4 distinct `/usr/bin/caffeinate -i python …` parent processes
+- `pmset -g | grep sleep` shows `sleep prevented by caffeinate, caffeinate, caffeinate, caffeinate, caffeinate, powerd, Claude` (5 caffeinates: our 4 plus an unrelated terminal caffeinate Prince had running)
+- `pmset -g assertions` confirms each caffeinate asserting on behalf of its specific Python child PID
+
+**Concurrent fact:** Session 25's FatFingerGuard fix is still in place — per-pair averages migrated, meta-label filter in shadow mode, all 136 risk tests passing. Reason no organic fill landed during the 13h monitor was almost certainly that the engine kept getting kicked every ~30-90 min, dropping vol_momentum's internal `_closes` deque buffer and re-arming the 168-bar momentum lookback from scratch on each restart. With caffeinate preventing sleep-driven kicks, the strategy can finally accumulate enough live history to fire entries.
+
+**Still open after this session:** Watch for first organic vol_momentum fill now that the engine can stay up. Backtest replays of disabled strategies (carry-over from Session 24). M3S allocator wire-into-live-sizing.
+
+
+
+## Session 25 — FatFingerGuard cross-strategy lockup fix (2026-05-09)
+
+While inspecting strategy performance, vol_momentum (the only structural winner) was found to have **0 fills in 11 days** despite firing LONG signals every few hours. Root cause traced to FatFingerGuard:
+
+- The Session 22 Day 5 fix (commit `e36e075`) added persistence for the running average so it survives engine restarts. But the average was **global across all (strategy, symbol) pairs**.
+- Strategies had wildly different qty scales: vol_momentum/DOTUSDT ~482, funding_carry/BTCUSDT-CARRY ~17, donchian/ETH ~1. The first small fill after a state reset (trade #20, 2026-04-28 BTCUSDT-CARRY SELL qty=5.679) Welford'd the avg down to 14.235 with count=2. Every vol_momentum signal (qty 300–3,600) then tripped the 10× check.
+- Verified arithmetically: persisted state was `(avg=22.79, count=1)` from earlier funding_carry fills, then 22.79 + (5.679 − 22.79)/2 = **14.235** ✓ (matches persisted value to 14 digits).
+
+**Fix shipped:**
+- `src/risk/state.py` — replaced scalar `fat_finger_avg_trade_size`/`_count` with `fat_finger_avg_pairs: dict[str, tuple[float, int]]` keyed `"strategy/symbol"`. JSON-persisted. Legacy keys read silently and dropped on next persist.
+- `src/risk/fat_finger.py` — per-pair lookup in `check()`; new `_QTY_CHECK_WARMUP=5` constant skips the qty check until 5 fills accumulate for that pair (prevents single-fill seeding).
+- `src/risk/manager.py` — `update_fill` passes `(strategy, fill.symbol, fill.quantity)`.
+- `scripts/operational/migrate_fat_finger_per_pair.py` — one-shot migration replays all historical fills through Welford's per pair.
+- `tests/test_risk/test_fat_finger_persistence.py` — rewritten for new API (cross-strategy isolation + warmup behavior + legacy-key migration).
+
+**Live state post-fix:**
+- Crypto DB: 5 pairs migrated. `vol_momentum/DOTUSDT` avg=482.5/n=10 → 10× cap = 4,825 (vol_momentum signals 300–3,600 will pass).
+- Gold DB: 2 pairs migrated. `vol_momentum_gold/XAUUSD` avg=0.43/n=80 (strategy still disabled per Session 24 triage; cap doesn't matter).
+- Engines + watchdog stopped during migration, restarted clean. DB backups at `data/trades.db.bak.bugfix.20260508T192154Z` + `data/trades_gold.db.bak.bugfix.20260508T192154Z`.
+- Sanity-check: simulated DOTUSDT/ADAUSDT/DOGEUSDT vol_momentum signals all return APPROVED against live migrated state.
+- Test suite: 136/136 risk tests pass (was 130 + 6 new for cross-strategy isolation, warmup, legacy-key migration).
+
+**Still open after this session:** Wait for first organic vol_momentum signal post-fix (next 1h candle close that triggers the strategy's entry filter); confirm fill lands in `trades` table and risk_decisions logs APPROVED. Backtest replays of disabled strategies before re-enable (Session 24 carry-over).
+
+
 
 ## Session 24 — Live triage + engine stall fix (2026-05-05)
 
