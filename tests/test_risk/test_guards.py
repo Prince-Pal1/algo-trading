@@ -79,14 +79,50 @@ class TestFatFingerGuard:
         state = _make_state()
         state.current_equity = 100_000.0
         ff = FatFingerGuard(cfg, state)
-        # Set avg trade size very small
-        ff.update_avg_trade_size(0.001)
-        ff.update_avg_trade_size(0.001)
+        # Seed past the warmup with a very small avg trade size for the same
+        # (strategy, symbol) the test signal uses.
+        for _ in range(6):
+            ff.update_avg_trade_size("test_strat", "BTCUSDT", 0.001)
         # entry=50000, SL=49000, risk_pct=0.10 → qty = (100K*0.10)/1000 = 10
         # 10 >> 5 * 0.001 = 0.005
         result = ff.check(_make_signal(risk_pct=0.10))
         assert result is not None
         assert "FAT_FINGER_QTY" in result
+
+    def test_qty_check_skipped_during_warmup(self):
+        """A single small fill must not lock the guard at a low average.
+
+        This is the core 2026-05-09 regression: a 5.679-qty BTCUSDT-CARRY
+        fill set count=2/avg=14.235 globally, then every vol_momentum
+        signal (qty 300+) was rejected for 11 days. With per-pair
+        averages and a warmup, a small first fill on one pair cannot
+        affect another pair, and even on the same pair the qty check
+        is skipped until count reaches the warmup threshold.
+        """
+        cfg = RiskConfig(fat_finger_max_qty_mult=10.0, fat_finger_max_value=1_000_000_000)
+        state = _make_state()
+        state.current_equity = 100_000.0
+        ff = FatFingerGuard(cfg, state)
+        # One small fill — should NOT cause a rejection on the next signal,
+        # because warmup blocks the qty check until count >= 5.
+        ff.update_avg_trade_size("test_strat", "BTCUSDT", 0.001)
+        # A normal-sized signal (qty would be 10, way more than 10× 0.001)
+        # must still pass during warmup.
+        assert ff.check(_make_signal(risk_pct=0.10)) is None
+
+    def test_qty_check_isolated_per_strategy_symbol(self):
+        """Small fills on one (strategy, symbol) must not affect another."""
+        cfg = RiskConfig(fat_finger_max_qty_mult=10.0, fat_finger_max_value=1_000_000_000)
+        state = _make_state()
+        state.current_equity = 100_000.0
+        ff = FatFingerGuard(cfg, state)
+        # Saturate funding_carry/BTCUSDT-CARRY with tiny fills past warmup.
+        for _ in range(10):
+            ff.update_avg_trade_size("funding_carry", "BTCUSDT-CARRY", 5.0)
+        # vol_momentum/DOTUSDT signal must still pass — its own pair's avg
+        # is empty, so the qty check skips during warmup.
+        assert ff.check(_make_signal(strategy="vol_momentum", symbol="DOTUSDT",
+                                     entry_price=1.25, stop_loss=1.20, risk_pct=0.01)) is None
 
 
 # ── Position Limits Tests ──

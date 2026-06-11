@@ -74,13 +74,16 @@ class RiskState:
         self.active_mode: str = "AGGRESSIVE"
         self.custom_multipliers: dict[str, float] = {}
 
-        # FatFingerGuard running average (persisted so it survives process
-        # restarts; before persistence was added, an engine restart reset
-        # the average to 0.0 and the first post-restart signal set avg to
-        # its own size — causing every subsequent larger signal to be
-        # rejected as "10× avg" forever. See plan yes-do-a-deepinvestigation.)
-        self.fat_finger_avg_trade_size: float = 0.0
-        self.fat_finger_trade_count: int = 0
+        # FatFingerGuard running averages, keyed per (strategy, symbol).
+        # Map: "strategy/symbol" -> (avg_qty, count). Per-pair because qty
+        # scales differ by orders of magnitude across strategies (e.g.
+        # vol_momentum DOTUSDT ~838 vs funding_carry BTCUSDT-CARRY ~17),
+        # so a global average is meaningless and one tiny fill from a
+        # different pair can lock the guard at a low value forever.
+        # Replaces the pre-2026-05-09 scalar fat_finger_avg_trade_size /
+        # fat_finger_trade_count fields, which are still loaded for
+        # backwards compat (see load_from_db) and then discarded.
+        self.fat_finger_avg_pairs: dict[str, tuple[float, int]] = {}
 
     def load_from_db(self) -> None:
         """Restore state from SQLite on startup."""
@@ -109,10 +112,15 @@ class RiskState:
                     self.active_mode = value
                 elif key == "custom_multipliers":
                     self.custom_multipliers = orjson.loads(value)
-                elif key == "fat_finger_avg_trade_size":
-                    self.fat_finger_avg_trade_size = float(value)
-                elif key == "fat_finger_trade_count":
-                    self.fat_finger_trade_count = int(value)
+                elif key == "fat_finger_avg_pairs":
+                    raw = orjson.loads(value)
+                    self.fat_finger_avg_pairs = {
+                        k: (float(v[0]), int(v[1])) for k, v in raw.items()
+                    }
+                # Legacy keys: ignored on read; persist() will not write them
+                # back, so they're cleaned up implicitly on the next save.
+                elif key in ("fat_finger_avg_trade_size", "fat_finger_trade_count"):
+                    pass
             conn.close()
             log.info("risk_state_loaded", peak_equity=self.peak_equity,
                      kill_switch=self.kill_switch_active)
@@ -137,14 +145,22 @@ class RiskState:
                 ("last_monthly_reset", self._last_monthly_reset),
                 ("active_mode", self.active_mode),
                 ("custom_multipliers", orjson.dumps(self.custom_multipliers).decode()),
-                ("fat_finger_avg_trade_size", str(self.fat_finger_avg_trade_size)),
-                ("fat_finger_trade_count", str(self.fat_finger_trade_count)),
+                (
+                    "fat_finger_avg_pairs",
+                    orjson.dumps(
+                        {k: [v[0], v[1]] for k, v in self.fat_finger_avg_pairs.items()}
+                    ).decode(),
+                ),
             ]
             for key, value in pairs:
                 conn.execute(
                     "INSERT OR REPLACE INTO risk_state (key, value, updated_at) VALUES (?, ?, ?)",
                     (key, value, now),
                 )
+            # Drop superseded scalar keys from disk so old rows don't linger.
+            conn.execute(
+                "DELETE FROM risk_state WHERE key IN ('fat_finger_avg_trade_size', 'fat_finger_trade_count')"
+            )
             conn.commit()
             conn.close()
         except sqlite3.OperationalError as e:

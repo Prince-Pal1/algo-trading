@@ -177,7 +177,7 @@ class RiskManager:
     def update_fill(self, fill: Fill, strategy_name: str = "") -> None:
         """Update state after a trade executes."""
         self.state.update_equity(self.state.current_equity)
-        self.fat_finger.update_avg_trade_size(fill.quantity)
+        self.fat_finger.update_avg_trade_size(strategy_name, fill.symbol, fill.quantity)
 
         # Track position
         if fill.side.value == "BUY":

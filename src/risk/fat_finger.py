@@ -2,7 +2,7 @@
 
 Prevents obviously wrong orders:
 - Notional value exceeds max order size
-- Quantity exceeds N× average trade size
+- Quantity exceeds N× average trade size (per-(strategy, symbol))
 - Entry price deviates > 2% from last known price
 """
 
@@ -17,6 +17,14 @@ from .state import RiskState
 log = get_logger("fat_finger")
 
 _PRICE_DEVIATION_PCT = 0.02  # 2% max deviation from last known
+# Skip the qty check until we've seen at least this many fills for a given
+# (strategy, symbol) pair. Stops a single tiny first fill from locking the
+# average at a low value and rejecting every subsequent normal-sized signal.
+_QTY_CHECK_WARMUP = 5
+
+
+def _pair_key(strategy: str, symbol: str) -> str:
+    return f"{strategy}/{symbol}"
 
 
 class FatFingerGuard:
@@ -25,14 +33,10 @@ class FatFingerGuard:
     def __init__(self, config: RiskConfig, state: RiskState):
         self._cfg = config
         self._state = state
-        # Restore running-average state from RiskState (which loaded it from
-        # the risk_state SQLite table). Before this restore was added, every
-        # engine restart lost the average and the first small post-restart
-        # signal locked in avg≈31, rejecting every subsequent normal-sized
-        # signal as "10× avg" forever.
-        self._avg_trade_size: float = float(state.fat_finger_avg_trade_size)
-        self._trade_count: int = int(state.fat_finger_trade_count)
         self._last_prices: dict[str, float] = {}
+
+    def _get_pair(self, strategy: str, symbol: str) -> tuple[float, int]:
+        return self._state.fat_finger_avg_pairs.get(_pair_key(strategy, symbol), (0.0, 0))
 
     def check(self, signal: Signal, *,
              resolved_max_value: float | None = None) -> str | None:
@@ -64,16 +68,22 @@ class FatFingerGuard:
                     return (f"FAT_FINGER_NOTIONAL: estimated ${est_notional:,.0f} > "
                             f"max ${max_value:,.0f}")
 
-        # Check quantity vs average
-        if self._avg_trade_size > 0 and self._cfg.fat_finger_max_qty_mult > 0:
-            if signal.stop_loss and signal.stop_loss != entry:
-                risk_per_unit = abs(entry - signal.stop_loss)
-                if risk_per_unit > 0:
-                    est_quantity = (equity * risk_pct) / risk_per_unit
-                    if est_quantity > self._avg_trade_size * self._cfg.fat_finger_max_qty_mult:
-                        return (f"FAT_FINGER_QTY: {est_quantity:.2f} > "
-                                f"{self._cfg.fat_finger_max_qty_mult}x avg "
-                                f"({self._avg_trade_size:.2f})")
+        # Check quantity vs per-(strategy, symbol) average
+        avg, count = self._get_pair(signal.strategy_name, signal.symbol)
+        if (
+            count >= _QTY_CHECK_WARMUP
+            and avg > 0
+            and self._cfg.fat_finger_max_qty_mult > 0
+            and signal.stop_loss
+            and signal.stop_loss != entry
+        ):
+            risk_per_unit = abs(entry - signal.stop_loss)
+            if risk_per_unit > 0:
+                est_quantity = (equity * risk_pct) / risk_per_unit
+                if est_quantity > avg * self._cfg.fat_finger_max_qty_mult:
+                    return (f"FAT_FINGER_QTY: {est_quantity:.2f} > "
+                            f"{self._cfg.fat_finger_max_qty_mult}x avg "
+                            f"({avg:.2f}) for {signal.strategy_name}/{signal.symbol}")
 
         # Check price deviation from last known
         last = self._last_prices.get(signal.symbol)
@@ -90,17 +100,16 @@ class FatFingerGuard:
         if price > 0:
             self._last_prices[symbol] = price
 
-    def update_avg_trade_size(self, quantity: float) -> None:
-        """Update running average trade size (Welford's method).
+    def update_avg_trade_size(self, strategy: str, symbol: str, quantity: float) -> None:
+        """Update running average trade size for a (strategy, symbol) pair.
 
-        Also mirrors the updated values into RiskState so they persist across
-        process restarts. The owning RiskManager.update_fill() calls
-        state.persist() immediately after this method, making the durability
-        guarantee: every fill's contribution to the running average is
-        committed to disk before the method returns to the caller.
+        Welford's method, applied independently per pair. The owning
+        RiskManager.update_fill() calls state.persist() immediately after,
+        so every fill's contribution is committed to disk before the
+        method returns.
         """
-        self._trade_count += 1
-        self._avg_trade_size += (quantity - self._avg_trade_size) / self._trade_count
-        # Mirror into RiskState so the next persist() picks it up.
-        self._state.fat_finger_avg_trade_size = self._avg_trade_size
-        self._state.fat_finger_trade_count = self._trade_count
+        key = _pair_key(strategy, symbol)
+        avg, count = self._state.fat_finger_avg_pairs.get(key, (0.0, 0))
+        count += 1
+        avg += (quantity - avg) / count
+        self._state.fat_finger_avg_pairs[key] = (avg, count)

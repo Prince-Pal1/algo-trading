@@ -72,7 +72,10 @@ max_concurrent_positions = 3
 # research memo's "small uplift on validated primary models" prediction.
 # Shadow mode is the right deployment until we retrain with LightGBM.
 enabled = true
-shadow_mode = false
+shadow_mode = true   # 2026-05-10 (Session 25): flipped from false → true. Was silently
+                     # vetoing 100% of vol_momentum signals using a near-random model
+                     # (AUC 0.48–0.57). Inline comment above already said shadow is the
+                     # right deployment for now; config disagreed with docs.
 veto_threshold = 0.30
 scale_sharpness = 8.0
 scale_mode = false
