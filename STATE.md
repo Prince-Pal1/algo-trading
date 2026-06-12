@@ -1,6 +1,28 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-06-08 (Session 27 — gold engine root-caused: 21-day silent outage from expired cTrader OAuth token + watchdog blind spot. Refreshed tokens, gold engine recovered (135 ticks in 60s), shipped `scripts/ctrader_refresh_token.py` non-interactive refresh helper, patched `icmarkets_feed._handle_token_expired()` for auto-refresh on `CH_ACCESS_TOKEN_INVALID`, patched watchdog v3 with `DATA_BLIND` status check.)
+**Last updated:** 2026-06-12 (Session 28 — vol_momentum "edge decay" root-caused as a SYSTEMATIC stale-warmup-cache bug, not strategy logic. Warmup recency gate + phantom-signal suppression shipped, 472 phantom rows purged, XAUUSD cache rebuilt (2y, ends today), `caffeinate -i -s`, both engines restarted clean and verified downloading fresh warmup data. vol_momentum live stats quarantined until ≥30d clean window.)
+
+## Session 28 — vol_momentum stale-warmup root-cause + fixes (2026-06-11/12)
+
+**Trigger:** Prince asked why vol_momentum (only active strategy, "PF 3.60 winner") suddenly turned poor: −$90/30d, 45% WR, ~100% short.
+
+**Investigation path (the wrong turn matters):** trade-level analysis first suggested "the engine drops LONG signals" — 286 LONGs in `signals` since May, 0 reaching risk manager, while 100% of SHORTs flowed through. That was a red herring caused by *phantom* rows: warmup replay logs signals to the live `signals` table (router has storage attached; engine discards them because `paper_executor` is None during `start()`... actually the audit/risk path is simply never reached for replayed candles). Live-signal fingerprints: hour-aligned timestamps + current prices + `signal_audit` row. Phantom fingerprints: restart-time wall-clock timestamps + frozen stale prices + no audit row.
+
+**Real root cause (4-link chain):**
+1. `data/historical/*.parquet` crypto caches frozen 2026-04-17 (nothing live-path refreshes them).
+2. `warmup()` checked `len(df) < min_candles` only — 17,927 stale rows passed; fresh-download fallback never fired.
+3. Watchdog kicks restarted engines 2–3×/day (`caffeinate -i` doesn't block lid-close sleep) → stale April candles re-primed vol_momentum's 168-bar deque every ~10h; needs 7 uninterrupted days to flush.
+4. Live "momentum" = current price ÷ April price − 1 → permanently negative after May's crypto decline → structurally locked short, churning chop with fees = 2/3 of the loss. Verified: observed signal momentum matches gap arithmetic per symbol (DOGE −10% vs −14.5% calc, DOT −30.7% vs −27.9%, ADA −42.7% vs −36.2%).
+
+**Gold near-miss:** XAUUSD_1h cache stale at 4618 (May 6) vs live ~4208 (−8.9%) with donchian_gold ENABLED and waiting for its first fill — a poisoned Donchian channel could have fired a bogus breakdown trade any day. Caught before damage.
+
+**Shipped:** warmup recency gate (+ persist downloads back to parquet; loud skip when stale + undownloadable; 60h tolerance floor for gold weekends), router storage detached during replay, `scripts/operational/purge_warmup_phantom_signals.py` (458 crypto + 14 gold purged, DB backups + CSV audit), XAUUSD_1h rebuilt full 2y (note: `download_xauusd.py` REPLACES, doesn't merge — a `--years 0.2` run briefly truncated the file, recovered with `--years 2.0`), `caffeinate -i -s` ×4 plists, 12 warmup tests (legacy ones had silently started hitting live Binance — now network-free).
+
+**Live verification post-restart:** crypto warmup detected 55-day-stale caches (`cache_age_min: 79977`) and downloaded fresh bars for all 7 pairs; gold tolerated its 11h-fresh cache after Binance download correctly failed; both engines HEALTHY and ticking; signal-table counts unchanged (no new phantoms).
+
+**Key reframe for decision-making:** the April "PF 3.60" sample was 7 trips with +$152 from a single DOT long; everything after May 18 ran on poisoned data. vol_momentum's true live edge is UNKNOWN — quarantine all live stats, freeze the scale-up decision until ≥30 days of clean trades.
+
+**Still open after this session:** Workstream A reconcile (May 6 commits vs Session 24 replay list); gold trendbar backfill (warmup has no Binance fallback for XAUUSD); watch first clean vol_momentum signals for realistic momentum values; meta-label gate (BLOCKED_COLD_START — note its training rows in `signal_audit` were never polluted); swift_alma_v2 obituary ingestion still pending.
 
 ## Session 27 — Gold engine silent outage root-cause + auto-refresh (2026-06-08)
 

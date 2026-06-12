@@ -158,13 +158,19 @@ class TestBinanceDownloader:
 class TestWarmup:
     @pytest.mark.asyncio
     async def test_warmup_uses_parquet_when_available(self, tmp_path: Path, monkeypatch):
-        """When parquet has enough candles, warmup should NOT hit the downloader."""
+        """When parquet has enough RECENT candles, warmup should NOT hit the
+        downloader. (Recency is required since the 2026-06-11 stale-cache fix —
+        enough rows alone no longer qualifies.)"""
+        import time as _time
+
         from src.data import warmup as warmup_mod
 
         # Point ParquetStore default dir at tmp
         monkeypatch.chdir(tmp_path)
         store = ParquetStore(data_dir=str(tmp_path / "data" / "historical"))
-        store.save(_make_df(1_700_000_000_000, 20), "BTCUSDT", "1h")
+        # 20 minutely-spaced candles ending now → fresh cache
+        start_ms = int(_time.time() * 1000) - 19 * 60_000
+        store.save(_make_df(start_ms, 20), "BTCUSDT", "1h")
 
         # Fake feature_engine + router that just count handle_candle calls
         handled: list = []

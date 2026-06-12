@@ -9,6 +9,7 @@
     <array>
         <string>/usr/bin/caffeinate</string>
         <string>-i</string>
+        <string>-s</string>
         <string>/Library/Frameworks/Python.framework/Versions/3.11/bin/python3</string>
         <string>-m</string>
         <string>src.main</string>

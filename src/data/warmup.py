@@ -39,6 +39,7 @@ async def warmup(
     timeframes: list[str],
     min_candles: int = 200,
     needed_pairs: set[tuple[str, str]] | None = None,
+    stale_tolerance_min: float | None = None,
 ) -> dict[str, int]:
     """Feed historical candles to warm up indicator buffers + strategy state.
 
@@ -49,6 +50,18 @@ async def warmup(
     Args:
         needed_pairs: If provided, only warmup these (symbol, tf) combos
                       instead of the full cartesian product.
+        stale_tolerance_min: Max age (minutes) of the cache's newest candle
+                      before it is considered unusable when a fresh download
+                      is unavailable. Defaults to max(10 bars, 3600 min) —
+                      the 60h floor tolerates weekend market closure (XAUUSD
+                      Fri 21:00 → Sun 22:00 ≈ 49h).
+
+    A cache that merely has *enough rows* is not enough: feeding stale
+    candles primes lookback buffers (e.g. vol_momentum's 168-bar deque)
+    with old prices, so live "momentum" becomes the price gap between the
+    stale window and now. See docs/investigations/
+    2026-06-11_vol_momentum_stale_warmup.md — this poisoned vol_momentum
+    into a permanent short bias for ~3 weeks.
 
     Returns:
         Dict of {"SYMBOL_TF": candles_loaded} for logging.
@@ -72,6 +85,13 @@ async def warmup(
 
     feature_engine.on_features = _warmup_on_features
 
+    # Detach router storage for the replay: signals emitted on historical
+    # candles must not be logged to the live `signals` table. Before this
+    # guard, every restart wrote phantom rows at stale prices (see
+    # docs/investigations/2026-06-11_vol_momentum_stale_warmup.md).
+    saved_storage = getattr(router, "_storage", None)
+    router._storage = None
+
     try:
         for symbol, tf in pairs:
             key = f"{symbol.upper()}_{tf}"
@@ -84,26 +104,68 @@ async def warmup(
                 result[key] = 0
                 continue
 
-            # Try Parquet first
-            df = parquet.load(symbol.upper(), tf)
+            tf_min = _TF_MINUTES.get(tf, 60)
+            tolerance_min = (
+                stale_tolerance_min
+                if stale_tolerance_min is not None
+                else max(10 * tf_min, 3600.0)
+            )
 
-            if len(df) < min_candles:
-                # Download from Binance
+            # Try Parquet first — but row count alone is NOT sufficient.
+            # The cache must also be recent, else we prime lookback buffers
+            # with stale prices.
+            df = parquet.load(symbol.upper(), tf)
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            cache_age_min = (
+                (now_ms - int(df["timestamp"].max())) / 60_000.0
+                if len(df) else float("inf")
+            )
+            cache_usable = len(df) >= min_candles
+            # "Live-fresh" = newest candle within 3 bars of now; skip download.
+            cache_fresh = cache_usable and cache_age_min <= 3 * tf_min
+
+            if not cache_fresh:
+                # Cache missing, short, or stale → try a fresh download.
                 if downloader is None:
                     downloader = BinanceDownloader()
 
-                tf_min = _TF_MINUTES.get(tf, 60)
                 lookback_min = min_candles * tf_min * 1.1  # 10% extra
                 start = datetime.now(timezone.utc) - timedelta(minutes=lookback_min)
                 start_str = start.strftime("%Y-%m-%d")
 
                 log.info("warmup_downloading", symbol=symbol, tf=tf,
-                         start=start_str, min_candles=min_candles)
+                         start=start_str, min_candles=min_candles,
+                         cache_age_min=round(cache_age_min, 1))
+                fresh_df = None
                 try:
-                    df = await downloader.download(symbol.upper(), tf, start_str)
+                    fresh_df = await downloader.download(symbol.upper(), tf, start_str)
                 except Exception as e:
                     log.warning("warmup_download_failed", symbol=symbol, tf=tf,
                                 error=str(e))
+
+                if fresh_df is not None and not fresh_df.empty:
+                    df = fresh_df
+                    # Persist back so the next restart has a fresh cache even
+                    # if the next download fails (save() merges + dedupes).
+                    try:
+                        parquet.save(fresh_df, symbol.upper(), tf)
+                    except Exception as e:
+                        log.warning("warmup_cache_persist_failed", symbol=symbol,
+                                    tf=tf, error=str(e))
+                elif cache_usable and cache_age_min <= tolerance_min:
+                    # Download unavailable (e.g. XAUUSD is not on Binance) but
+                    # the cache is within tolerance — weekend gaps land here.
+                    log.warning("warmup_cache_stale_tolerated", symbol=symbol,
+                                tf=tf, cache_age_min=round(cache_age_min, 1),
+                                tolerance_min=tolerance_min)
+                else:
+                    # No fresh data and the cache is too old (or too short) to
+                    # trust. Feeding it would poison lookback buffers — skip
+                    # warmup entirely; strategies fill from live candles only.
+                    log.warning("warmup_skipped_stale_cache", symbol=symbol,
+                                tf=tf, cache_rows=len(df),
+                                cache_age_min=round(cache_age_min, 1),
+                                tolerance_min=tolerance_min)
                     result[key] = 0
                     continue
 
@@ -134,8 +196,9 @@ async def warmup(
             log.info("warmup_symbol_done", symbol=symbol, tf=tf, candles=loaded)
 
     finally:
-        # Restore original callback
+        # Restore original callback + signal logging
         feature_engine.on_features = original_callback
+        router._storage = saved_storage
 
     if downloader:
         await downloader.close()
