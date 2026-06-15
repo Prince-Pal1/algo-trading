@@ -1,6 +1,25 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-06-12 (Session 28 — vol_momentum "edge decay" root-caused as a SYSTEMATIC stale-warmup-cache bug, not strategy logic. Warmup recency gate + phantom-signal suppression shipped, 472 phantom rows purged, XAUUSD cache rebuilt (2y, ends today), `caffeinate -i -s`, both engines restarted clean and verified downloading fresh warmup data. vol_momentum live stats quarantined until ≥30d clean window.)
+**Last updated:** 2026-06-16 (Session 29 — donchian_gold warmup-starvation root-caused + fixed: it had emitted 0 signals since 2026-04-29 because `warmup(min_candles=200)` never gave `_compute_indicators` the ≥245 bars needed to produce DCH_120/DCL_120, so the strategy's all-channels-non-NaN guard tripped every bar. Fix: refreshed XAUUSD_1h cache (65.5h→19.4h stale) + bumped `min_candles` 200→300; gold engine restarted and reloaded **300** warmup candles → channels valid, strategy armed. Durable cTrader-trendbar-backfill fix still open. See Session 29 below.) Prior: 2026-06-12 (Session 28 — vol_momentum "edge decay" root-caused as a SYSTEMATIC stale-warmup-cache bug, not strategy logic. Warmup recency gate + phantom-signal suppression shipped, 472 phantom rows purged, XAUUSD cache rebuilt (2y, ends today), `caffeinate -i -s`, both engines restarted clean and verified downloading fresh warmup data. vol_momentum live stats quarantined until ≥30d clean window.)
+
+## Session 29 — donchian_gold warmup starvation root-cause + fix (2026-06-16)
+
+**Trigger:** Prince asked "how are the trading strategies doing", then "dig into why donchian_gold hasn't fired."
+
+**Health snapshot at session start:** both engines HEALTHY/live. Crypto $9,782.86 (−2.17%), 1 open DOT LONG (+$11 unreal, vol_momentum). Gold $9,812.03 (−1.88%), 0 open, **0 trades since 2026-05-05**. Combined −2.03% on $20k. vol_momentum still quarantined (Session 28); since the 06-12 fix it trades LONGs again (5 BUY/1 SELL).
+
+**donchian_gold investigation (the chain):**
+1. Last signal of any kind: **2026-04-29** (7 weeks of silence). Confirmed enabled (XAUUSD 1h, L=1), ADX gate satisfied (~32), session/cooldown not the blocker.
+2. Live `features` logs showed RSI/EMA/ATR/VOL_ZSCORE but **no DCH_*/ADX_14** → channels were NaN → `DonchianEnsembleStrategy` bailed at its `any(pd.isna(v))` guard every bar.
+3. Engine err log smoking gun: the 06-14 17:27 boot hit `cache_age_min=3927.9 > tolerance 3600` → `warmup_skipped_stale_cache` → **0 warmup candles** (vs 200 on the 06-12 boots). Gold has no live warmup download fallback (Binance 400s on XAUUSD), so warmup depends 100% on the hand-refreshed parquet.
+4. **Deeper bug found while verifying the fix:** even a *fresh* 200-candle warmup is insufficient — `_compute_indicators` doesn't emit DCH_120/DCL_120 until **≥245 bars** (measured via real FeatureEngine replay: 240 fails, 245 passes). `min_candles=200 < 245` → the 120-channel never existed → guard always tripped, even on warm engines, unless the buffer organically grew past 245 before a restart reset it.
+
+**Fix shipped:**
+- `download_xauusd.py --years 2.0` → XAUUSD_1h.parquet refreshed (last bar 06-12 00:00 → 06-15 00:00; 65.5h→19.4h stale, back inside 60h tolerance). Old file backed up `data/historical/XAUUSD_1h.parquet.bak.20260616`. (Dukascopy source, REPLACE semantics — used full 2y window per the known footgun.)
+- `src/data/warmup.py`: `min_candles` **200 → 300** (clears the 245-bar DCH_120 floor with margin; covers crypto strategies harmlessly). `COMPUTE_WINDOW=250` already clears 245 by 5 bars (noted as fragile in ARCHITECTURE Known Gotchas).
+- Gold engine restarted (`launchctl kickstart -k`) — warmup now loads **300** candles (`warmup_done: result={"XAUUSD_1h":300}`). Verified via `_compute_indicators` replay that DCH_120/DCL_120/ADX_14 are valid at n≥245; live `features` confirmation watched for the 20:00 UTC candle.
+
+**Still open:** durable fix so the cache never re-stales — **cTrader trendbar warmup backfill** (engine already receives those bars live; kills the Binance-only dependency, closes the Session 28 gold-backfill open item). Cheaper alternatives: per-strategy-class staleness tolerance, or a daily launchd cache-refresh job. donchian_gold can only *enter* during London (07–11 UTC) / NY (13:30–16:30 UTC) sessions with ADX≥25 and a 2-of-3 channel breakout — armed now, but a fill needs that confluence.
 
 ## Session 28 — vol_momentum stale-warmup root-cause + fixes (2026-06-11/12)
 

@@ -54,13 +54,29 @@ def _mock_downloader_cls(download_result: pd.DataFrame | Exception):
 
 # ── Tests ────────────────────────────────────────────────────────────────────
 
+def test_default_min_candles_covers_longest_indicator():
+    """Regression (Session 29): warmup's default min_candles must exceed the
+    ~245-bar floor that _compute_indicators needs before it emits DCH_120/DCL_120.
+    The old 200-bar default meant the 120-period Donchian channel never warmed up,
+    so DonchianEnsembleStrategy's all-channels-non-NaN guard tripped on every bar —
+    donchian_gold emitted 0 signals for 7 weeks. See ARCHITECTURE Known Gotchas
+    2026-06-16.
+    """
+    import inspect
+    default = inspect.signature(warmup).parameters["min_candles"].default
+    assert default >= 245, (
+        f"warmup min_candles default {default} < 245 — the 120-period Donchian "
+        "channel never warms up and donchian_gold can never fire."
+    )
+
+
 class TestNeededPairsFilters:
     @patch("src.data.warmup.BinanceDownloader")
     @patch("src.data.warmup.ParquetStore")
     async def test_needed_pairs_filters(self, mock_parquet_cls, mock_dl_cls):
         """With needed_pairs={(ETH,1h)}, only ETH_1h is warmed up."""
         mock_store = MagicMock()
-        mock_store.load.return_value = _make_ohlcv_df(200)
+        mock_store.load.return_value = _make_ohlcv_df(320)
         mock_parquet_cls.return_value = mock_store
 
         engine = FeatureEngine(indicators=["ema_9"])
@@ -76,7 +92,7 @@ class TestNeededPairsFilters:
 
         # Only ETH_1h should have been warmed up
         assert "ETHUSDT_1h" in result
-        assert result["ETHUSDT_1h"] == 200
+        assert result["ETHUSDT_1h"] == 300
         # BTC and 5m should NOT be in result
         assert "BTCUSDT_1h" not in result
         assert "ETHUSDT_5m" not in result
@@ -86,7 +102,7 @@ class TestNeededPairsFilters:
     async def test_cartesian_fallback(self, mock_parquet_cls, mock_dl_cls):
         """Without needed_pairs, all symbol x tf combos warmed."""
         mock_store = MagicMock()
-        mock_store.load.return_value = _make_ohlcv_df(200)
+        mock_store.load.return_value = _make_ohlcv_df(320)
         mock_parquet_cls.return_value = mock_store
 
         engine = FeatureEngine(indicators=["ema_9"])
@@ -109,7 +125,7 @@ class TestCallbackRestored:
     async def test_callback_restored(self, mock_parquet_cls, mock_dl_cls):
         """feature_engine.on_features is restored to original after warmup."""
         mock_store = MagicMock()
-        mock_store.load.return_value = _make_ohlcv_df(200)
+        mock_store.load.return_value = _make_ohlcv_df(320)
         mock_parquet_cls.return_value = mock_store
 
         engine = FeatureEngine(indicators=["ema_9"])
@@ -163,7 +179,7 @@ class TestRecencyGate:
     async def test_fresh_cache_skips_download(self, mock_parquet_cls, mock_dl_cls):
         """A fresh full cache is used directly; downloader never constructed."""
         mock_store = MagicMock()
-        mock_store.load.return_value = _make_ohlcv_df(200, end_age_min=60)
+        mock_store.load.return_value = _make_ohlcv_df(320, end_age_min=60)
         mock_parquet_cls.return_value = mock_store
 
         result = await warmup(
@@ -172,7 +188,7 @@ class TestRecencyGate:
             needed_pairs={("ethusdt", "1h")},
         )
 
-        assert result["ETHUSDT_1h"] == 200
+        assert result["ETHUSDT_1h"] == 300
         mock_dl_cls.assert_not_called()
 
     @patch("src.data.warmup.ParquetStore")
@@ -207,7 +223,7 @@ class TestRecencyGate:
         cache is tolerated. XAUUSD Sunday-relaunch path."""
         mock_store = MagicMock()
         # 49h stale ≈ gold weekend closure; default tolerance floor is 60h
-        mock_store.load.return_value = _make_ohlcv_df(200, end_age_min=49 * 60)
+        mock_store.load.return_value = _make_ohlcv_df(320, end_age_min=49 * 60)
         mock_parquet_cls.return_value = mock_store
 
         dl_cls, dl = _mock_downloader_cls(RuntimeError("not on binance"))
@@ -219,7 +235,7 @@ class TestRecencyGate:
                 needed_pairs={("xauusd", "1h")},
             )
 
-        assert result["XAUUSD_1h"] == 200
+        assert result["XAUUSD_1h"] == 300
 
     @patch("src.data.warmup.ParquetStore")
     async def test_download_fail_beyond_tolerance_skips_warmup(self, mock_parquet_cls):
@@ -285,7 +301,7 @@ class TestWarmupSignalSuppression:
     @patch("src.data.warmup.ParquetStore")
     async def test_no_signal_logging_during_warmup(self, mock_parquet_cls, mock_dl_cls):
         mock_store = MagicMock()
-        mock_store.load.return_value = _make_ohlcv_df(200)
+        mock_store.load.return_value = _make_ohlcv_df(320)
         mock_parquet_cls.return_value = mock_store
 
         storage = MagicMock()

@@ -37,7 +37,10 @@ async def warmup(
     router: StrategyRouter,
     symbols: list[str],
     timeframes: list[str],
-    min_candles: int = 200,
+    min_candles: int = 300,  # must exceed 2× longest indicator period:
+    # donchian_120 needs ~260 bars before _compute_indicators emits DCH_120/DCL_120
+    # at all (a 200-bar warmup left donchian_gold's NaN-guard tripping forever —
+    # ARCHITECTURE.md Known Gotchas 2026-06-16). 300 = 2×120 + margin.
     needed_pairs: set[tuple[str, str]] | None = None,
     stale_tolerance_min: float | None = None,
 ) -> dict[str, int]:
