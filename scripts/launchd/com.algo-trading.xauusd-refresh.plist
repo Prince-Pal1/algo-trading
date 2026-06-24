@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.algo-trading.xauusd-refresh</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Frameworks/Python.framework/Versions/3.11/bin/python3</string>
+        <string>scripts/download_xauusd.py</string>
+        <string>--years</string>
+        <string>2.0</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/prince/algo-trading</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>/Users/prince/algo-trading</string>
+    </dict>
+
+    <!-- Daily 21:17 local (off-minute jitter per ops hygiene). Keeps
+         data/historical/XAUUSD_1h.parquet < 24h fresh so the gold engine's
+         60h warmup-recency tolerance is never exceeded — fixes the Session 29
+         re-staleness (cache went stale ~2.5d after each manual refresh, which
+         starved donchian_gold's warmup on restart). download_xauusd.py uses
+         REPLACE semantics with the full 2y window (the known small-window
+         truncation footgun). -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>21</integer>
+        <key>Minute</key>
+        <integer>17</integer>
+    </dict>
+
+    <!-- One-shot daily job, not a daemon. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>ThrottleInterval</key>
+    <integer>300</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/prince/algo-trading/data/logs/xauusd_refresh.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/prince/algo-trading/data/logs/xauusd_refresh_err.log</string>
+</dict>
+</plist>
