@@ -82,6 +82,33 @@ rebalance_interval = 24
 momentum_threshold = 0.01
 max_risk_per_trade = 0.012
 
+[adaptive_momentum]
+# Advanced CTA-style evolution of vol_momentum. Multi-horizon vol-normalized
+# momentum + Kaufman Efficiency-Ratio trend gate + tanh conviction sizing +
+# ATR chandelier trailing stop + hysteresis. Kept OFF until Stage 4/5
+# validation passes and results are reviewed (STRATEGY_DEVELOPMENT_PROCESS.md).
+enabled = false
+risk_profile = "SAFE"
+markets = ["DOGEUSDT", "ADAUSDT", "DOTUSDT"]
+timeframe = "1h"
+lookbacks = [24, 72, 168]
+skip_bars = 1
+er_window = 72
+er_threshold = 0.30
+vol_lookback = 168
+vol_target = 0.15
+signal_gain = 2.0
+entry_threshold = 0.15
+exit_threshold = 0.10
+atr_period = 14
+sl_atr_mult = 3.0
+trail_atr_mult = 4.0
+max_hold_bars = 336
+cooldown_bars = 5
+rebalance_interval = 6
+long_only = false
+max_risk_per_trade = 0.012
+
 [asian_range_breakout]
 enabled = false                  # Enable in Phase 2
 risk_profile = "SAFE"

@@ -31,6 +31,7 @@ from src.strategies.scalping.ema_crossover_wf import WalkForwardEMA
 from src.strategies.trend_following.donchian_ensemble import DonchianEnsembleStrategy
 from src.strategies.stat_arb.btc_neutral_mr import BTCNeutralMRStrategy
 from src.strategies.momentum.vol_momentum import VolMomentumStrategy
+from src.strategies.momentum.adaptive_momentum import AdaptiveMomentumStrategy
 from src.strategies.event_driven.liquidation_cascade import LiquidationCascadeStrategy
 from src.utils.types import Signal, SignalAction
 
@@ -150,6 +151,19 @@ BACKTEST_PRESETS: dict[str, dict] = {
             momentum_window=168, vol_lookback=168, vol_target=0.15,
             atr_period=14, sl_atr_mult=3.0, max_hold_bars=168,
             cooldown_bars=5, long_only=True, rebalance_interval=24,
+        ),
+        "indicators": ["atr_14"],
+    },
+    "adaptive_momentum": {
+        "factory": lambda tf: AdaptiveMomentumStrategy(
+            name="adaptive_momentum", markets=["BTCUSDT"], timeframe=tf,
+            lookbacks=(24, 72, 168), skip_bars=1,
+            er_window=72, er_threshold=0.30,
+            vol_lookback=168, vol_target=0.15,
+            signal_gain=2.0, entry_threshold=0.15, exit_threshold=0.10,
+            atr_period=14, sl_atr_mult=3.0, trail_atr_mult=4.0,
+            max_hold_bars=336, cooldown_bars=5, rebalance_interval=6,
+            long_only=False, max_risk_per_trade=0.012,
         ),
         "indicators": ["atr_14"],
     },
@@ -744,6 +758,7 @@ PARAM_PRIORITY = {
     "donchian_ensemble": [("sl_atr_mult", 2.5), ("max_hold_bars", 120), ("min_channels", 2), ("cooldown_bars", 5)],
     "donchian_ensemble_adx": [("sl_atr_mult", 2.5), ("max_hold_bars", 120), ("adx_trend_threshold", 25.0), ("cooldown_bars", 5)],
     "vol_momentum": [("momentum_window", 168), ("vol_target", 0.15), ("sl_atr_mult", 3.0), ("rebalance_interval", 24)],
+    "adaptive_momentum": [("sl_atr_mult", 3.0), ("trail_atr_mult", 4.0), ("er_threshold", 0.30), ("entry_threshold", 0.15)],
     "bb_rsi_mr": [("rsi_oversold", 25.0), ("sl_atr_mult", 3.0), ("adx_threshold", 20.0), ("bb_period", 20)],
     "bb_rsi_mr_opt": [("rsi_oversold", 22.0), ("sl_atr_mult", 3.0), ("adx_threshold", 20.0), ("bb_period", 20)],
 }

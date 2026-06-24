@@ -1,6 +1,31 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-06-16 (Session 29 — donchian_gold warmup-starvation root-caused + fixed: it had emitted 0 signals since 2026-04-29 because `warmup(min_candles=200)` never gave `_compute_indicators` the ≥245 bars needed to produce DCH_120/DCL_120, so the strategy's all-channels-non-NaN guard tripped every bar. Fix: refreshed XAUUSD_1h cache (65.5h→19.4h stale) + bumped `min_candles` 200→300; gold engine restarted and reloaded **300** warmup candles → channels valid, strategy armed. Durable cTrader-trendbar-backfill fix still open. See Session 29 below.) Prior: 2026-06-12 (Session 28 — vol_momentum "edge decay" root-caused as a SYSTEMATIC stale-warmup-cache bug, not strategy logic. Warmup recency gate + phantom-signal suppression shipped, 472 phantom rows purged, XAUUSD cache rebuilt (2y, ends today), `caffeinate -i -s`, both engines restarted clean and verified downloading fresh warmup data. vol_momentum live stats quarantined until ≥30d clean window.)
+**Last updated:** 2026-06-24 (Session 30 — built `adaptive_momentum`, a multi-horizon volatility-normalized regime-gated trend strategy improving on `vol_momentum`. Stage 3-5 backtested/validated on its 1h design TF; head-to-head beats vol_momentum on mean Sharpe (0.45 vs 0.27), roughly halves mean drawdown (5.8% vs 11.9%), and cuts turnover ~8× (62 vs 500 trades). `enabled=false` pending review. See Session 30 below.) Prior: 2026-06-16 (Session 29 — donchian_gold warmup-starvation root-caused + fixed: it had emitted 0 signals since 2026-04-29 because `warmup(min_candles=200)` never gave `_compute_indicators` the ≥245 bars needed to produce DCH_120/DCL_120, so the strategy's all-channels-non-NaN guard tripped every bar. Fix: refreshed XAUUSD_1h cache (65.5h→19.4h stale) + bumped `min_candles` 200→300; gold engine restarted and reloaded **300** warmup candles → channels valid, strategy armed. Durable cTrader-trendbar-backfill fix still open. See Session 29 below.) Prior: 2026-06-12 (Session 28 — vol_momentum "edge decay" root-caused as a SYSTEMATIC stale-warmup-cache bug, not strategy logic. Warmup recency gate + phantom-signal suppression shipped, 472 phantom rows purged, XAUUSD cache rebuilt (2y, ends today), `caffeinate -i -s`, both engines restarted clean and verified downloading fresh warmup data. vol_momentum live stats quarantined until ≥30d clean window.)
+
+## Session 30 — adaptive_momentum strategy build + validation (2026-06-24)
+
+**Trigger:** Prince asked how the algo was doing, then to do advanced research and build a new, genuinely better momentum strategy (not just re-tuned). Plan approved in plan mode; scope = build → backtest → validate, `enabled=false` until reviewed.
+
+**What shipped — `src/strategies/momentum/adaptive_momentum.py` (`AdaptiveMomentumStrategy`):** a modern CTA-style evolution of `vol_momentum`, grounded in the trend-following literature (AQR TSMOM/century-of-trend, Barroso–Santa-Clara momentum crashes, Kaufman ER, Jegadeesh–Titman skip). Eight upgrades over the naive single-lookback vol_momentum:
+1. Multi-horizon blend (24h/72h/168h, equal-weight) — removes single-lookback timing luck.
+2. Volatility-normalized signal `s_L = log_ret / (per_bar_vol·√L)` — z-score-like, comparable across regimes.
+3. Skip-recent-period (skip 1 bar) — dodges crypto's sharp short-horizon reversal.
+4. Kaufman Efficiency-Ratio trend-quality gate (ER>0.30) — only enters when actually trending.
+5. Continuous tanh conviction sizing — smooth, not binary.
+6. ATR chandelier trailing stop, no fixed TP — lets winners run.
+7. Hysteresis band on reversals — cuts fee churn.
+8. Kept inverse-vol position scaling from vol_momentum. All signals computed inline from the `_closes` deque (only FeatureEngine dep is `ATR_14`); time-series per-symbol (NOT cross-sectional — see clenow obituary). Registered in `scripts/backtest.py` (preset + PARAM_PRIORITY), `src/strategies/router.py`, `config/strategies.toml` (`enabled=false`). 16/16 unit tests (`tests/test_strategies/test_adaptive_momentum.py`), incl. off-by-one skip-invariance guard + chandelier/engine-forced-flat resync.
+
+**Results (730d, 1h, 0.04% fee, identical settings vs vol_momentum):**
+- Head-to-head mean Sharpe **0.45 vs 0.27**; wins 4/5 symbols (DOGE 1.25, ADA 0.28, BTC 0.46, ETH 0.78; loses DOT −0.51). Mean maxDD **5.8% vs 11.9%** (halved). Turnover **~62 vs ~500 trades** (~8× less). CSV: `reports/adaptive_vs_vol_momentum_h2h.csv`.
+- Stage 4 sweep `sl_atr_mult × trail_atr_mult` (DOGE 5×5): **PASS / Robust=True**, Sharpe std 0.196, 100% cells positive, base 1.252. Keep base params (best cell only +8.5%).
+- Stage 5 standard-tier: on the **1h design TF, every window is positive** for DOGE (2y +15.7%/Sh1.25, 3y +32.7%) and BTC (2y +5.6%/Sh0.46, 3y +22%). DOGE regime profile is textbook trend-following: bull +5.2%, **bear +2.4% in a −38% tape**, sideways −1.3%. Fee-resilient (profitable 0%→0.1%).
+
+**Honest caveats:**
+- Validator scorecard verdicts (DOGE MARGINAL, BTC FAIL) are a **timeframe-mismatch artifact**: the standard tier tests 5m/15m/30m too, where the hours-based lookbacks are meaningless (worst DD 71–77% all on 5m). On 1h the strategy is sound. Same property as vol_momentum (also hours-tuned). Fix options for later: constrain the validator to 1h, or make lookbacks TF-aware.
+- DOT is the lone in-sample loser; the ER gate may be filtering DOT's profitable moves. Not patched (avoid overfitting).
+
+**Status:** `enabled=false`. Decision for Prince: enable in the live crypto book (alongside or replacing vol_momentum), iterate on DOT/TF-awareness, or shelve. No live wiring done this round.
 
 ## Session 29 — donchian_gold warmup starvation root-cause + fix (2026-06-16)
 

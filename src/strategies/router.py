@@ -194,6 +194,12 @@ def _load_strategies() -> None:
         pass
 
     try:
+        from src.strategies.momentum.adaptive_momentum import AdaptiveMomentumStrategy
+        register_strategy("adaptive_momentum", AdaptiveMomentumStrategy)
+    except ImportError:
+        pass
+
+    try:
         from src.strategies.carry.funding_mean_reversion import (
             FundingMeanReversionStrategy,
         )
