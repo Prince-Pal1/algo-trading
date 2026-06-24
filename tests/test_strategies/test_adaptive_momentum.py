@@ -220,3 +220,34 @@ class TestBehavioral:
         assert s._was_in_position is False
         assert s._hwm_close == 0.0
         assert s._bars_since_exit == 0
+
+
+class TestTimeframeAware:
+    """Time params are hours; converted to bars per the active TF. 1h == identity."""
+
+    def test_1h_is_identity(self):
+        s = _make(timeframe="1h", lookbacks=[24, 72, 168], er_window=72,
+                  vol_lookback=168, skip_bars=1, max_hold_bars=336)
+        assert s._bars_per_hour == 1.0
+        assert s.lookbacks == (24, 72, 168)
+        assert (s.er_window, s.vol_lookback, s.skip_bars, s.max_hold_bars) == (72, 168, 1, 336)
+
+    def test_15m_scales_up_4x(self):
+        s = _make(timeframe="15m", lookbacks=[24, 72, 168], er_window=72,
+                  vol_lookback=168, skip_bars=1, max_hold_bars=336)
+        assert s._bars_per_hour == 4.0
+        assert s.lookbacks == (96, 288, 672)
+        assert (s.er_window, s.vol_lookback, s.max_hold_bars) == (288, 672, 1344)
+
+    def test_4h_scales_down(self):
+        s = _make(timeframe="4h", lookbacks=[24, 72, 168])
+        assert s._bars_per_hour == 0.25
+        assert s.lookbacks == (6, 18, 42)
+
+    def test_bars_per_year_tracks_timeframe(self):
+        assert _make(timeframe="1h")._bars_per_year == pytest.approx(8760.0)
+        assert _make(timeframe="5m")._bars_per_year == pytest.approx(8760.0 * 12)
+
+    def test_bad_timeframe_rejected(self):
+        with pytest.raises(ValueError, match="timeframe"):
+            _make(timeframe="bogus")

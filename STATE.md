@@ -21,11 +21,11 @@
 - Stage 4 sweep `sl_atr_mult × trail_atr_mult` (DOGE 5×5): **PASS / Robust=True**, Sharpe std 0.196, 100% cells positive, base 1.252. Keep base params (best cell only +8.5%).
 - Stage 5 standard-tier: on the **1h design TF, every window is positive** for DOGE (2y +15.7%/Sh1.25, 3y +32.7%) and BTC (2y +5.6%/Sh0.46, 3y +22%). DOGE regime profile is textbook trend-following: bull +5.2%, **bear +2.4% in a −38% tape**, sideways −1.3%. Fee-resilient (profitable 0%→0.1%).
 
-**Honest caveats:**
-- Validator scorecard verdicts (DOGE MARGINAL, BTC FAIL) are a **timeframe-mismatch artifact**: the standard tier tests 5m/15m/30m too, where the hours-based lookbacks are meaningless (worst DD 71–77% all on 5m). On 1h the strategy is sound. Same property as vol_momentum (also hours-tuned). Fix options for later: constrain the validator to 1h, or make lookbacks TF-aware.
-- DOT is the lone in-sample loser; the ER gate may be filtering DOT's profitable moves. Not patched (avoid overfitting).
+**Iteration (same session, post-review "first b then a"):**
+- **TF-awareness shipped.** Time params (lookbacks/er_window/vol_lookback/skip/max_hold/cooldown/rebalance) are now specified in HOURS and converted to bars via `_bars_per_hour(timeframe)`; realized-vol annualization uses `_bars_per_year`. At 1h hours==bars so the validated 1h results reproduce **exactly** (+15.68%/Sh1.252/55 trades). This fixed the earlier MARGINAL/FAIL verdicts (which were an artifact of the off-design 5m/15m where hours-based lookbacks were meaningless): DOGE standard re-validation now **[PASS]** — worst DD **8.31%** (was 71%), 5m/15m correctly abstain (0 trades). 5 new TF unit tests (21/21 total).
+- **DOT decision: EXCLUDE (structural, not tunable).** Two 5×5 sweeps (er_threshold×entry_threshold, sl_atr_mult×trail_atr_mult = 50 backtests) found best-case DOT Sharpe ≈ **0.0** — every region breakeven-to-negative. Not overfitting it; the ER gate correctly caps the DOT loss at −4.6%/2y. DOT dropped from the live universe.
 
-**Status:** `enabled=false`. Decision for Prince: enable in the live crypto book (alongside or replacing vol_momentum), iterate on DOT/TF-awareness, or shelve. No live wiring done this round.
+**Status:** (b) complete. (a) live-enable next — deployment shape (replace vs alongside vol_momentum; universe DOGE/ADA ± ETH) pending one confirmation from Prince, then config `enabled=true` + crypto engine restart.
 
 ## Session 29 — donchian_gold warmup starvation root-cause + fix (2026-06-16)
 

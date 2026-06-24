@@ -46,8 +46,24 @@ from src.strategies.base import BaseStrategy
 from src.utils.config import get_config
 from src.utils.types import RiskProfile, Signal, SignalAction, Tier
 
-# Bars per year for annualizing 1h realized vol (~8760h/yr).
+# Hours per year for annualizing realized vol (~8760h/yr).
 _HOURS_PER_YEAR = 8760.0
+
+
+def _bars_per_hour(timeframe: str) -> float:
+    """Bars per hour for a timeframe string (e.g. '1h'->1, '15m'->4, '4h'->0.25)."""
+    tf = timeframe.strip().lower()
+    if tf.endswith("m"):
+        minutes = int(tf[:-1])
+    elif tf.endswith("h"):
+        minutes = int(tf[:-1]) * 60
+    elif tf.endswith("d"):
+        minutes = int(tf[:-1]) * 1440
+    elif tf.endswith("w"):
+        minutes = int(tf[:-1]) * 10080
+    else:
+        raise ValueError(f"unsupported timeframe: {timeframe!r}")
+    return 60.0 / minutes
 
 
 class AdaptiveMomentumStrategy(BaseStrategy):
@@ -87,11 +103,35 @@ class AdaptiveMomentumStrategy(BaseStrategy):
             leverage_range=leverage_range, tier=tier,
         )
 
-        self.lookbacks = tuple(int(lb) for lb in lookbacks)
-        self.skip_bars = int(skip_bars)
-        self.er_window = int(er_window)
+        # Time-based params are specified in HOURS and converted to bars for the
+        # active timeframe, so the strategy behaves consistently across TFs.
+        # At 1h, hours == bars — the validated default behavior is preserved.
+        bph = _bars_per_hour(timeframe)
+        self._bars_per_hour = bph
+        self._bars_per_year = _HOURS_PER_YEAR * bph
+
+        def _to_bars(hours: float, floor: int = 1) -> int:
+            return max(floor, round(float(hours) * bph))
+
+        # Keep the raw hour specs for metadata/repr.
+        self._lookbacks_h = tuple(int(lb) for lb in lookbacks)
+        self._skip_h = int(skip_bars)
+        self._er_window_h = int(er_window)
+        self._vol_lookback_h = int(vol_lookback)
+        self._max_hold_h = int(max_hold_bars)
+        self._cooldown_h = int(cooldown_bars)
+        self._rebalance_h = int(rebalance_interval)
+
+        self.lookbacks = tuple(_to_bars(lb) for lb in self._lookbacks_h)
+        self.skip_bars = _to_bars(self._skip_h)
+        self.er_window = _to_bars(self._er_window_h, floor=2)
+        self.vol_lookback = _to_bars(self._vol_lookback_h, floor=2)
+        self.max_hold_bars = _to_bars(self._max_hold_h)
+        self.cooldown_bars = _to_bars(self._cooldown_h)
+        self.rebalance_interval = _to_bars(self._rebalance_h)
+
+        # Scale-free / non-time params unchanged.
         self.er_threshold = er_threshold
-        self.vol_lookback = int(vol_lookback)
         self.vol_target = vol_target
         self.signal_gain = signal_gain
         self.entry_threshold = entry_threshold
@@ -99,9 +139,6 @@ class AdaptiveMomentumStrategy(BaseStrategy):
         self.atr_period = atr_period
         self.sl_atr_mult = sl_atr_mult
         self.trail_atr_mult = trail_atr_mult
-        self.max_hold_bars = max_hold_bars
-        self.cooldown_bars = cooldown_bars
-        self.rebalance_interval = rebalance_interval
         self.long_only = long_only
 
         # Internal counters / state
@@ -179,7 +216,7 @@ class AdaptiveMomentumStrategy(BaseStrategy):
         vol = float(log_ret.std())
         if vol < 1e-10:
             return None
-        return vol * np.sqrt(_HOURS_PER_YEAR)
+        return vol * np.sqrt(self._bars_per_year)
 
     def _vol_scalar(self, realized_vol: float) -> float:
         """Inverse-vol position scalar, clamped 0.5x-2.0x (kept from vol_momentum)."""

@@ -91,6 +91,8 @@ enabled = false
 risk_profile = "SAFE"
 markets = ["DOGEUSDT", "ADAUSDT", "DOTUSDT"]
 timeframe = "1h"
+# Time params below are in HOURS (converted to bars per the active timeframe);
+# at 1h hours == bars. lookbacks = 1d / 3d / 7d.
 lookbacks = [24, 72, 168]
 skip_bars = 1
 er_window = 72
