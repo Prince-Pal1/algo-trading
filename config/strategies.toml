@@ -85,11 +85,13 @@ max_risk_per_trade = 0.012
 [adaptive_momentum]
 # Advanced CTA-style evolution of vol_momentum. Multi-horizon vol-normalized
 # momentum + Kaufman Efficiency-Ratio trend gate + tanh conviction sizing +
-# ATR chandelier trailing stop + hysteresis. Kept OFF until Stage 4/5
-# validation passes and results are reviewed (STRATEGY_DEVELOPMENT_PROCESS.md).
-enabled = false
+# ATR chandelier trailing stop + hysteresis. Enabled Session 30 (2026-06-24)
+# after Stage 3-5 validation PASS; runs ALONGSIDE vol_momentum (composite
+# (strategy,symbol) position keying lets both hold DOGE/ADA). DOT excluded —
+# diagnosed structurally non-tradeable (best Sharpe ~0 across 50 backtests).
+enabled = true
 risk_profile = "SAFE"
-markets = ["DOGEUSDT", "ADAUSDT", "DOTUSDT"]
+markets = ["DOGEUSDT", "ADAUSDT", "ETHUSDT"]
 timeframe = "1h"
 # Time params below are in HOURS (converted to bars per the active timeframe);
 # at 1h hours == bars. lookbacks = 1d / 3d / 7d.
