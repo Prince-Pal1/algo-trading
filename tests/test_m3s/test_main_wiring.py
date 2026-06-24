@@ -135,7 +135,7 @@ class TestPaperExecutorHook:
 
         # Manually inject a position and close it via _close_position
         from src.utils.types import Position, Side, Signal, SignalAction
-        pe._positions["BTCUSDT"] = Position(
+        pe._positions[("test_strat", "BTCUSDT")] = Position(
             symbol="BTCUSDT",
             side=Side.BUY,
             quantity=0.1,
@@ -176,7 +176,7 @@ class TestPaperExecutorHook:
         pe = PaperExecutor()
         pe.on_trade_close_hook = lambda *args: 1 / 0  # ZeroDivisionError
         from src.utils.types import Position, Side, Signal, SignalAction
-        pe._positions["BTCUSDT"] = Position(
+        pe._positions[("test_strat", "BTCUSDT")] = Position(
             symbol="BTCUSDT",
             side=Side.BUY,
             quantity=0.1,

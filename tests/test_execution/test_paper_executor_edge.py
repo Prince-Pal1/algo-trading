@@ -41,10 +41,10 @@ class TestPaperExecutorEdgeCases:
 
         positions = await ex.get_positions()
         assert len(positions) == 2
-        assert "BTCUSDT" in positions
-        assert "ETHUSDT" in positions
-        assert positions["BTCUSDT"].side == Side.BUY
-        assert positions["ETHUSDT"].side == Side.SELL
+        assert ("test", "BTCUSDT") in positions
+        assert ("test", "ETHUSDT") in positions
+        assert positions[("test", "BTCUSDT")].side == Side.BUY
+        assert positions[("test", "ETHUSDT")].side == Side.SELL
 
     async def test_rapid_open_close_open_close(self):
         """Rapid open-close-open-close on same symbol → correct final equity."""

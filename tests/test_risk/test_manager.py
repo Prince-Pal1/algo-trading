@@ -111,13 +111,14 @@ class TestRiskManager:
             timestamp=1000, exchange="paper",
         )
         mgr.update_fill(fill, "test_strat")
-        assert "TESTUSDT" in mgr.state.open_positions
+        assert ("test_strat", "TESTUSDT") in mgr.state.open_positions
 
     def test_update_trade_close(self):
         mgr = _make_manager()
         mgr.state.add_position("TESTUSDT", "test", "LONG", 1.0, 100.0)
+        assert ("test", "TESTUSDT") in mgr.state.open_positions
         mgr.update_trade_close("test", 10.0, "TESTUSDT")
-        assert "TESTUSDT" not in mgr.state.open_positions
+        assert ("test", "TESTUSDT") not in mgr.state.open_positions
         assert mgr.state.daily_pnl == 10.0
 
     def test_get_status(self):

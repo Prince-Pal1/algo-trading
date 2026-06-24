@@ -54,8 +54,9 @@ class RiskState:
         self._last_weekly_reset: str = ""
         self._last_monthly_reset: str = ""
 
-        # Position tracking
-        self.open_positions: dict[str, PositionRiskInfo] = {}
+        # Position tracking — keyed by (strategy, symbol) so multiple strategies
+        # can hold the same symbol concurrently (exposure aggregates across them).
+        self.open_positions: dict[tuple[str, str], PositionRiskInfo] = {}
 
         # Per-strategy PnL (rolling)
         self.strategy_pnl: dict[str, float] = {}
@@ -240,15 +241,15 @@ class RiskState:
 
     def add_position(self, symbol: str, strategy: str, side: str,
                      quantity: float, entry_price: float) -> None:
-        """Track a new open position."""
-        self.open_positions[symbol] = PositionRiskInfo(
+        """Track a new open position, keyed by (strategy, symbol)."""
+        self.open_positions[(strategy, symbol)] = PositionRiskInfo(
             symbol=symbol, strategy=strategy, side=side,
             quantity=quantity, entry_price=entry_price,
         )
 
-    def remove_position(self, symbol: str) -> None:
-        """Remove a closed position."""
-        self.open_positions.pop(symbol, None)
+    def remove_position(self, strategy: str, symbol: str) -> None:
+        """Remove a closed position by (strategy, symbol)."""
+        self.open_positions.pop((strategy, symbol), None)
 
     def record_signal(self, signal_key: str) -> None:
         """Record a signal for duplicate detection."""

@@ -309,10 +309,10 @@ class TestExecutorMathEdgeCases:
         await executor.execute(_signal("BTC", SignalAction.LONG, 100.0, sl=95.0))
         await executor.execute(_signal("ETH", SignalAction.SHORT, 50.0, sl=55.0))
 
-        assert "BTC" in executor._positions
-        assert "ETH" in executor._positions
-        assert executor._positions["BTC"].side == Side.BUY
-        assert executor._positions["ETH"].side == Side.SELL
+        assert ("test", "BTC") in executor._positions
+        assert ("test", "ETH") in executor._positions
+        assert executor._positions[("test", "BTC")].side == Side.BUY
+        assert executor._positions[("test", "ETH")].side == Side.SELL
 
     async def test_entry_equals_zero_rejected(self):
         """Entry price = 0 → rejected."""
@@ -332,4 +332,4 @@ class TestExecutorMathEdgeCases:
         assert f2 is not None
         f3 = await executor.execute(_signal("BTC", SignalAction.LONG, 110.0, sl=105.0))
         assert f3 is not None
-        assert "BTC" in executor._positions
+        assert ("test", "BTC") in executor._positions

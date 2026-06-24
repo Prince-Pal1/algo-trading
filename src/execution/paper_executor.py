@@ -39,7 +39,9 @@ class PaperExecutor(BaseExecutor):
         self._commission_pct = commission_pct
 
         # Open positions: symbol -> Position
-        self._positions: dict[str, Position] = {}
+        # Keyed by (strategy_name, symbol) so multiple strategies can hold the
+        # same symbol concurrently (each strategy manages its own position).
+        self._positions: dict[tuple[str, str], Position] = {}
         self._fills: list[Fill] = []
         self._trade_count = 0
         self._last_price_persist: float = 0.0  # throttle price updates to DB
@@ -69,9 +71,11 @@ class PaperExecutor(BaseExecutor):
         commission.
         """
         symbol = order.symbol
+        key = (order.strategy_name, symbol)
 
-        if symbol in self._positions:
-            log.warning("position_exists", symbol=symbol, side=order.side.value)
+        if key in self._positions:
+            log.warning("position_exists", strategy=order.strategy_name,
+                        symbol=symbol, side=order.side.value)
             return None
 
         entry_price = order.price or 0
@@ -101,7 +105,7 @@ class PaperExecutor(BaseExecutor):
             exchange="paper",
         )
 
-        self._positions[symbol] = Position(
+        self._positions[key] = Position(
             symbol=symbol,
             side=order.side,
             quantity=quantity,
@@ -119,7 +123,7 @@ class PaperExecutor(BaseExecutor):
             await self._storage.trade_log.log_trade(fill, strategy=order.strategy_name)
 
         # Persist position + equity for crash recovery
-        self._persist_position(self._positions[symbol])
+        self._persist_position(self._positions[key])
         self._persist_equity()
 
         log.info(
@@ -136,10 +140,12 @@ class PaperExecutor(BaseExecutor):
     async def _open_position(self, signal: Signal) -> Fill | None:
         """Open a new position."""
         symbol = signal.symbol
+        key = (signal.strategy_name, symbol)
 
-        # Reject if already in a position for this symbol
-        if symbol in self._positions:
-            log.warning("position_exists", symbol=symbol, action=signal.action.value)
+        # Reject if this strategy already holds this symbol
+        if key in self._positions:
+            log.warning("position_exists", strategy=signal.strategy_name,
+                        symbol=symbol, action=signal.action.value)
             return None
 
         entry_price = signal.entry_price or 0
@@ -180,7 +186,7 @@ class PaperExecutor(BaseExecutor):
         )
 
         # Track position
-        self._positions[symbol] = Position(
+        self._positions[key] = Position(
             symbol=symbol,
             side=side,
             quantity=quantity,
@@ -199,7 +205,7 @@ class PaperExecutor(BaseExecutor):
             await self._storage.trade_log.log_trade(fill, strategy=signal.strategy_name)
 
         # Persist position + equity for crash recovery
-        self._persist_position(self._positions[symbol])
+        self._persist_position(self._positions[key])
         self._persist_equity()
 
         log.info(
@@ -216,9 +222,10 @@ class PaperExecutor(BaseExecutor):
     async def _close_position(self, signal: Signal) -> Fill | None:
         """Close an existing position."""
         symbol = signal.symbol
-        pos = self._positions.get(symbol)
+        key = (signal.strategy_name, symbol)
+        pos = self._positions.get(key)
         if pos is None:
-            log.warning("no_position_to_close", symbol=symbol)
+            log.warning("no_position_to_close", strategy=signal.strategy_name, symbol=symbol)
             return None
 
         exit_price = signal.entry_price or pos.current_price
@@ -250,14 +257,14 @@ class PaperExecutor(BaseExecutor):
         )
 
         self._fills.append(fill)
-        del self._positions[symbol]
+        del self._positions[key]
 
         # Log to SQLite
         if self._storage:
             await self._storage.trade_log.log_trade(fill, strategy=pos.strategy_name)
 
         # Persist: remove closed position, update equity
-        self._remove_position(symbol)
+        self._remove_position(pos.strategy_name, symbol)
         self._persist_equity()
 
         # M3S hook (sub-phase 0.8): notify of realized PnL per closed trade.
@@ -279,29 +286,30 @@ class PaperExecutor(BaseExecutor):
         return fill
 
     def update_prices(self, symbol: str, price: float) -> None:
-        """Update unrealized P&L for a position (called on each tick)."""
-        pos = self._positions.get(symbol)
-        if pos is None:
-            return
+        """Update unrealized P&L for every position in this symbol (each tick)."""
+        touched = False
+        for pos in self._positions.values():
+            if pos.symbol != symbol:
+                continue
+            touched = True
+            pos.current_price = price
+            if pos.side == Side.BUY:
+                pos.unrealized_pnl = (price - pos.entry_price) * pos.quantity
+            else:
+                pos.unrealized_pnl = (pos.entry_price - price) * pos.quantity
 
-        pos.current_price = price
-        if pos.side == Side.BUY:
-            pos.unrealized_pnl = (price - pos.entry_price) * pos.quantity
-        else:
-            pos.unrealized_pnl = (pos.entry_price - price) * pos.quantity
+        if touched:
+            # Throttled persist of current prices (every 10s, not every tick)
+            self._persist_prices_batch()
 
-        # Throttled persist of current prices (every 10s, not every tick)
-        self._persist_prices_batch()
-
-    async def get_positions(self) -> dict[str, Position]:
+    async def get_positions(self) -> dict[tuple[str, str], Position]:
         return dict(self._positions)
 
     async def close_all(self) -> list[Fill]:
         fills = []
-        for symbol in list(self._positions.keys()):
-            pos = self._positions[symbol]
+        for pos in list(self._positions.values()):
             signal = Signal(
-                symbol=symbol,
+                symbol=pos.symbol,
                 action=SignalAction.CLOSE,
                 confidence=1.0,
                 strategy_name=pos.strategy_name,
@@ -350,12 +358,15 @@ class PaperExecutor(BaseExecutor):
         )
         conn.commit()
 
-    def _remove_position(self, symbol: str) -> None:
-        """Remove a closed position from SQLite."""
+    def _remove_position(self, strategy_name: str, symbol: str) -> None:
+        """Remove a closed position from SQLite by (strategy, symbol)."""
         conn = self._get_db()
         if conn is None:
             return
-        conn.execute("DELETE FROM paper_positions WHERE symbol = ?", (symbol,))
+        conn.execute(
+            "DELETE FROM paper_positions WHERE strategy_name = ? AND symbol = ?",
+            (strategy_name, symbol),
+        )
         conn.commit()
 
     def _persist_equity(self) -> None:
@@ -383,8 +394,8 @@ class PaperExecutor(BaseExecutor):
         for pos in self._positions.values():
             conn.execute(
                 "UPDATE paper_positions SET current_price = ?, unrealized_pnl = ? "
-                "WHERE symbol = ?",
-                (pos.current_price, pos.unrealized_pnl, pos.symbol),
+                "WHERE strategy_name = ? AND symbol = ?",
+                (pos.current_price, pos.unrealized_pnl, pos.strategy_name, pos.symbol),
             )
         conn.commit()
 
@@ -415,7 +426,7 @@ class PaperExecutor(BaseExecutor):
         ).fetchall()
 
         for r in rows:
-            self._positions[r[0]] = Position(
+            self._positions[(r[6], r[0])] = Position(
                 symbol=r[0],
                 side=Side(r[1]),
                 quantity=r[2],

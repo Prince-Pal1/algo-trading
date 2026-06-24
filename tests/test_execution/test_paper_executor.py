@@ -42,7 +42,7 @@ class TestOpenLongPosition:
         assert fill.symbol == "BTCUSDT"
         assert fill.quantity > 0
         assert fill.commission > 0
-        assert "BTCUSDT" in executor._positions
+        assert ("test_strat", "BTCUSDT") in executor._positions
 
 
 class TestOpenShortPosition:
@@ -53,8 +53,8 @@ class TestOpenShortPosition:
 
         assert fill is not None
         assert fill.side == Side.SELL
-        assert "ETHUSDT" in executor._positions
-        assert executor._positions["ETHUSDT"].side == Side.SELL
+        assert ("test_strat", "ETHUSDT") in executor._positions
+        assert executor._positions[("test_strat", "ETHUSDT")].side == Side.SELL
 
 
 class TestClosePositionPnl:
@@ -66,13 +66,13 @@ class TestClosePositionPnl:
         )
         await executor.execute(_signal("BTCUSDT", SignalAction.LONG, entry=100.0, sl=95.0))
 
-        pos = executor._positions["BTCUSDT"]
+        pos = executor._positions[("test_strat", "BTCUSDT")]
         qty = pos.quantity
 
         close_fill = await executor.execute(_close_signal("BTCUSDT", 110.0))
 
         assert close_fill is not None
-        assert "BTCUSDT" not in executor._positions
+        assert ("test_strat", "BTCUSDT") not in executor._positions
         # P&L = (110 - 100) * qty = 10 * qty
         expected_pnl = (110.0 - 100.0) * qty
         assert executor.equity == pytest.approx(10_000.0 + expected_pnl)
@@ -85,7 +85,7 @@ class TestClosePositionPnl:
         )
         await executor.execute(_signal("ETHUSDT", SignalAction.SHORT, entry=100.0, sl=105.0))
 
-        pos = executor._positions["ETHUSDT"]
+        pos = executor._positions[("test_strat", "ETHUSDT")]
         qty = pos.quantity
 
         close_fill = await executor.execute(_close_signal("ETHUSDT", 90.0))
@@ -97,13 +97,47 @@ class TestClosePositionPnl:
 
 class TestDuplicatePositionRejected:
     async def test_duplicate_position_rejected(self):
-        """Second LONG on same symbol → returns None."""
+        """Second LONG on same (strategy, symbol) → returns None."""
         executor = PaperExecutor(storage=None)
         fill1 = await executor.execute(_signal("BTCUSDT", SignalAction.LONG))
         fill2 = await executor.execute(_signal("BTCUSDT", SignalAction.LONG))
 
         assert fill1 is not None
         assert fill2 is None
+
+
+class TestMultiStrategySameSymbol:
+    """Two strategies can hold the same symbol concurrently; each closes its own."""
+
+    def _sig(self, strat, action, entry=100.0, sl=95.0):
+        return Signal(
+            symbol="BTCUSDT", action=action, confidence=0.8,
+            strategy_name=strat, timeframe="1h",
+            entry_price=entry, stop_loss=sl, risk_pct=0.01,
+        )
+
+    async def test_two_strategies_same_symbol(self):
+        ex = PaperExecutor(storage=None, slippage_pct=0.0, commission_pct=0.0)
+        f1 = await ex.execute(self._sig("vol_momentum", SignalAction.LONG))
+        f2 = await ex.execute(self._sig("adaptive_momentum", SignalAction.LONG))
+
+        # Both open independently — no "position_exists" rejection.
+        assert f1 is not None and f2 is not None
+        assert ("vol_momentum", "BTCUSDT") in ex._positions
+        assert ("adaptive_momentum", "BTCUSDT") in ex._positions
+        assert len(ex._positions) == 2
+
+        # update_prices marks BOTH positions on the symbol.
+        ex.update_prices("BTCUSDT", 110.0)
+        assert ex._positions[("vol_momentum", "BTCUSDT")].current_price == 110.0
+        assert ex._positions[("adaptive_momentum", "BTCUSDT")].current_price == 110.0
+
+        # Closing one leaves the other intact (no cross-strategy interference).
+        close = self._sig("vol_momentum", SignalAction.CLOSE, entry=110.0)
+        cf = await ex._close_position(close)
+        assert cf is not None
+        assert ("vol_momentum", "BTCUSDT") not in ex._positions
+        assert ("adaptive_momentum", "BTCUSDT") in ex._positions
 
 
 class TestCloseNonexistentPosition:

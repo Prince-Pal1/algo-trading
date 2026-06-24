@@ -167,14 +167,15 @@ CREATE TABLE IF NOT EXISTS risk_decisions (
 
 -- Paper trading position persistence (survives crashes)
 CREATE TABLE IF NOT EXISTS paper_positions (
-    symbol TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
     side TEXT NOT NULL,
     quantity REAL NOT NULL,
     entry_price REAL NOT NULL,
     current_price REAL NOT NULL,
     unrealized_pnl REAL DEFAULT 0,
     strategy_name TEXT NOT NULL,
-    opened_at INTEGER NOT NULL
+    opened_at INTEGER NOT NULL,
+    PRIMARY KEY (strategy_name, symbol)
 );
 
 -- Paper trading equity state (singleton row)

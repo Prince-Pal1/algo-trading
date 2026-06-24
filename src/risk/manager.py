@@ -185,7 +185,7 @@ class RiskManager:
                 fill.symbol, strategy_name, "LONG", fill.quantity, fill.price,
             )
         elif fill.side.value == "SELL":
-            self.state.remove_position(fill.symbol)
+            self.state.remove_position(strategy_name, fill.symbol)
 
         # Persist so the fat-finger running-average + position state survives
         # a process restart. Before this call was added, the running average
@@ -196,7 +196,7 @@ class RiskManager:
     def update_trade_close(self, strategy: str, pnl: float, symbol: str) -> None:
         """Update state when a trade closes."""
         self.state.record_trade_pnl(strategy, pnl)
-        self.state.remove_position(symbol)
+        self.state.remove_position(strategy, symbol)
         self.state.persist()
 
     def set_strategy_stats(self, strategy: str, stats: StrategyStats) -> None:
