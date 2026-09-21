@@ -1,7 +1,8 @@
-"""Plotly renderers for order-flow (CVD) data.
+"""Plotly renderers for order-flow data.
 
-One public figure builder: `price_cvd_panels`, which stacks price, cumulative
-delta, and per-bar delta as three panels sharing one x-axis.
+Two public figure builders: `price_cvd_panels` (price, cumulative delta and
+per-bar delta as three panels sharing one x-axis) and `depth_heatmap` (resting
+order book liquidity over time).
 
 Why stacked panels and not one chart with two y-axes: price and CVD have
 unrelated units and scales, and a dual-axis chart lets the author slide one
@@ -20,6 +21,7 @@ beside each constant for a future dark pass.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -30,6 +32,20 @@ COLOR_SELL = "#e34948"     # red             #e66767
 # Recessive ink for the price reference line and absorption shading.
 COLOR_PRICE = "#52514e"    # secondary ink   #c3c2b7
 COLOR_ABSORPTION = "#f0efec"  # neutral midpoint  #383835
+
+# Sequential ramp for resting size — ONE hue, light to dark. Bookmap's
+# blue->yellow->red is a rainbow: the hue changes carry no meaning, so readers
+# invent thresholds where the colour flips. A single hue reads as "more is
+# darker" with nothing to misread.
+DEPTH_COLORSCALE = [
+    [0.00, "#cde2fb"],
+    [0.17, "#9ec5f4"],
+    [0.33, "#6da7ec"],
+    [0.50, "#3987e5"],
+    [0.67, "#256abf"],
+    [0.83, "#184f95"],
+    [1.00, "#0d366b"],
+]
 
 _EMPTY_MESSAGE = (
     "No flow bars to plot — run: "
@@ -213,3 +229,76 @@ def _add_absorption_bands(
             layer="below",
             line_width=0,
         )
+
+
+def depth_heatmap(
+    grid: pd.DataFrame,
+    title: str = "Order book depth",
+    clip_percentile: float = 99.0,
+    note: str = "",
+) -> go.Figure:
+    """Resting liquidity as a price x time heatmap.
+
+    Args:
+        grid: output of `src.data.depth_recorder.to_heatmap_grid` — index is
+            bucketed price, columns are timestamps, values are resting size.
+        title: figure title.
+        clip_percentile: colour saturates at this percentile of observed size.
+            Book sizes are heavily skewed — a single large wall mapped linearly
+            pushes every other level to the palest step and the chart reads as
+            empty. Clipping keeps ordinary liquidity legible; the walls simply
+            top out. 100 disables it.
+        note: appended to the subtitle, e.g. a downsampling warning.
+
+    Returns:
+        A plotly Figure. Empty input returns an annotated figure.
+    """
+    fig = go.Figure()
+
+    if grid is None or grid.empty:
+        fig.add_annotation(
+            text="No depth recorded — run: python -m scripts.depth record SYMBOL",
+            xref="paper", yref="paper", x=0.5, y=0.5,
+            showarrow=False, font=dict(size=13, color=COLOR_PRICE),
+        )
+        fig.update_layout(
+            template="plotly_white",
+            title=dict(text=title, x=0, xanchor="left"),
+            height=520,
+        )
+        return fig
+
+    values = grid.to_numpy(dtype=float)
+    finite = values[np.isfinite(values)]
+    if finite.size and 0 < clip_percentile < 100:
+        zmax = float(np.percentile(finite, clip_percentile))
+    else:
+        zmax = float(finite.max()) if finite.size else 1.0
+    zmax = zmax if zmax > 0 else 1.0
+
+    times = pd.to_datetime(pd.Index(grid.columns).astype("int64"), unit="ms", utc=True)
+
+    fig.add_trace(go.Heatmap(
+        x=times,
+        y=grid.index.to_numpy(dtype=float),
+        z=values,
+        colorscale=DEPTH_COLORSCALE,
+        zmin=0.0,
+        zmax=zmax,
+        colorbar=dict(title="Resting size", thickness=14),
+        hovertemplate="%{y}<br>size %{z:,.3f}<extra></extra>",
+    ))
+
+    subtitle = f"colour saturates at the {clip_percentile:g}th percentile of size"
+    if note:
+        subtitle = f"{subtitle} · {note}"
+
+    fig.update_layout(
+        title=dict(text=f"{title}<br><sub>{subtitle}</sub>", x=0, xanchor="left"),
+        template="plotly_white",
+        height=560,
+        margin=dict(l=70, r=30, t=85, b=45),
+        xaxis_title="Time (UTC)",
+        yaxis_title="Price",
+    )
+    return fig

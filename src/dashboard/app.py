@@ -364,6 +364,20 @@ def _load_flow_bars(symbol: str, timeframe: str):
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
+@st.cache_data(ttl=20)
+def _list_depth_symbols() -> list[str]:
+    from src.data.depth_recorder import DepthStore
+
+    return DepthStore().list_symbols()
+
+
+@st.cache_data(ttl=20)
+def _load_depth(symbol: str):
+    from src.data.depth_recorder import DepthStore
+
+    return DepthStore().load(symbol)
+
+
 # ---------------------------------------------------------------------------
 # Page 1: Backtest Runs Browser
 # ---------------------------------------------------------------------------
@@ -1157,6 +1171,71 @@ elif page == "Order Flow":
                 "and divergence against a strong trend is a classic losing fade. "
                 "See `STRATEGY_DEVELOPMENT_PROCESS.md` Stage 1."
             )
+
+        # ── Depth heatmap ──────────────────────────────────────────────
+        # Resting liquidity over time — the passive side of the book, which
+        # CVD cannot see. Recorded separately by `scripts.depth record`.
+        st.divider()
+        st.subheader("Depth heatmap")
+
+        depth_symbols = _list_depth_symbols()
+        if not depth_symbols:
+            st.info(
+                "No depth recorded yet.\n\n"
+                "```\npython3 -m scripts.depth record BTCUSDT --duration 300\n```\n\n"
+                "Depth is the passive side of the book — the walls CVD cannot see. "
+                "It has to be recorded live; unlike trades, Binance publishes no "
+                "historical order-book archive."
+            )
+        else:
+            d1, d2, d3 = st.columns([2, 1, 1])
+            depth_symbol = d1.selectbox(
+                "Depth symbol", depth_symbols,
+                index=depth_symbols.index(symbol) if symbol in depth_symbols else 0,
+            )
+            price_bins = d2.number_input(
+                "Max price rows", min_value=20, max_value=600, value=160, step=20,
+                help="Ceiling on price rows. Buckets align to the inferred tick "
+                     "size when that fits within this ceiling.",
+            )
+            clip = d3.number_input(
+                "Colour clip %ile", min_value=50.0, max_value=100.0,
+                value=99.0, step=0.5,
+                help="Book sizes are heavily skewed — one large wall mapped "
+                     "linearly washes out everything else.",
+            )
+
+            depth_rows = _load_depth(depth_symbol)
+            if depth_rows.empty:
+                st.warning(f"{depth_symbol} has no depth rows.")
+            else:
+                from src.dashboard.flow_charts import depth_heatmap
+                from src.data.depth_recorder import to_heatmap_grid
+
+                grid, note = to_heatmap_grid(
+                    depth_rows, price_bins=int(price_bins), time_bins=900
+                )
+                h1, h2, h3 = st.columns(3)
+                h1.metric("Samples", f"{depth_rows['timestamp'].nunique():,}")
+                h2.metric("Rows", f"{len(depth_rows):,}")
+                h3.metric("Price rows", f"{grid.shape[0]:,}")
+
+                st.plotly_chart(
+                    depth_heatmap(
+                        grid,
+                        title=f"{depth_symbol} — order book depth",
+                        clip_percentile=float(clip),
+                        note=note,
+                    ),
+                    width="stretch",
+                )
+                st.caption(
+                    "Dark horizontal bands are resting size that persisted — walls. "
+                    "A wall that holds when price tests it is meaningful; one that "
+                    "vanishes before price arrives tells you nothing. The colour "
+                    "ramp is a single hue so there are no false thresholds where a "
+                    "hue would flip."
+                )
 
 
 elif page == "Glossary":

@@ -1,6 +1,6 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-09-21 (Session 31 — order-flow/CVD research tooling built on the crypto book, where Binance already gives us complete free aggressor data. New `src/data/cvd.py` (streaming `CVDCalculator` + vectorized `compute_delta_bars`, parity-tested; `detect_divergences` + `detect_absorption`), `src/data/agg_trades.py` (free Binance Data Vision aggTrades backfill), `scripts/cvd.py` CLI, and dashboard page 8 "Order Flow". 107 tests pass. Research-only — nothing is wired into FeatureEngine, any strategy, or the live engines. See Session 31 below.) Prior: 2026-06-24 (Session 30 — built `adaptive_momentum`, a multi-horizon volatility-normalized regime-gated trend strategy improving on `vol_momentum`. Stage 3-5 backtested/validated on its 1h design TF; head-to-head beats vol_momentum on mean Sharpe (0.45 vs 0.27), roughly halves mean drawdown (5.8% vs 11.9%), and cuts turnover ~8× (62 vs 500 trades). `enabled=false` pending review. See Session 30 below.) Prior: 2026-06-16 (Session 29 — donchian_gold warmup-starvation root-caused + fixed: it had emitted 0 signals since 2026-04-29 because `warmup(min_candles=200)` never gave `_compute_indicators` the ≥245 bars needed to produce DCH_120/DCL_120, so the strategy's all-channels-non-NaN guard tripped every bar. Fix: refreshed XAUUSD_1h cache (65.5h→19.4h stale) + bumped `min_candles` 200→300; gold engine restarted and reloaded **300** warmup candles → channels valid, strategy armed. Durable cTrader-trendbar-backfill fix still open. See Session 29 below.) Prior: 2026-06-12 (Session 28 — vol_momentum "edge decay" root-caused as a SYSTEMATIC stale-warmup-cache bug, not strategy logic. Warmup recency gate + phantom-signal suppression shipped, 472 phantom rows purged, XAUUSD cache rebuilt (2y, ends today), `caffeinate -i -s`, both engines restarted clean and verified downloading fresh warmup data. vol_momentum live stats quarantined until ≥30d clean window.)
+**Last updated:** 2026-09-21 (Session 31 — order-flow/CVD research tooling built on the crypto book, where Binance already gives us complete free aggressor data. New `src/data/cvd.py` (streaming `CVDCalculator` + vectorized `compute_delta_bars`, parity-tested; `detect_divergences` + `detect_absorption`), `src/data/agg_trades.py` (free Binance Data Vision aggTrades backfill), `scripts/cvd.py` CLI, dashboard page 8 "Order Flow", plus the depth/heatmap stack (`order_book.py`, `depth_recorder.py`, `scripts/depth.py`, binance_ws depth wiring). 222 tests pass; the live depth path is UNTESTED against Binance (container egress blocks it). Research-only — nothing is wired into FeatureEngine, any strategy, or the live engines. See Session 31 below.) Prior: 2026-06-24 (Session 30 — built `adaptive_momentum`, a multi-horizon volatility-normalized regime-gated trend strategy improving on `vol_momentum`. Stage 3-5 backtested/validated on its 1h design TF; head-to-head beats vol_momentum on mean Sharpe (0.45 vs 0.27), roughly halves mean drawdown (5.8% vs 11.9%), and cuts turnover ~8× (62 vs 500 trades). `enabled=false` pending review. See Session 30 below.) Prior: 2026-06-16 (Session 29 — donchian_gold warmup-starvation root-caused + fixed: it had emitted 0 signals since 2026-04-29 because `warmup(min_candles=200)` never gave `_compute_indicators` the ≥245 bars needed to produce DCH_120/DCL_120, so the strategy's all-channels-non-NaN guard tripped every bar. Fix: refreshed XAUUSD_1h cache (65.5h→19.4h stale) + bumped `min_candles` 200→300; gold engine restarted and reloaded **300** warmup candles → channels valid, strategy armed. Durable cTrader-trendbar-backfill fix still open. See Session 29 below.) Prior: 2026-06-12 (Session 28 — vol_momentum "edge decay" root-caused as a SYSTEMATIC stale-warmup-cache bug, not strategy logic. Warmup recency gate + phantom-signal suppression shipped, 472 phantom rows purged, XAUUSD cache rebuilt (2y, ends today), `caffeinate -i -s`, both engines restarted clean and verified downloading fresh warmup data. vol_momentum live stats quarantined until ≥30d clean window.)
 
 
 ## Session 31 — order-flow / CVD research tooling (2026-09-21)
@@ -21,7 +21,43 @@
 
 **Explicitly NOT done:** no FeatureEngine field, no strategy, no router registration, no config entry, no engine wiring. Nothing trades off this. Per `STRATEGY_DEVELOPMENT_PROCESS.md` this is pre-Stage-1: no edge has been researched, let alone validated. Full suite could not be run in the cloud container (`ta` fails to build there) — CVD tests were run with `--noconftest`; the full suite still needs a local run.
 
-**Next if pursued:** Stage 1 alpha research on whether CVD divergence/absorption has any edge on crypto perps — on the market where the data is free and complete — before spending anything on gold futures data.
+**Depth / heatmap stack (same session, after Prince asked to "connect Claude to Bookmap"):** the answer was that
+routing through Bookmap is the wrong shape — Bookmap renders the same public Binance feed we already consume, so it
+adds a desktop-app dependency and a license question to reach free data. What was actually missing was the depth
+subscription.
+
+- **`src/data/order_book.py`** — `OrderBookState`. Depth streams send diffs, not snapshots, so one missed update
+  leaves the book permanently wrong *while it keeps answering queries normally*. Contiguity is checked on every event
+  (spot `U <= lastUpdateId+1`; USD-M futures `pu == lastUpdateId`), a gap flips it to DESYNCED, and `snapshot()` then
+  returns `None` until a fresh REST bootstrap. Refusing to serve is the design: a stale book is worse than no book.
+- **`src/data/feeds/binance_ws.py`** — opt-in `depth_symbols=[...]`. Adds `@depth@100ms`, one book per symbol, REST
+  bootstrap 0.5s after connect (the stream must be buffering first, per Binance's procedure), auto re-bootstrap on
+  desync guarded against storms, and an `on_depth` callback. A reconnect resets and rebuilds every book rather than
+  resuming, since the gap invalidates them.
+- **`src/data/depth_recorder.py`** — `DepthRecorder` decimates 100ms updates to a sampling cadence; `DepthStore`
+  persists long-form `(timestamp, price, size, side)` rows. It exists as a separate store because `ParquetStore`
+  dedupes on `timestamp` alone, which would have kept one price level per sample and silently discarded the rest.
+  `to_heatmap_grid` buckets prices on the *inferred tick size*; equal-width bins that don't divide the tick produce
+  moiré banding that reads like real structure (caught by rendering it and looking).
+- **`scripts/depth.py`** record/show/heatmap CLI, and a heatmap section on dashboard page 8. The colour ramp is a
+  single hue light→dark — Bookmap's blue→yellow→red is a rainbow, and the hue flips invent thresholds readers then
+  treat as meaningful.
+
+**Tests now 222 across the flow stack** (order_book 38, depth_recorder 41, binance_depth 21, flow_charts 41, cvd 48,
+agg_trades 33), all passing with `--noconftest`.
+
+**KNOWN UNVERIFIED — the live depth path has never run against Binance.** The cloud container's egress proxy blocks
+`api.binance.com` (confirmed: HTTP 000; the allowlist covers package registries only). A real recording attempt was
+made and failed at connect, exercising only the reconnect-backoff and zero-sample-detection paths. So the REST
+bootstrap, real `depthUpdate` payload parsing, and the full sync handshake are covered by unit tests against
+synthetic events and by nothing else. **The first local run on Prince's Mac is the real test** — expect to debug it.
+
+**Also note:** depth has no historical backfill. Binance archives trades (which is why CVD could be backfilled years
+deep from Data Vision) but not order books, so the heatmap only ever shows what was recorded live from the moment
+recording starts.
+
+**Next if pursued:** Stage 1 alpha research on whether CVD divergence/absorption has any edge on crypto perps — on
+the market where the data is free and complete — before spending anything on gold futures data.
 
 ## Session 30 — adaptive_momentum strategy build + validation (2026-06-24)
 

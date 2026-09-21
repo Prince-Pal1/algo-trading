@@ -25,7 +25,7 @@
 
 | Module | File | Depends On | Used By | Status |
 |---|---|---|---|---|
-| Binance WebSocket Feed | `src/data/feeds/binance_ws.py` | `asyncio`, `orjson`, `websockets`, `certifi` | Candle Builder | ✅ working (exponential backoff 1s→60s, 10% jitter) |
+| Binance WebSocket Feed | `src/data/feeds/binance_ws.py` | `asyncio`, `orjson`, `websockets`, `certifi`, `httpx`, Order Book Processor | Candle Builder, Depth Recorder | ✅ working (exponential backoff 1s→60s, 10% jitter). 2026-09-21: opt-in `depth_symbols=[...]` adds `@depth@100ms` diff streams, one `OrderBookState` per symbol, REST bootstrap after connect, auto re-bootstrap on desync, `on_depth` callback. **Live depth path is UNTESTED against the exchange** — the cloud container's egress proxy blocks Binance. |
 | Historical Warmup | `src/data/warmup.py` | FeatureEngine, StrategyRouter, Downloader, ParquetStore | TradingEngine | ✅ working (200 candles from Parquet/REST, signals discarded) |
 | Alpaca WebSocket Feed | `src/data/feeds/alpaca_ws.py` | `alpaca-trade-api`, `asyncio` | Candle Builder | 📋 planned |
 | IBKR Data Feed | `src/data/feeds/ibkr_feed.py` | `ib_insync` | Candle Builder | 📋 planned |
@@ -34,7 +34,8 @@
 | Deribit WebSocket Feed | `src/data/feeds/deribit_ws.py` | `asyncio`, `websockets` | Candle Builder | 📋 planned |
 | Candle Builder | `src/data/candle_builder.py` | Data Feeds | Feature Engine, Strategies | ✅ working |
 | Feature Engine | `src/data/feature_engine.py` | `ta`, `pandas` | Strategies | ✅ working |
-| Order Book Processor | `src/data/order_book.py` | Binance WS | Ultra Scalp Strategies | 📋 planned |
+| Order Book Processor | `src/data/order_book.py` | Types (`OrderBookSnapshot`) | Binance WS feed, Depth Recorder | ✅ 2026-09-21 (`OrderBookState` — REST-snapshot bootstrap + diff-stream sync with spot `U`/futures `pu` contiguity checks; a sequence gap sets DESYNCED and the book then refuses to serve snapshots until re-bootstrapped) |
+| Depth Recorder | `src/data/depth_recorder.py` | `pyarrow`, `pandas`, Types | `scripts/depth.py`, dashboard page 8 | ✅ 2026-09-21 (`DepthRecorder` decimates the 100ms stream to a sampling cadence; `DepthStore` persists long-form rows keyed on (timestamp, side, price) — NOT ParquetStore, see Known Gotchas; `to_heatmap_grid` pivots with tick-aligned price bucketing) |
 | Historical Downloader | `src/data/downloader.py` | `httpx`, `certifi` | Backtesting | ✅ working |
 | CVD / Order Flow | `src/data/cvd.py` | `pandas`, `numpy`, `msgspec`, Candle Builder (`TF_MS`), Types | `src/data/agg_trades.py`, `scripts/cvd.py` | ✅ 2026-09-21 (streaming `CVDCalculator` + vectorized `compute_delta_bars` + `detect_divergences`/`detect_absorption`; parity-tested both paths; degenerate quote-only-feed guard) |
 | AggTrades Downloader | `src/data/agg_trades.py` | `httpx`, `certifi`, CVD, ParquetStore | `scripts/cvd.py` | ✅ 2026-09-21 (free Binance Data Vision daily dumps; day-by-day fold into delta bars, CVD continuous across days; handles headerless/headered, 7- and 8-column, µs timestamps) |
@@ -362,6 +363,22 @@ Live equivalent: binance_ws @trade (real is_buyer_maker) --> cvd.CVDCalculator.u
 NOT available on the gold book: IC Markets CFD ticks carry no size/aggressor — see Known Gotchas 2026-09-21.
 ```
 
+### Depth / Heatmap Path (research — live recording only, crypto only)
+```
+binance_ws @depth@100ms (diff stream)   +   REST /api/v3/depth (snapshot)
+  --> order_book.OrderBookState         (sequence-checked; DESYNCED on a gap)
+    --> feed.on_depth(OrderBookSnapshot)
+      --> depth_recorder.DepthRecorder  (decimate to sample_ms, top N levels)
+        --> DepthStore "data/depth/<SYMBOL>_depth.parquet"   (long-form rows)
+          --> depth_recorder.to_heatmap_grid()   (tick-aligned price buckets)
+            --> scripts/depth.py {record,show,heatmap}       (terminal / PNG)
+            --> dashboard page 8 via flow_charts.depth_heatmap()  (browser)
+
+CVD sees AGGRESSIVE flow (who crossed the spread); depth sees PASSIVE resting
+liquidity. Neither sees what the other sees — that is why both exist.
+No historical backfill is possible: Binance archives trades, not order books.
+```
+
 ### M3S Decision Loop
 ```
 Portfolio Tracker (P&L, drawdown, Sharpe)
@@ -466,6 +483,9 @@ Trade Fill Event
 
 | Date | Description |
 |---|---|
+| 2026-09-21 | **`ParquetStore` cannot store depth — it deduplicates on `timestamp` alone.** `storage.py` `save()` does `drop_duplicates(subset=["timestamp"])`, which is right for OHLCV and flow bars (one row per bar) and catastrophic for depth, where every sample writes dozens of rows sharing one timestamp. Routing depth through it keeps ONE price level per sample and silently discards the rest; the resulting heatmap looks plausible and is almost entirely missing. `depth_recorder.DepthStore` exists solely to dedupe on the composite key `(timestamp, side, price)`. |
+| 2026-09-21 | **A desynced order book does not fail loudly — it drifts.** Binance depth streams send diffs, not snapshots, so a single missed update leaves the book permanently wrong while it keeps answering queries normally. `OrderBookState` checks contiguity on every event (spot: `U <= lastUpdateId+1`; USD-M futures: `pu == lastUpdateId`), flips to DESYNCED on a gap, and then returns `None` from `snapshot()` until it is re-bootstrapped from REST. Refusing to serve is the point: a stale book is worse than no book. A reconnect also invalidates every book, so `binance_ws.start()` resets and re-bootstraps rather than resuming. |
+| 2026-09-21 | **Heatmap price bins must align to the instrument's tick size.** Equal-width bins that do not divide the tick put two price levels in some rows and one in others, which renders as moiré banding that reads like real liquidity structure. `to_heatmap_grid` infers the tick (modal gap between adjacent distinct prices) and buckets on it, falling back to equal-width bins only when the price range is too wide to fit the row ceiling — and it reports which one it used. |
 | 2026-09-21 | **CFD/spot-FX feeds cannot produce CVD, footprint or delta — there is no tape.** `icmarkets_feed.py:412-418` builds every `Tick` with `quantity=0.0, is_buyer_maker=False` because a CFD is bilateral: no central book, no trade size, no aggressor side. Candle `volume` from cTrader trendbars (`icmarkets_feed.py:472`, `tb.volume`) is **tick count, not contracts**, so anything volume-derived on the gold book (including `vpin.py`'s Bulk Volume Classification) reads noise. `CVDCalculator` detects this (all-zero-quantity ticks past `DEGENERATE_CHECK_AFTER`) and logs `cvd_degenerate_feed` once rather than emitting a flat, plausible-looking zero series. Real CVD on gold requires COMEX GC/MGC futures via IBKR tick-by-tick or Databento GLBX.MDP3 — NOT XAUUSD. |
 | 2026-09-21 | **Binance Data Vision dumps are not one stable format.** Headerless before ~2024 and headered after; spot has 8 columns, USD-M futures 7 (no `is_best_match`); some 2025-onward datasets switched `transact_time` from **milliseconds to microseconds**. `agg_trades.py` assigns columns positionally by count and downscales any timestamp above 1e14. A µs timestamp read as ms lands the trade ~55,000 years in the future and silently produces one garbage bucket per day. |
 | 2026-06-24 | **Paper positions are keyed by `(strategy, symbol)`, not `symbol` (Session 30)**: enabling `adaptive_momentum` to run *alongside* `vol_momentum` on the same coins exposed that `PaperExecutor._positions`, `RiskState.open_positions`, and the `paper_positions` table were all keyed by symbol alone. Two strategies on one symbol → the 2nd entry was silently rejected (`position_exists`) and a CLOSE matched by symbol could close the *other* strategy's position. Fixed by composite `(strategy, symbol)` keys (commit `4d0f6f6`): `paper_positions` PK is now `(strategy_name, symbol)`; `update_prices` marks *all* strategies holding a symbol; exposure/leverage already aggregate across positions so same-symbol exposure sums correctly. The **live Binance-futures / IC-Markets executors are intentionally NOT changed** — real venues net to one position per symbol, so symbol keying is correct there; this is paper-only. Migrate existing DBs with `scripts/operational/migrate_positions_composite_pk.py` (idempotent, backs up). The gold book had the same latent bug (donchian_gold + vol_momentum_gold both XAUUSD) — now also fixed. |

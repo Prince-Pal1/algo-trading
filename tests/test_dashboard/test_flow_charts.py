@@ -16,6 +16,8 @@ from src.dashboard.flow_charts import (
     COLOR_BUY,
     COLOR_PRICE,
     COLOR_SELL,
+    DEPTH_COLORSCALE,
+    depth_heatmap,
     price_cvd_panels,
 )
 
@@ -227,3 +229,92 @@ class TestPalette:
         # Changing either invalidates the colour-vision separation check that
         # was run against this pair; re-run the validator if you touch them.
         assert (COLOR_BUY, COLOR_SELL) == ("#2a78d6", "#e34948")
+
+
+def _grid(rows: int = 5, cols: int = 4, big: float = 0.0) -> pd.DataFrame:
+    base = np.arange(rows * cols, dtype=float).reshape(rows, cols) + 1.0
+    if big:
+        base[0, 0] = big
+    return pd.DataFrame(
+        base,
+        index=[100.0 + i * 0.01 for i in range(rows)],
+        columns=[_BASE_TS + c * 1000 for c in range(cols)],
+    )
+
+
+class TestDepthHeatmap:
+    def test_empty_grid_is_annotated(self):
+        fig = depth_heatmap(pd.DataFrame())
+        assert len(fig.data) == 0
+        assert any("scripts.depth record" in a.text for a in fig.layout.annotations)
+
+    def test_none_grid_handled(self):
+        assert len(depth_heatmap(None).data) == 0
+
+    def test_single_heatmap_trace(self):
+        fig = depth_heatmap(_grid())
+        assert len(fig.data) == 1
+        assert fig.data[0].type == "heatmap"
+
+    def test_price_on_y_and_time_on_x(self):
+        grid = _grid(rows=3, cols=2)
+        fig = depth_heatmap(grid)
+        assert list(fig.data[0].y) == list(grid.index)
+        assert len(fig.data[0].x) == 2
+
+    def test_columns_converted_to_datetimes(self):
+        fig = depth_heatmap(_grid())
+        assert isinstance(fig.data[0].x, (pd.DatetimeIndex, np.ndarray))
+        assert pd.notna(pd.Timestamp(fig.data[0].x[0]))
+
+    def test_colorscale_is_single_hue_sequential(self):
+        """A rainbow invents thresholds where the hue flips. One hue, light to dark."""
+        fig = depth_heatmap(_grid())
+        assert list(fig.data[0].colorscale) == [tuple(s) for s in DEPTH_COLORSCALE]
+
+    def test_colorscale_darkens_monotonically(self):
+        def luminance(hex_color: str) -> float:
+            r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+        lums = [luminance(c) for _, c in DEPTH_COLORSCALE]
+        assert lums == sorted(lums, reverse=True)
+
+    def test_zmin_anchored_at_zero(self):
+        assert depth_heatmap(_grid()).data[0].zmin == 0.0
+
+    def test_clip_percentile_caps_the_scale(self):
+        """One huge wall must not wash out ordinary liquidity."""
+        grid = _grid(big=10_000.0)
+        clipped = depth_heatmap(grid, clip_percentile=90.0)
+        unclipped = depth_heatmap(grid, clip_percentile=100.0)
+        assert clipped.data[0].zmax < unclipped.data[0].zmax
+        assert unclipped.data[0].zmax == pytest.approx(10_000.0)
+
+    def test_zmax_never_zero(self):
+        flat = pd.DataFrame(
+            np.zeros((2, 2)), index=[1.0, 2.0], columns=[_BASE_TS, _BASE_TS + 1]
+        )
+        assert depth_heatmap(flat).data[0].zmax > 0
+
+    def test_nan_cells_preserved(self):
+        grid = _grid()
+        grid.iloc[1, 1] = np.nan
+        fig = depth_heatmap(grid)
+        assert np.isnan(np.asarray(fig.data[0].z, dtype=float)[1, 1])
+
+    def test_note_appears_in_subtitle(self):
+        fig = depth_heatmap(_grid(), note="tick-aligned at 0.01")
+        assert "tick-aligned at 0.01" in fig.layout.title.text
+
+    def test_clip_percentile_stated_in_subtitle(self):
+        fig = depth_heatmap(_grid(), clip_percentile=95.0)
+        assert "95th percentile" in fig.layout.title.text
+
+    def test_light_template(self):
+        assert depth_heatmap(_grid()).layout.template.layout.plot_bgcolor == "white"
+
+    def test_axes_labelled(self):
+        fig = depth_heatmap(_grid())
+        assert fig.layout.yaxis.title.text == "Price"
+        assert "Time" in fig.layout.xaxis.title.text
