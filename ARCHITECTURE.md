@@ -252,6 +252,8 @@ Phase 3b-2. Canonical plan: `docs/planning/m3s_plan_v1.md` § v1.1 ADDENDUM. Sub
 |---|---|---|---|---|
 | Streamlit App | `src/dashboard/app.py` | ResultStore, Charts, `streamlit` | Browser | ✅ working (5 pages) |
 | Dashboard Launcher | `scripts/dashboard.py` | `streamlit` | Manual run | ✅ working |
+| Flow Charts | `src/dashboard/flow_charts.py` | `plotly`, `pandas` | Dashboard page 8 | ✅ 2026-09-21 (`price_cvd_panels` — price/CVD/delta as three panels on ONE shared x-axis, never a dual y-axis; divergence direction encoded by marker shape as well as colour; validated diverging blue↔red pair) |
+| Dashboard Page 8 — Order Flow | `src/dashboard/app.py` (page 8) | `streamlit`, Flow Charts, `src.data.cvd`, `src.data.agg_trades` | Streamlit dashboard | ✅ 2026-09-21 (symbol/TF picker from `list_flow_series()`, lookback + z-threshold controls, chart + Divergences/Absorption/Bars table views, research-only warning banner) |
 
 ### Utilities (Python -- src/utils/)
 
@@ -353,7 +355,8 @@ Binance Data Vision daily aggTrades ZIP  (free, no API key)
     --> cvd.compute_delta_bars()     (bucket by TF_MS, cumulative CVD)
       --> ParquetStore "<SYMBOL>_<tf>_cvd.parquet"
         --> cvd.detect_divergences() / cvd.detect_absorption()
-          --> scripts/cvd.py {fetch,show,screen}
+          --> scripts/cvd.py {fetch,show,screen}          (terminal)
+          --> dashboard page 8 via flow_charts.price_cvd_panels()  (browser)
 
 Live equivalent: binance_ws @trade (real is_buyer_maker) --> cvd.CVDCalculator.update(tick) --> DeltaBar
 NOT available on the gold book: IC Markets CFD ticks carry no size/aggressor — see Known Gotchas 2026-09-21.

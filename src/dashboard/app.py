@@ -14,6 +14,9 @@ Pages:
     6. Strategies — Versioned registry from src/strategies/storage.py (task #122).
        Per parent → click → see all version variants + max-return cell + verdict +
        embedded HTML report viewer.
+    7. Run Deep Backtest — broker-grouped fees + history + tooltips (task #141).
+    8. Order Flow — CVD, divergences and absorption from cached flow bars
+       (crypto only; see src/data/cvd.py for why a CFD feed cannot supply them).
 """
 
 from __future__ import annotations
@@ -300,6 +303,7 @@ page = st.sidebar.radio(
         "Validation",
         "Strategies",
         "Run Deep Backtest",
+        "Order Flow",
         "Glossary",
     ],
     index=0,
@@ -335,6 +339,29 @@ def _load_recent_runs_cached(db_path: str, limit: int, cutoff_days: int):
     return list_recent_runs(
         limit=limit, cutoff_days=cutoff_days, db_path=db_path,
     )
+
+
+# ---------------------------------------------------------------------------
+# Cached order-flow series discovery
+# ---------------------------------------------------------------------------
+# Flow bars are stored by ParquetStore under the pseudo-timeframe "<tf>_cvd",
+# so "BTCUSDT_5m_cvd" means symbol BTCUSDT at 5m. TTL is short so a `scripts.cvd
+# fetch` run shows up without restarting the dashboard.
+@st.cache_data(ttl=20)
+def _list_flow_series() -> list[tuple[str, str]]:
+    """(symbol, timeframe) pairs that have cached flow bars."""
+    from src.data.agg_trades import list_flow_series
+
+    return list_flow_series()
+
+
+@st.cache_data(ttl=20)
+def _load_flow_bars(symbol: str, timeframe: str):
+    from src.data.agg_trades import flow_series_key
+    from src.data.storage import ParquetStore
+
+    df = ParquetStore().load(symbol, flow_series_key(timeframe))
+    return df.sort_values("timestamp").reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1006,6 +1033,131 @@ elif page == "Strategies":
 # Renders from LEVERAGE_MODE_HELP + TECHNICAL_TERMS dicts at runtime so
 # definitions never drift from the `help=` kwargs sprinkled across page 7.
 # Single source of truth: `src/backtest/deep_backtest_interactive.py`.
+
+# ---------------------------------------------------------------------------
+# Page 8: Order Flow — CVD, divergences, absorption (2026-09-21)
+# ---------------------------------------------------------------------------
+# Reads flow bars produced by `python -m scripts.cvd fetch`. Crypto only: a CFD
+# feed carries no trade size or aggressor side, so there is nothing to compute
+# on the gold book (see src/data/cvd.py and ARCHITECTURE Known Gotchas).
+
+elif page == "Order Flow":
+    st.title("Order Flow — CVD")
+
+    series = _list_flow_series()
+    if not series:
+        st.info(
+            "No cached flow bars yet.\n\n"
+            "Fetch some first (free Binance data, no API key):\n\n"
+            "```\npython3 -m scripts.cvd fetch BTCUSDT --tf 5m --start 2026-09-20\n```\n\n"
+            "Start with a single day — one day of BTCUSDT aggTrades is already a "
+            "sizable download."
+        )
+    else:
+        symbols = sorted({sym for sym, _ in series})
+        c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+        symbol = c1.selectbox("Symbol", symbols)
+        timeframes = [tf for sym, tf in series if sym == symbol]
+        timeframe = c2.selectbox("Timeframe", timeframes)
+        lookback = c3.number_input(
+            "Divergence lookback", min_value=2, max_value=200, value=20, step=1,
+            help="Bars over which the price change and CVD change are compared.",
+        )
+        z_threshold = c4.number_input(
+            "Min |z|", min_value=0.1, max_value=5.0, value=1.0, step=0.1,
+            help="Both the price leg and the CVD leg must exceed this to count.",
+        )
+
+        bars = _load_flow_bars(symbol, timeframe)
+        if bars.empty:
+            st.warning(f"{symbol} {timeframe} has no rows.")
+        else:
+            window = st.slider(
+                "Bars shown (most recent)",
+                min_value=50,
+                max_value=max(50, len(bars)),
+                value=min(400, len(bars)),
+                step=25,
+            )
+            view = bars.tail(window).reset_index(drop=True)
+
+            from src.dashboard.flow_charts import price_cvd_panels
+            from src.data.cvd import delta_ratio, detect_absorption, detect_divergences
+
+            divergences = detect_divergences(
+                view, lookback=int(lookback), z_threshold=float(z_threshold)
+            )
+            absorption = detect_absorption(view, range_window=int(lookback))
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Bars", f"{len(view):,}")
+            m2.metric("CVD (end)", f"{view['cvd'].iloc[-1]:,.1f}")
+            m3.metric("Divergences", f"{len(divergences)}")
+            m4.metric("Absorption bars", f"{len(absorption)}")
+
+            fig = price_cvd_panels(
+                view, divergences, absorption,
+                title=f"{symbol} {timeframe} — order flow",
+            )
+            st.plotly_chart(fig, width="stretch")
+
+            st.caption(
+                "Price and CVD sit in separate panels on a shared time axis rather "
+                "than on two y-scales — a dual axis lets the scaling decide whether "
+                "the two series appear to agree. Compare the **shapes**."
+            )
+
+            # Table view — required companion to the chart, and the full list
+            # when the chart caps its shaded bands.
+            tab_div, tab_abs, tab_bars = st.tabs(
+                ["Divergences", "Absorption", "Bars"]
+            )
+            with tab_div:
+                if divergences.empty:
+                    st.write("None at these settings.")
+                else:
+                    st.dataframe(
+                        divergences.assign(
+                            time=pd.to_datetime(
+                                divergences["timestamp"], unit="ms", utc=True
+                            )
+                        )[["time", "kind", "price_z", "cvd_z", "strength", "close"]],
+                        width="stretch",
+                        hide_index=True,
+                    )
+            with tab_abs:
+                if absorption.empty:
+                    st.write("None at these settings.")
+                else:
+                    st.dataframe(
+                        absorption.assign(
+                            time=pd.to_datetime(
+                                absorption["timestamp"], unit="ms", utc=True
+                            )
+                        )[["time", "kind", "delta_ratio", "range_ratio", "close"]],
+                        width="stretch",
+                        hide_index=True,
+                    )
+            with tab_bars:
+                st.dataframe(
+                    view.assign(
+                        time=pd.to_datetime(view["timestamp"], unit="ms", utc=True),
+                        delta_ratio=delta_ratio(view),
+                    )[[
+                        "time", "close", "buy_volume", "sell_volume",
+                        "delta", "delta_ratio", "cvd", "trade_count",
+                    ]].tail(200),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+            st.warning(
+                "These are **screens, not signals**. No edge has been researched or "
+                "validated for either pattern — nothing here is wired to a strategy, "
+                "and divergence against a strong trend is a classic losing fade. "
+                "See `STRATEGY_DEVELOPMENT_PROCESS.md` Stage 1."
+            )
+
 
 elif page == "Glossary":
     from src.backtest.deep_backtest_interactive import (

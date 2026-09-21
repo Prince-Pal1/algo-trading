@@ -18,20 +18,16 @@ import sys
 
 import pandas as pd
 
-from src.data.agg_trades import AggTradesDownloader
+from src.data.agg_trades import AggTradesDownloader, flow_series_key
 from src.data.cvd import delta_ratio, detect_absorption, detect_divergences
 from src.data.storage import ParquetStore
 
 SPARK = "▁▂▃▄▅▆▇█"
 
 
-def _tf_key(timeframe: str) -> str:
-    return f"{timeframe}_cvd"
-
-
 def _load(symbol: str, timeframe: str) -> pd.DataFrame:
     store = ParquetStore()
-    key = _tf_key(timeframe)
+    key = flow_series_key(timeframe)
     if not store.exists(symbol, key):
         print(
             f"No cached flow bars for {symbol} {timeframe}.\n"

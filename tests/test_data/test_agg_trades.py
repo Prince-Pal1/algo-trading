@@ -22,6 +22,8 @@ from src.data.agg_trades import (
     _daterange,
     _parse_date,
     daily_url,
+    flow_series_key,
+    list_flow_series,
     parse_agg_trades,
 )
 
@@ -256,3 +258,43 @@ class TestDownloadDeltaBars:
         assert path.exists()
         saved = pd.read_parquet(path)
         assert saved["delta"].iloc[0] == 2.0
+
+
+class _StubStore:
+    def __init__(self, stems: list[str]):
+        self._stems = stems
+
+    def list_files(self) -> list[str]:
+        return self._stems
+
+
+class TestFlowSeriesNaming:
+    """Flow bars share ParquetStore with OHLCV caches via a `<tf>_cvd` key."""
+
+    def test_key_appends_suffix(self):
+        assert flow_series_key("5m") == "5m_cvd"
+
+    def test_roundtrip(self):
+        store = _StubStore(["BTCUSDT_5m_cvd"])
+        assert list_flow_series(store) == [("BTCUSDT", "5m")]
+
+    def test_ohlcv_caches_ignored(self):
+        store = _StubStore(["BTCUSDT_5m_cvd", "XAUUSD_1h", "ETHUSDT_1m"])
+        assert list_flow_series(store) == [("BTCUSDT", "5m")]
+
+    def test_symbol_containing_underscore_roundtrips(self):
+        # COIN-M contracts look like BTCUSD_PERP — splitting on the FIRST
+        # underscore would shear the symbol in half.
+        store = _StubStore(["BTCUSD_PERP_15m_cvd"])
+        assert list_flow_series(store) == [("BTCUSD_PERP", "15m")]
+
+    def test_results_sorted_and_deduped(self):
+        store = _StubStore(["ETHUSDT_1m_cvd", "BTCUSDT_5m_cvd", "ETHUSDT_1m_cvd"])
+        assert list_flow_series(store) == [("BTCUSDT", "5m"), ("ETHUSDT", "1m")]
+
+    def test_malformed_stem_skipped(self):
+        store = _StubStore(["_cvd", "BTCUSDT_5m_cvd"])
+        assert list_flow_series(store) == [("BTCUSDT", "5m")]
+
+    def test_empty_store(self):
+        assert list_flow_series(_StubStore([])) == []

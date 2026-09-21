@@ -63,6 +63,33 @@ _SPOT_COLUMNS = [
 # them with several orders of magnitude to spare.
 _MICROSECOND_THRESHOLD = 1e14
 
+# Flow bars share ParquetStore with OHLCV caches, so they are filed under a
+# pseudo-timeframe: "BTCUSDT_5m_cvd.parquet" is BTCUSDT 5m flow. The suffix is
+# defined here, on the write side, and read back through `list_flow_series`.
+FLOW_SUFFIX = "_cvd"
+
+
+def flow_series_key(timeframe: str) -> str:
+    """ParquetStore timeframe key for a symbol's flow bars."""
+    return f"{timeframe}{FLOW_SUFFIX}"
+
+
+def list_flow_series(store: "ParquetStore | None" = None) -> list[tuple[str, str]]:
+    """Cached (symbol, timeframe) flow series, sorted.
+
+    Splits on the LAST underscore so symbols containing one (e.g. a
+    "BTCUSD_PERP" COIN-M contract) round-trip correctly.
+    """
+    store = store or ParquetStore()
+    pairs: set[tuple[str, str]] = set()
+    for stem in store.list_files():
+        if not stem.endswith(FLOW_SUFFIX):
+            continue
+        symbol, _, timeframe = stem[: -len(FLOW_SUFFIX)].rpartition("_")
+        if symbol and timeframe:
+            pairs.add((symbol, timeframe))
+    return sorted(pairs)
+
 
 def daily_url(symbol: str, day: date, market: str = "spot") -> str:
     """Data Vision URL for one symbol-day of aggregated trades."""
@@ -283,7 +310,7 @@ class AggTradesDownloader:
             raise ValueError(f"No aggTrades downloaded for {symbol} {timeframe}")
 
         store = ParquetStore()
-        tf_key = f"{timeframe}_cvd"
+        tf_key = flow_series_key(timeframe)
         store.save(bars, symbol, tf_key)
         path = store._path(symbol, tf_key)
         log.info("aggtrades_saved", path=str(path), rows=len(bars))
