@@ -48,6 +48,7 @@ W_REPEAT_TEST = 0.12
 W_RETEST = 0.25          # exhausted retest — the strongest single read
 W_LARGE_PRINTS = 0.12
 W_ACCEL_BREAK = 0.18
+W_ICEBERG = 0.22        # hidden size defending a price — book + tape together
 
 
 @dataclass(frozen=True)
@@ -97,6 +98,7 @@ def score_zone(
     threshold: float = DEFAULT_THRESHOLD,
     absorption_floor: float = 0.25,
     adverse_tolerance: float = 0.5,
+    iceberg_threshold: float = 3.0,
 ) -> EvidenceReport:
     """Turn zone features into scored, explained evidence.
 
@@ -107,6 +109,8 @@ def score_zone(
         absorption_floor: minimum absorption to count as evidence at all.
         adverse_tolerance: adverse excursion beyond this fraction of the zone
             half-width counts against the level.
+        iceberg_threshold: traded/displayed ratio at which hidden size counts
+            as evidence. Requires a book — without one the ratio stays 0.
 
     Returns:
         An `EvidenceReport`. Note it always scores; `sufficient` is what says
@@ -158,6 +162,19 @@ def score_zone(
             "breaking", -1, W_BREAK,
             f"delta {features.delta_ratio:+.2f} with range {features.range_ratio:.2f}x "
             "normal — level giving way",
+        ))
+
+    # ── Book + tape: the iceberg ───────────────────────────────────────
+    # Far more than was ever displayed has traded at a price. Something large
+    # is replenishing invisibly. This needs BOTH halves — the book alone shows
+    # a small order, the tape alone shows volume with no reference size — which
+    # is why it only fires with --depth.
+    if features.iceberg_ratio >= iceberg_threshold:
+        items.append(EvidenceItem(
+            "iceberg", +1, W_ICEBERG * min(1.0, features.iceberg_ratio / 10.0),
+            f"{features.iceberg_traded:,.2f} traded at {features.iceberg_price:,.2f} "
+            f"against {features.iceberg_displayed:,.2f} ever displayed "
+            f"({features.iceberg_ratio:.0f}x hidden)",
         ))
 
     # ── Structure: adverse excursion ───────────────────────────────────

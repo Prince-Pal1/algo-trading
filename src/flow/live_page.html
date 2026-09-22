@@ -56,6 +56,9 @@
   li.f:before{content:"+";color:var(--for)} li.a:before{content:"\2212";color:var(--against)}
   .lab{font-size:10px;letter-spacing:1px;color:var(--ink3);text-transform:uppercase;margin-top:10px}
   .thin{color:var(--warn);font-size:11px;margin-top:8px}
+  .ice{margin-top:10px;padding:8px 10px;border-radius:6px;font-size:12px;
+       background:rgba(25,158,112,.14);border:1px solid rgba(25,158,112,.4);color:#4cd4a0}
+  .ice b{font-size:14px}
   .feed{padding:0 20px 24px}
   .feed table{width:100%;border-collapse:collapse;font-size:12px}
   .feed th{text-align:left;color:var(--ink3);font-weight:400;font-size:10px;
@@ -118,6 +121,8 @@ function card(l){
         :`<span style="color:var(--ink3)">probe ${l.probe_count||0}</span>`}</div></div>
     </div>`:""}
     ${!l.sufficient&&inZone?`<div class="thin">thin — ${l.trade_count} trades, not enough to act on</div>`:""}
+    ${l.iceberg_ratio>=3?`<div class="ice">🧊 ICEBERG at ${fmt(l.iceberg_price,2)} —
+      <b>${fmt(l.iceberg_ratio,0)}x</b> more traded than was ever displayed</div>`:""}
     ${l.supporting?.length?`<div class="lab">for</div><ul>${l.supporting.map(i=>`<li class="f">${i.detail}</li>`).join("")}</ul>`:""}
     ${l.opposing?.length?`<div class="lab">against</div><ul>${l.opposing.map(i=>`<li class="a">${i.detail}</li>`).join("")}</ul>`:""}
   </div>`;

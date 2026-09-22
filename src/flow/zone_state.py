@@ -132,6 +132,10 @@ class FlowSignal:
             "probe_count": self.features.probe_count,
             "retest_volume_ratio": round(self.features.retest_volume_ratio, 4),
             "large_print_share": round(self.features.large_print_share, 4),
+            "iceberg_ratio": round(self.features.iceberg_ratio, 3),
+            "iceberg_price": self.features.iceberg_price,
+            "iceberg_traded": round(self.features.iceberg_traded, 6),
+            "iceberg_displayed": round(self.features.iceberg_displayed, 6),
             "velocity_ratio": round(self.features.velocity_ratio, 4),
             "supporting": [
                 {"name": i.name, "weight": round(i.weight, 4), "detail": i.detail}
@@ -269,6 +273,7 @@ class ZoneMonitor:
             baseline_range=context.baseline_range,
             baseline_trade_size=context.baseline_trade_size,
             zone_width=self.level.width,
+            tick_size=context.tick_size,
             test_count=self.test_count,
         )
         self._acc.on_tick(tick)
@@ -380,6 +385,8 @@ class ZoneMonitor:
             "large_print_share": round(features.large_print_share, 3) if features else 0.0,
             "probe_count": features.probe_count if features else 0,
             "retest_volume_ratio": round(features.retest_volume_ratio, 3) if features else 0.0,
+            "iceberg_ratio": round(features.iceberg_ratio, 2) if features else 0.0,
+            "iceberg_price": features.iceberg_price if features else 0.0,
             "supporting": [
                 {"name": i.name, "weight": round(i.weight, 4), "detail": i.detail}
                 for i in self._report.supporting
@@ -410,6 +417,7 @@ class FlowEngine:
     # ticks, so a zone is judged against the market's norm, not its own.
     _sizes: deque = field(default_factory=lambda: deque(maxlen=5_000))
     _size_sum: float = 0.0
+    _tick_size: float = 0.0
     _tick_count: int = 0
     _lag_ms: int = 0
     _last_tick_ms: int = 0
@@ -443,6 +451,7 @@ class FlowEngine:
         context = MarketContext(
             baseline_range=self._baseline_range(tick.timestamp),
             baseline_trade_size=self._baseline_trade_size(),
+            tick_size=self._tick_size,
         )
 
         signals: list[FlowSignal] = []
@@ -453,8 +462,30 @@ class FlowEngine:
         return signals
 
     def on_book(self, snapshot: OrderBookSnapshot) -> None:
+        self._infer_tick_size(snapshot)
         for monitor in self.monitors.values():
             monitor.on_book(snapshot)
+
+    def _infer_tick_size(self, snapshot: OrderBookSnapshot) -> None:
+        """Smallest gap between adjacent book levels — the instrument's tick.
+
+        Taken from the book rather than from trades because book levels sit
+        exactly on tick boundaries, so one snapshot gives an exact answer where
+        trade prices would need statistics. Latched once: the tick does not
+        change intraday, and re-deriving it per snapshot would let one odd
+        book shrink it.
+        """
+        if self._tick_size > 0 or snapshot is None:
+            return
+        smallest = 0.0
+        for side in (snapshot.bids, snapshot.asks):
+            for a, b in zip(side, side[1:]):
+                gap = abs(a.price - b.price)
+                if gap > 0 and (smallest == 0.0 or gap < smallest):
+                    smallest = gap
+        if smallest > 0:
+            self._tick_size = smallest
+            log.info("tick_size_inferred", symbol=self.symbol, tick_size=smallest)
 
     def _baseline_trade_size(self) -> float:
         """Rolling mean print size. O(1) — the sum is maintained incrementally."""
@@ -487,6 +518,7 @@ class FlowEngine:
             "baseline_range": round(self._baseline_range(self._last_tick_ms), 8)
             if self._last_tick_ms else 0.0,
             "baseline_trade_size": round(self._baseline_trade_size(), 8),
+            "tick_size": self._tick_size,
             "levels": [m.snapshot() for m in sorted(
                 self.monitors.values(), key=lambda m: m.level.price
             )],

@@ -45,6 +45,30 @@ WHAT A TRADER READS THAT RAW DELTA DOES NOT CAPTURE
   level again. If that probe trades *less* than the first, the aggressors are
   exhausted — there is nobody left to push. This is the highest-quality
   confirmation available and it requires tracking probes, not just totals.
+- **Icebergs.** See below.
+
+
+THE ICEBERG SIGNATURE
+---------------------
+If 5 BTC is displayed at 98,000 and 200 BTC trades there, 195 was hidden. That
+is an iceberg: a large order replenishing invisibly, and it is the single
+clearest evidence that a serious participant is defending a price.
+
+    iceberg_ratio = volume traded at a price / MAX size ever displayed there
+
+Using the **maximum** displayed size is what makes this work, and it is
+deliberately conservative:
+
+- A genuine 200-lot resting order is eaten 200 -> 150 -> ... -> 0. Max displayed
+  is 200, traded is 200, ratio 1.0. Correctly NOT an iceberg.
+- An iceberg shows 5, is eaten, refills to 5, over and over. Max displayed stays
+  5 while 200 trades. Ratio 40. Correctly an iceberg.
+
+This requires the book, so it only works with `--depth`. Without a book the
+ratio stays 0 and the rule never fires — the absence of a signal, not a false
+one. It also requires a tick size to bucket prices by, which the engine infers
+from the spacing of adjacent book levels (exact, and far cheaper than guessing
+from trades).
 """
 
 from __future__ import annotations
@@ -67,6 +91,15 @@ LARGE_PRINT_MULT = 4.0
 PROBE_RETRACE_FRAC = 0.35
 PROBE_EPS_FRAC = 0.15
 
+# A price bucket needs at least this many average-sized prints before its
+# iceberg ratio means anything. Without it, 1 unit trading against a 0.001
+# display reports a ratio of 1000 and says nothing.
+ICEBERG_MIN_PRINTS = 10.0
+
+# Hard cap on tracked price buckets, so a wide zone on a fine tick cannot
+# grow the dict without bound. Existing buckets keep updating once full.
+MAX_PRICE_BUCKETS = 4096
+
 
 @dataclass(frozen=True)
 class MarketContext:
@@ -78,6 +111,7 @@ class MarketContext:
 
     baseline_range: float = 0.0        # typical recent price excursion
     baseline_trade_size: float = 0.0   # typical recent print size
+    tick_size: float = 0.0             # inferred from book level spacing; 0 = unknown
 
 
 @dataclass
@@ -104,6 +138,10 @@ class ZoneFeatures:
     large_print_share: float    # fraction of zone volume from those prints, [0, 1]
     probe_count: int            # distinct probes of the zone extreme
     retest_volume_ratio: float  # latest probe volume / first probe volume
+    iceberg_ratio: float        # max(traded / max-displayed) over price buckets
+    iceberg_price: float        # where that ratio occurred
+    iceberg_traded: float       # volume traded at that price
+    iceberg_displayed: float    # most ever displayed there
     test_count: int             # which test of this level this is (1-based)
     book_size_at_level: float   # resting size near the level (0 when no book)
     book_refills: int           # times that resting size replenished — iceberg proxy
@@ -146,6 +184,7 @@ class ZoneAccumulator:
     late_window_ms: int = 30_000
     baseline_trade_size: float = 0.0
     zone_width: float = 0.0
+    tick_size: float = 0.0
 
     entered_ms: int = 0
     _last_ms: int = 0
@@ -172,6 +211,10 @@ class ZoneAccumulator:
     _probe_volumes: list[float] = field(default_factory=list)
     _in_probe: bool = False
     _current_probe_volume: float = 0.0
+    # Iceberg tracking: volume traded per price bucket, and the most ever
+    # DISPLAYED at that bucket. See the module docstring for why max.
+    _traded_at: dict[int, float] = field(default_factory=dict)
+    _displayed_at: dict[int, float] = field(default_factory=dict)
 
     def on_tick(self, tick: Tick) -> None:
         if self.entered_ms == 0:
@@ -188,6 +231,7 @@ class ZoneAccumulator:
             self._large_volume += tick.quantity
 
         self._track_probe(tick.price, tick.quantity)
+        self._track_traded(tick.price, tick.quantity)
 
         if tick.is_buyer_maker:
             self._sell += tick.quantity
@@ -198,6 +242,21 @@ class ZoneAccumulator:
         self._low = min(self._low, tick.price)
 
         self._recent.append((tick.timestamp, tick.quantity, tick.is_buyer_maker))
+
+    def _bucket(self, price: float) -> int | None:
+        """Price -> integer tick index. None when no tick size is known."""
+        if self.tick_size <= 0:
+            return None
+        return int(round(price / self.tick_size))
+
+    def _track_traded(self, price: float, qty: float) -> None:
+        bucket = self._bucket(price)
+        if bucket is None:
+            return
+        if bucket in self._traded_at:
+            self._traded_at[bucket] += qty
+        elif len(self._traded_at) < MAX_PRICE_BUCKETS:
+            self._traded_at[bucket] = qty
 
     def _track_probe(self, price: float, qty: float) -> None:
         """Measure the volume traded DURING each probe of the zone extreme.
@@ -262,6 +321,19 @@ class ZoneAccumulator:
         self._book_peak = max(self._book_peak, size)
         self._book_size = size
 
+        # Max displayed per price — the denominator of the iceberg ratio.
+        if self.tick_size > 0:
+            for lv in levels:
+                if abs(lv.price - self.level_price) > band:
+                    continue
+                bucket = self._bucket(lv.price)
+                if bucket is None:
+                    continue
+                prior = self._displayed_at.get(bucket, 0.0)
+                if lv.quantity > prior:
+                    if bucket in self._displayed_at or len(self._displayed_at) < MAX_PRICE_BUCKETS:
+                        self._displayed_at[bucket] = lv.quantity
+
         bid = sum(lv.quantity for lv in snapshot.bids[:10])
         ask = sum(lv.quantity for lv in snapshot.asks[:10])
         total = bid + ask
@@ -290,6 +362,7 @@ class ZoneAccumulator:
         adverse = (self.level_price - low) if self.is_support else (high - self.level_price)
 
         rate, velocity_ratio = self._velocity()
+        ice_ratio, ice_price, ice_traded, ice_displayed = self._iceberg()
         probes = self._probes()
         if len(probes) >= 2 and probes[0] > 0:
             retest_ratio = probes[-1] / probes[0]
@@ -317,12 +390,43 @@ class ZoneAccumulator:
             large_print_share=(self._large_volume / volume) if volume > 0 else 0.0,
             probe_count=len(probes),
             retest_volume_ratio=retest_ratio,
+            iceberg_ratio=ice_ratio,
+            iceberg_price=ice_price,
+            iceberg_traded=ice_traded,
+            iceberg_displayed=ice_displayed,
             test_count=self.test_count,
             book_size_at_level=self._book_size,
             book_refills=self._book_refills,
             book_imbalance=self._book_imbalance,
             has_book=self._has_book,
         )
+
+    def _iceberg(self) -> tuple[float, float, float, float]:
+        """Strongest (ratio, price, traded, displayed) across price buckets.
+
+        Only buckets where the book was actually observed can produce a ratio,
+        and only those carrying real volume are considered — see
+        ICEBERG_MIN_PRINTS.
+        """
+        if not self._displayed_at or self.tick_size <= 0:
+            return 0.0, 0.0, 0.0, 0.0
+
+        min_volume = (
+            self.baseline_trade_size * ICEBERG_MIN_PRINTS
+            if self.baseline_trade_size > 0
+            else 0.0
+        )
+        best = (0.0, 0.0, 0.0, 0.0)
+        for bucket, displayed in self._displayed_at.items():
+            if displayed <= 0:
+                continue
+            traded = self._traded_at.get(bucket, 0.0)
+            if traded < min_volume:
+                continue
+            ratio = traded / displayed
+            if ratio > best[0]:
+                best = (ratio, bucket * self.tick_size, traded, displayed)
+        return best
 
     def _velocity(self) -> tuple[float, float]:
         """(trades/sec in the recent window, recent rate / earlier rate).
