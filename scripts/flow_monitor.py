@@ -65,6 +65,7 @@ class FlowMonitor:
         self.engine = FlowEngine(
             registry=self.registry, symbol=self.symbol, threshold=args.threshold,
             memory=self.memory, require_turn=not args.no_turn,
+            cooldown_ms=(args.cooldown * 1000) if args.cooldown else None,
         )
         self.engine.sync_levels(now_ms=_now_ms())
 
@@ -353,6 +354,11 @@ def main() -> None:
     parser.add_argument("--level-memory", action="store_true",
                         help="remember how each level resolved before, across restarts "
                              "(off by default — it changes scoring)")
+    parser.add_argument("--cooldown", type=int, default=None, metavar="SECONDS",
+                        help="how long a CONFIRMED/INVALIDATED level stays "
+                             "resolved before re-arming (default 300). The "
+                             "monitor ignores that level entirely meanwhile, so "
+                             "a break-and-reclaim inside the window is missed")
     parser.add_argument("--no-turn", action="store_true",
                         help="fire on score alone instead of requiring the "
                              "ABSORBING->TURNING sequence (comparison arm)")

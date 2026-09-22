@@ -109,7 +109,7 @@ def _monitor(tmp_path, monkeypatch):
     args = argparse.Namespace(
         symbol="BTCUSDT", levels=tmp_path / "levels.toml", threshold=0.62,
         target_mult=2.0, depth=False, level_memory=False, no_turn=False,
-        port=8799, hz=5.0,
+        cooldown=None, port=8799, hz=5.0,
     )
     return FlowMonitor(args)
 

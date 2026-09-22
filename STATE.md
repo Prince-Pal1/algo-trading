@@ -133,6 +133,22 @@ All four are Known Gotchas. The palette went through the dataviz skill's validat
 
 **294 flow tests pass** (42 new).
 
+**Live soak (same session) — five defects, all load- or time-dependent.** Prince asked for the running console to be watched for bugs and performance problems. Binance is unreachable from this container, so the real `FlowMonitor` was soaked against a realistic tape (45 trades/sec, walking in and out of the zone and breaking it) with a browser in front of it for 150 s, plus hot-path profiling from 5 to 500 trades/sec.
+
+Not one of these was reachable by the existing tests, because every one of them needs either load or elapsed time:
+
+1. **A dead feed read as a calm market.** `lag_ms` is measured when a tick *arrives*, so with nothing arriving it froze at its last good value — 40 ms, green, indefinitely — while the WebSocket to the monitor stayed up so "link: live" agreed. On a console built around *a stale score is worse than no score*, that was the most dangerous thing in the stack. `stale_ms` is now measured at publish time and the page leads with whichever is worse, with a red NO DATA banner past 10 s. The general shape is worth keeping: **a freshness metric computed on arrival cannot detect absence.**
+2. **`_baseline_range` was a full window scan per tick** — 99.7% of the hot path, and it got *worse as the market got busier*: 153 µs/tick at 5 trades/sec, 3653 µs/tick at 50. At a burst of several hundred a second it would have stopped keeping up, and the symptom would have been the lag number climbing during fast tape. Replaced with `RollingExtremes` (two monotonic deques): exact, O(1) amortized, 188 entries held for a 60,000-tick window, zero disagreement with the scan it replaced.
+3. **The whole feature set was rebuilt every tick to read one O(1) field.** The invalidation check needs `adverse_excursion`; `features()` also runs two windowed scans and the iceberg pass. ~550 µs/tick for nothing.
+4. **A `maxlen` deque silently shortened a TIME window under load.** `_recent` held 89 s at 45 trades/sec but 16 s at 500, while the turn detector reads 30 s and velocity reads 60. So "recent" quietly redefined itself during exactly the fast tape where the turn is the whole question — no error, no symptom.
+5. **A resolved card showed a verdict with no age**, and the level is ignored entirely for 300 s, so a break-and-reclaim inside the window is missed. The card now counts down to re-arm and `--cooldown` makes it settable; the default is unchanged, because shortening it trades missed reclaims for re-entering a level that is still falling.
+
+**Hot path is now flat at ~10-17 µs/tick from 5 to 500 trades/sec** — 217× headroom at 500/s, where before it could not keep up.
+
+The clean results are worth recording too, since they were measured rather than assumed: no JS errors across 745 frames, heap flat at 1.0-2.6 MB with no leak, canvas rebuild 11.6 ms at full history (it does *not* scale with history, because closed columns are rasterised once), and the WebSocket transport holding 22 KB/s sustained.
+
+**299 flow tests** (5 new, pinning the dead-feed lie specifically). **Still never exercised against a live Binance feed from here** — egress is blocked, so all of this is a realistic simulation, not the real tape.
+
 **Next:** Phase 2 — run it in shadow mode on BTC, ignore everything it says, collect outcomes. Whether level memory helps is a Phase 3 question against the logged null-hypothesis baselines, which is precisely why it ships off.
 
 ## Session 31 — order-flow / CVD research tooling (2026-09-21)

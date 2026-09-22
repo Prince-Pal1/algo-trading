@@ -346,3 +346,47 @@ class TestSequenceDetection:
         mon = ZoneMonitor(level=_support(), min_dwell_ms=600_000, require_turn=True)
         self._run(mon, absorb_n=300, turn_n=0)
         assert mon.snapshot()["phase"] == "ABSORBING"
+
+
+class TestStaleness:
+    """A dead feed must not read as a calm market.
+
+    `lag_ms` is measured when a tick arrives, so it freezes at its last good
+    value when nothing arrives — 40ms, green, forever. `stale_ms` is measured
+    at publish time and keeps climbing either way.
+    """
+
+    def _engine(self) -> FlowEngine:
+        reg = LevelRegistry()
+        reg.levels = {"sup": _support()}
+        eng = FlowEngine(registry=reg, symbol="BTCUSDT")
+        eng.sync_levels(now_ms=TS)
+        return eng
+
+    def test_stale_ms_climbs_while_the_feed_is_dead(self):
+        eng = self._engine()
+        eng.on_tick(_tick(97950.0, True, TS), local_ms=TS + 40)
+        assert eng.snapshot(local_ms=TS + 40)["stale_ms"] == 40
+        assert eng.snapshot(local_ms=TS + 600_000)["stale_ms"] == 600_000
+
+    def test_lag_alone_would_have_lied(self):
+        """Pinning the exact failure: lag stays green while nothing arrives."""
+        eng = self._engine()
+        eng.on_tick(_tick(97950.0, True, TS), local_ms=TS + 40)
+        snap = eng.snapshot(local_ms=TS + 600_000)
+        assert snap["lag_ms"] == 40                  # frozen, and reassuring
+        assert snap["stale_ms"] == 600_000           # the truth
+
+    def test_stale_is_zero_before_any_tick(self):
+        assert self._engine().snapshot(local_ms=TS)["stale_ms"] == 0
+
+    def test_stale_never_goes_negative(self):
+        """A snapshot taken against a clock behind the tape is not -3 seconds."""
+        eng = self._engine()
+        eng.on_tick(_tick(97950.0, True, TS + 5000), local_ms=TS)
+        assert eng.snapshot(local_ms=TS)["stale_ms"] == 0
+
+    def test_cooldown_is_published_so_the_page_can_count_down(self):
+        eng = self._engine()
+        eng.on_tick(_tick(97950.0, True, TS), local_ms=TS)
+        assert eng.snapshot(local_ms=TS)["levels"][0]["cooldown_ms"] > 0

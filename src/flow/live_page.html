@@ -22,6 +22,11 @@
   .lag.good .v{background:rgba(25,158,112,.18);color:#4cd4a0}
   .lag.warn .v{background:rgba(201,133,0,.2);color:#e0a52e}
   .lag.bad  .v{background:rgba(230,103,103,.2);color:var(--against)}
+  .lag.dead .v{background:var(--against);color:#fff;font-weight:700}
+  .dead-banner{display:none;padding:9px 20px;background:rgba(208,59,59,.16);
+    border-bottom:1px solid var(--against);color:#f09a9a;font-size:12px}
+  .dead-banner.on{display:block}
+  .panes.stale{opacity:.4}
   main{padding:18px 20px;display:grid;gap:14px;
        grid-template-columns:repeat(auto-fill,minmax(420px,1fr))}
   .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
@@ -149,6 +154,7 @@
   <div class="stat"><span class="k">baseline range</span><span class="v" id="base">—</span></div>
   <div class="stat"><span class="k">link</span><span class="v" id="conn">connecting</span></div>
 </header>
+<div class="dead-banner" id="deadbar"></div>
 <section class="chartwrap" id="chartwrap" style="display:none">
   <div class="chead">
     <h2 id="cTitle">—</h2>
@@ -229,8 +235,12 @@ const fmt=(v,d=2)=>v==null?"—":Number(v).toLocaleString(undefined,{minimumFrac
 const hhmmss=ms=>new Date(ms).toISOString().slice(11,19);
 let signals=[];
 let openedOnce=false;
+let lastTick=0;
 
 function lagClass(ms){ if(ms==null)return"";return ms<500?"good":ms<2000?"warn":"bad"; }
+// BTCUSDT trades continuously; ten seconds of silence is a broken feed, not a
+// quiet market. Raise it for an instrument that genuinely goes quiet.
+const STALE_MS=10_000;
 
 // Prior outcomes. Rendered on idle levels too: the useful moment for "this
 // broke twice" is before price arrives, not once it is already in the zone.
@@ -242,6 +252,16 @@ function mem(l){
   if(x) parts.push(`<span class="x">failed ${x}\u00d7</span>`);
   if(h) parts.push(`<span class="h">held ${h}\u00d7</span>`);
   return ` \u00b7 <span class="mem">${parts.join(" / ")}</span>`;
+}
+
+// A resolved verdict with no age is misleading: CONFIRMED could be four
+// seconds or four minutes old, and the level is blind until it re-arms.
+function ago(l){
+  if(!l.resolved_ms||!(l.state==="CONFIRMED"||l.state==="INVALIDATED")) return "";
+  const since=Math.max(0,(lastTick-l.resolved_ms)/1000);
+  const left=Math.max(0,(l.cooldown_ms||300000)/1000-since);
+  return ` · <span style="color:var(--warn)">${since.toFixed(0)}s ago, `
+        +`re-arms in ${Math.floor(left/60)}m ${String(Math.floor(left%60)).padStart(2,"0")}s</span>`;
 }
 
 function card(l){
@@ -258,7 +278,7 @@ function card(l){
         ${fmt(l.low,2)}–${fmt(l.high,2)}</span></span>
       <span>${ph&&ph!=="WATCHING"?`<span class="phase ${ph.toLowerCase()}">${ph}</span>`:""}<span class="badge ${cls}" style="margin-left:6px">${st}</span></span>
     </div>
-    <div class="note">${l.side.toUpperCase()} · ${l.note||""} · test #${l.test_count} · ${dist}${mem(l)}</div>
+    <div class="note">${l.side.toUpperCase()} · ${l.note||""} · test #${l.test_count} · ${dist}${mem(l)}${ago(l)}</div>
     ${score!=null?`<div class="bar"><i style="width:${pct}%"></i><span class="th" style="left:${thPct}%"></span></div>
       <div class="scorerow"><span>score ${fmt(score,3)}</span><span>threshold ${fmt(l.threshold,2)}</span></div>`:""}
     ${inZone?`<div class="grid">
@@ -287,9 +307,27 @@ function render(s){
   const lvls=s.levels||[];
   const px=lvls.length?lvls[0].last_price:null;
   $("px").textContent=fmt(px,2);
-  const lag=s.lag_ms;
-  $("lag").textContent=lag==null?"—":lag+"ms";
-  $("lagbox").className="stat lag "+lagClass(lag);
+  // A feed that stops updates nothing, so arrival lag freezes at its last
+  // good value. Staleness is measured at publish time and keeps climbing, so
+  // the headline leads with whichever is worse — otherwise a dead feed reads
+  // as a calm market.
+  lastTick=s.last_tick_ms||0;
+  const lag=s.lag_ms, stale=s.stale_ms;
+  const dead = stale!=null && stale>=STALE_MS;
+  if(dead){
+    $("lag").textContent=(stale/1000).toFixed(0)+"s";
+    $("lagbox").className="stat lag dead";
+    $("deadbar").className="dead-banner on";
+    $("deadbar").innerHTML=`<b>NO DATA for ${(stale/1000).toFixed(0)}s.</b> `
+      +`Nothing below is current — the last trade arrived at `
+      +`${hhmmss(s.last_tick_ms)}. Check the monitor's terminal.`;
+    $("panes").classList.add("stale");
+  }else{
+    $("lag").textContent=lag==null?"—":lag+"ms";
+    $("lagbox").className="stat lag "+lagClass(lag);
+    $("deadbar").className="dead-banner";
+    $("panes").classList.remove("stale");
+  }
   const sorted=[...lvls].sort((a,b)=>(a.distance??1e18)-(b.distance??1e18));
   $("cards").innerHTML=sorted.length?sorted.map(card).join(""):
     `<div class="empty">no active levels — add one in <b>levels &amp; settings</b> below,

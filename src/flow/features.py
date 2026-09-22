@@ -99,6 +99,9 @@ ICEBERG_MIN_PRINTS = 10.0
 # Hard cap on tracked price buckets, so a wide zone on a fine tick cannot
 # grow the dict without bound. Existing buckets keep updating once full.
 MAX_PRICE_BUCKETS = 4096
+# How many late-windows of tape to retain. `_velocity` reaches back two of them
+# (recent vs earlier), so this must exceed 2.
+RECENT_RETENTION_MULT = 3
 
 
 @dataclass(frozen=True)
@@ -198,11 +201,15 @@ class ZoneAccumulator:
     _sell: float = 0.0
     _high: float = float("-inf")
     _low: float = float("inf")
-    # Bounded deque, not a list: the hot path must not grow unboundedly or
-    # pay for periodic re-filtering. maxlen caps memory; the time cutoff in
-    # _late_delta_ratio does the windowing.
+    # Evicted by TIME on append, not by count. A `maxlen` alone silently
+    # shortens the window under load: at 8192 entries a 200 trades/sec tape
+    # holds 41 seconds and a 500/sec burst holds 16, while `_velocity` reads
+    # back 60 seconds and `_late_delta_ratio` 30. The turn detector would have
+    # quietly changed its definition of "recent" exactly during fast tape,
+    # which is when the turn is the whole question. The maxlen stays as a
+    # memory backstop for a feed with broken timestamps.
     _recent: deque[tuple[int, float, bool]] = field(
-        default_factory=lambda: deque(maxlen=8192)
+        default_factory=lambda: deque(maxlen=200_000)
     )
     _book_size: float = 0.0
     _book_peak: float = 0.0
@@ -247,6 +254,12 @@ class ZoneAccumulator:
         self._low = min(self._low, tick.price)
 
         self._recent.append((tick.timestamp, tick.quantity, tick.is_buyer_maker))
+        # `_velocity` compares the last window against the one before it, so
+        # twice the late window is the longest reach; a little margin past that.
+        cutoff = tick.timestamp - self.late_window_ms * RECENT_RETENTION_MULT
+        recent = self._recent
+        while recent and recent[0][0] < cutoff:
+            recent.popleft()
 
     def _bucket(self, price: float) -> int | None:
         """Price -> integer tick index. None when no tick size is known."""
@@ -343,6 +356,21 @@ class ZoneAccumulator:
         ask = sum(lv.quantity for lv in snapshot.asks[:10])
         total = bid + ask
         self._book_imbalance = (bid - ask) / total if total > 0 else 0.0
+
+    def adverse_excursion(self) -> float:
+        """How far price pushed the way that would invalidate the level. O(1).
+
+        Exposed on its own because the tick path needs this number and nothing
+        else. Reading it off a full `features()` call meant two windowed scans
+        (tape velocity and late delta) per trade to look at one tracked float.
+        Identical arithmetic to the `adverse_excursion` field — deliberately
+        unclamped, like it.
+        """
+        if self.is_support:
+            low = self._low if self._low != float("inf") else self.level_price
+            return self.level_price - low
+        high = self._high if self._high != float("-inf") else self.level_price
+        return high - self.level_price
 
     def features(self) -> ZoneFeatures:
         volume = self._buy + self._sell
