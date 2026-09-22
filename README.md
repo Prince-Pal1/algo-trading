@@ -2,7 +2,7 @@
 
 A modular, event-driven algorithmic trading system for systematic trading at retail scale. Same `BaseStrategy.on_features() → Signal | None` code path in backtest and live. Risk management runs as a separate ZeroMQ process and cannot be bypassed.
 
-**Current phase:** Phase G Gold Leveraged Stack — G.0 through G.2 + tasks #101-#116 shipped on `feat/gold-refactor`. **1227 tests passing.** Merge to main scheduled 2026-04-17 after the crypto Day 4 sprint cron. Main branch runs 3b-2 M3S shadow + 3c meta-labeling shadow. See [ROADMAP.md](ROADMAP.md) for the authoritative phase status.
+**Phase status lives in [ROADMAP.md](ROADMAP.md) and only there.** This file is an onboarding doc: what the system is, how to run it, where things live. For what is in progress right now, read ROADMAP.md; for where the last session stopped, read [STATE.md](STATE.md).
 
 **Validated production strategies (as of 2026-04-15 empirical validation):**
 
@@ -79,6 +79,16 @@ Each concern lives in exactly one file. Redundancy causes drift.
 - 10 sub-phases: regime detection, edge decay, purged CV, Bayesian Kelly, LeverageBudgetAllocator, HRP-lite allocator, meta-labeling (LR + LightGBM, shadow)
 - Floor + Sharpe-weighted dynamic pool leverage allocation
 
+**Order flow — research only, crypto only** (`src/data/cvd.py`, `src/data/order_book.py`, `src/flow/`)
+- CVD: streaming `CVDCalculator` + vectorized `compute_delta_bars`, parity-tested against each other; divergence + absorption detection
+- Free historical backfill from Binance Data Vision aggTrades archives (no order-book archive exists — books cannot be backfilled)
+- Order book state machine with sequence-gap detection; a desynced book refuses to answer rather than drifting
+- Depth recorder + liquidity heatmap (tick-aligned price bucketing)
+- **Level-gated flow engine** (`src/flow/`): you write the levels, the engine measures flow when price reaches them and reports evidence FOR **and** AGAINST — absorption, the attack/defence sequence, tape velocity, large prints, exhausted retests, icebergs, and optional per-level memory of how prior tests resolved
+- Live WebSocket operator page at 5 Hz (not Streamlit — a re-running script is too slow to watch price inside your level)
+- Advisory only: emits `FlowSignal` objects, never orders. No execution path exists, by design
+- **Not available on gold.** CFD ticks carry no size or aggressor, so CVD/footprint/delta are impossible on XAUUSD — real gold flow needs COMEX GC/MGC futures. See ARCHITECTURE.md Known Gotchas
+
 **Live operations**
 - Paper trading via launchd, watchdog with data-staleness detection
 - Pre-flight checks, 5-step ramp plan, 30-day clock for G.3 paper validation
@@ -120,6 +130,26 @@ python3 -m scripts.dashboard
 # Run live pipeline
 python3 -m src.main
 ```
+
+**Order flow (research, crypto only):**
+
+```bash
+# CVD from free Binance archives, into delta bars
+python3 -m scripts.cvd backfill --symbol BTCUSDT --tf 5m --days 30
+
+# Record order book depth for the liquidity heatmap
+python3 -m scripts.depth record --symbol BTCUSDT --minutes 60
+
+# Level-gated flow monitor — write your levels first, then watch them
+cp config/levels.example.toml config/levels.toml   # then edit it
+python3 -m scripts.flow_monitor --symbol BTCUSDT --depth
+#   --level-memory   remember how each level resolved before (off by default)
+#   --no-turn        fire on score alone instead of requiring the turn
+# UI: http://127.0.0.1:8760
+```
+
+`config/levels.toml` is gitignored — your levels are yours. The monitor hot-reloads
+it every 10 s, so you can add a level mid-session without restarting.
 
 ---
 
@@ -192,6 +222,50 @@ graph TB
     PE --> CTE
     RS --> DASH
 ```
+
+---
+
+## Architecture — level-gated flow (advisory)
+
+Deliberately drawn separately from the diagram above: this path has **no edge into
+execution**, and joining the two graphs would imply one exists. A human writes the
+levels; the engine only answers *what is flow doing now that price is here*.
+
+```mermaid
+graph LR
+    LEVELS["config/levels.toml<br/>YOU write these,<br/>before price arrives"]
+    REG["LevelRegistry<br/>hot-reload,<br/>first_seen_ms preserved"]
+    TRADES["Binance @trade"]
+    BOOK["Binance @depth<br/>(optional, --depth)"]
+    ENG["FlowEngine.on_tick()<br/>hot path ~1.5 us/tick"]
+    ZM["ZoneMonitor per level<br/>IDLE → APPROACHING →<br/>EVALUATING → CONFIRMED<br/>/ INVALIDATED"]
+    ACC["ZoneAccumulator<br/>delta, absorption, excursion,<br/>velocity, probes, icebergs"]
+    MEM["LevelMemory<br/>held / failed<br/>(optional, off)"]
+    SCORE["evidence.score_zone()<br/>FOR / AGAINST"]
+    LOG["SignalLog (JSONL)<br/>every zone entry,<br/>not just confirmations"]
+    UI["LiveServer<br/>5 Hz WebSocket push"]
+    HUMAN["You<br/>decide"]
+
+    LEVELS --> REG --> ENG
+    TRADES --> ENG
+    BOOK -.-> ZM
+    ENG --> ZM --> ACC --> SCORE
+    MEM -.-> ACC
+    ZM --> MEM
+    SCORE --> LOG
+    SCORE --> UI --> HUMAN
+```
+
+Three deliberate constraints:
+
+- **The log records a null-hypothesis baseline for every zone entry**, not just the
+  confirmations. Without that, "does the scorer beat simply taking the level?" is
+  unanswerable, and a scorer that cannot be shown to beat the baseline is decoration.
+- **Not backtestable, by design.** Level selection on historical data is
+  hindsight-contaminated — you already know which levels held. Evaluation is
+  forward-only: shadow-run it, collect outcomes, then judge.
+- **`first_seen_ms` is stamped on first load and preserved across reloads.** It is the
+  only thing separating a level written *before* price arrived from one written after.
 
 ---
 
@@ -541,7 +615,20 @@ algo-trading/
 │   │   ├── candle_builder.py             # Tick → OHLCV
 │   │   ├── feature_engine.py             # Technical indicators (ta library)
 │   │   ├── storage.py                    # SQLite + Parquet storage
-│   │   └── downloader.py                 # Historical data downloader
+│   │   ├── downloader.py                 # Historical data downloader
+│   │   ├── cvd.py                        # Cumulative Volume Delta (crypto research)
+│   │   ├── agg_trades.py                 # Binance Data Vision aggTrades backfill
+│   │   ├── order_book.py                 # Order book state + desync detection
+│   │   └── depth_recorder.py             # Depth sampling + heatmap grid
+│   ├── flow/                             # Level-gated order flow (advisory, crypto)
+│   │   ├── level_registry.py             # TOML levels, hot-reload, first_seen_ms
+│   │   ├── features.py                   # ZoneAccumulator — the hot path
+│   │   ├── evidence.py                   # Rule-based scorer, FOR and AGAINST
+│   │   ├── zone_state.py                 # ZoneMonitor state machine + FlowEngine
+│   │   ├── level_memory.py               # Prior held/failed outcomes (optional, off)
+│   │   ├── signal_log.py                 # JSONL signals + null-hypothesis baselines
+│   │   ├── live_server.py                # WebSocket push, 5 Hz
+│   │   └── live_page.html                # Operator page (static, pushed to)
 │   ├── strategies/
 │   │   ├── base.py                       # BaseStrategy interface + leverage_range
 │   │   ├── router.py                     # StrategyRouter + STRATEGY_REGISTRY
@@ -624,6 +711,9 @@ algo-trading/
 │   ├── walk_forward_swift_alma.py        # Bespoke WF (task #111)
 │   ├── swift_full_matrix.py              # SWIFT 240-cell matrix (task #109)
 │   ├── import_strategy.py                # Multi-format strategy import CLI
+│   ├── cvd.py                            # CVD backfill + delta bars CLI
+│   ├── depth.py                          # Depth recorder CLI
+│   ├── flow_monitor.py                   # Level-gated flow monitor + live UI
 │   ├── dashboard.py                      # Streamlit launcher
 │   ├── run_verification.py               # Engine verification suite
 │   ├── g3_preflight.py                   # Pre-flight for G.3 paper clock
@@ -635,17 +725,18 @@ algo-trading/
 │   ├── risk.toml                         # Risk dials + [leverage] gates
 │   ├── broker_fees.toml                  # Fee profile registry (task #106)
 │   ├── news_calendar.csv                 # NFP/FOMC/CPI windows
+│   ├── levels.example.toml               # Flow levels template (levels.toml gitignored)
 │   └── report_template.html              # Jinja2 HTML template
-├── tests/                                # 1227 tests passing (feat/gold-refactor)
+├── tests/                                # pytest suite mirroring src/ (see STATE.md for counts)
 ├── docs/
 │   ├── LEVERAGE_STRATEGY_DESIGN.md       # Leverage mode design principles
 │   ├── BROKER_FEES.md                    # Fee schedule research
-│   ├── M3S_SPEC.md                       # M3S phase spec
-│   └── STRATEGY_DEVELOPMENT_PROCESS.md   # 7-stage dev flow
+│   └── M3S_SPEC.md                       # M3S phase spec
 ├── reports/                              # Generated backtest reports (gitignored)
 ├── research/                             # Research documents
 ├── alpaca/                               # Alpaca MCP server (US equities)
 ├── tradingview-mcp-jackson/              # TradingView MCP server
+├── STRATEGY_DEVELOPMENT_PROCESS.md       # 7-stage strategy dev flow
 ├── ARCHITECTURE.md                       # Live module registry + gotchas
 ├── STATE.md                              # Session continuity tracker
 ├── ROADMAP.md                            # Phase status (single source of truth)
@@ -688,13 +779,16 @@ Both servers are registered in `~/.claude.json` under `mcpServers`. Claude picks
 | Market data (gold) | Dukascopy parquet + IC Markets cTrader (Phase 4) |
 | Config | TOML |
 | Transport (risk) | ZeroMQ |
+| Transport (flow UI) | `websockets` + orjson, uvloop on the hot path |
 
 ---
 
 ## Tested & proven
 
-**Test suite:** 1322 tests passing on `feat/gold-refactor`. Includes:
+**Test suite:** the live total moves every session — see [STATE.md](STATE.md). Notable blocks:
 
+- 207 order-flow tests (`tests/test_flow/`) — state machine, evidence rules, iceberg
+  discriminator pinned in both directions, level memory
 - 50 deep_backtest framework tests (task #112 + #114 + #115 + #79)
 - 43 strategy storage tests (task #117 + #118-#130 follow-up sweep)
 - 46 swift_alma_v2 tests (task #131 mode-aware sizing + task #132 ladder/reversal port)
@@ -717,17 +811,14 @@ Both servers are registered in `~/.claude.json` under `mcpServers`. Claude picks
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the authoritative phase table. **Phase G is merge-ready** for 2026-04-17 ~09:30.
+See [ROADMAP.md](ROADMAP.md) — it is the authoritative and only phase table. This file
+does not restate it, because two copies of a status is one copy too many.
 
-Next items in the queue:
-- **Task #62** — merge window 2026-04-17 ~09:30 (in progress)
-- **Task #116** — research better leveraged strategy using task #113 + #115 findings (pending, triggered on demand)
-- **Task #78** — G.6 adaptive leverage governor ML model (pending, Phase 5 tie-in, needs live trade history)
-- **Task #81** — Phase 4 live smoke test (blocked on Spotware KYC)
-- **Task #74** — G.3 30-day paper clock on IC Markets cTrader demo (blocked on Phase 4 + tuning)
-
-Recently shipped (2026-04-15 Day 2): #109 SWIFT matrix · #110 leverage validation · #111 SWIFT WF · #112 Deep Backtest framework · #113 leverage research · #114 leverage_mode + TUI · #115 Phase 2.5 zero-tolerance · #116 empirical validation · **#79 G.7 attribution dashboard**
+For where the last session stopped and what it was in the middle of, see
+[STATE.md](STATE.md).
 
 ---
 
-*Last updated: 2026-04-15 — Phase G tasks #101-#116 complete on feat/gold-refactor, merge scheduled 2026-04-17. 1227 tests passing.*
+*Onboarding doc. Refreshed when a phase completes, when a new top-level component lands
+in `src/`, or when the description above drifts from what the code does — not per task.
+Last refresh: 2026-09-22 (order-flow stack + level-gated flow engine documented).*
