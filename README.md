@@ -85,6 +85,7 @@ Each concern lives in exactly one file. Redundancy causes drift.
 - Order book state machine with sequence-gap detection; a desynced book refuses to answer rather than drifting
 - Depth recorder + liquidity heatmap (tick-aligned price bucketing)
 - **Level-gated flow engine** (`src/flow/`): you write the levels, the engine measures flow when price reaches them and reports evidence FOR **and** AGAINST — absorption, the attack/defence sequence, tape velocity, large prints, exhausted retests, icebergs, and optional per-level memory of how prior tests resolved
+- Levels are added and edited on the live page or in the TOML file — both write to the same file, so there is one place to look
 - Live WebSocket operator page at 5 Hz (not Streamlit — a re-running script is too slow to watch price inside your level)
 - Advisory only: emits `FlowSignal` objects, never orders. No execution path exists, by design
 - **Not available on gold.** CFD ticks carry no size or aggressor, so CVD/footprint/delta are impossible on XAUUSD — real gold flow needs COMEX GC/MGC futures. See ARCHITECTURE.md Known Gotchas
@@ -148,8 +149,11 @@ python3 -m scripts.flow_monitor --symbol BTCUSDT --depth
 # UI: http://127.0.0.1:8760
 ```
 
-`config/levels.toml` is gitignored — your levels are yours. The monitor hot-reloads
-it every 10 s, so you can add a level mid-session without restarting.
+`config/levels.toml` is gitignored — your levels are yours. You can edit it by hand
+(the monitor hot-reloads it every 10 s) or add and edit levels directly on the page,
+which writes through to the same file. Threshold, require-turn and level memory are
+live controls; `--depth` is the one setting that still needs a restart, because
+toggling it means resubscribing the feed.
 
 ---
 
@@ -243,10 +247,11 @@ graph LR
     MEM["LevelMemory<br/>held / failed<br/>(optional, off)"]
     SCORE["evidence.score_zone()<br/>FOR / AGAINST"]
     LOG["SignalLog (JSONL)<br/>every zone entry,<br/>not just confirmations"]
-    UI["LiveServer<br/>5 Hz WebSocket push"]
+    UI["LiveServer<br/>5 Hz WebSocket push<br/>+ level editing"]
     HUMAN["You<br/>decide"]
 
     LEVELS --> REG --> ENG
+    UI -."level edits".-> REG
     TRADES --> ENG
     BOOK -.-> ZM
     ENG --> ZM --> ACC --> SCORE

@@ -495,6 +495,29 @@ class FlowEngine:
     _lag_ms: int = 0
     _last_tick_ms: int = 0
 
+    @property
+    def last_price(self) -> float:
+        """Most recent trade price, or 0.0 before the first tick."""
+        return self._prices[-1][1] if self._prices else 0.0
+
+    def apply_settings(self, threshold: float | None = None,
+                       require_turn: bool | None = None) -> None:
+        """Change scoring settings on a running engine, including live monitors.
+
+        Setting them on the engine alone would only affect monitors created
+        afterwards, so a level already being evaluated would keep scoring
+        against the old threshold — the one case where you most want the
+        change to land.
+        """
+        if threshold is not None:
+            self.threshold = threshold
+            for monitor in self.monitors.values():
+                monitor.threshold = threshold
+        if require_turn is not None:
+            self.require_turn = require_turn
+            for monitor in self.monitors.values():
+                monitor.require_turn = require_turn
+
     def sync_levels(self, now_ms: int) -> None:
         """Add monitors for new levels, drop monitors for removed ones."""
         active = {lv.id: lv for lv in self.registry.active(self.symbol, now_ms)}
@@ -596,6 +619,7 @@ class FlowEngine:
             "baseline_trade_size": round(self._baseline_trade_size(), 8),
             "tick_size": self._tick_size,
             "level_memory": self.memory is not None and self.memory.enabled,
+            "require_turn": self.require_turn,
             "levels": [m.snapshot() for m in sorted(
                 self.monitors.values(), key=lambda m: m.level.price
             )],

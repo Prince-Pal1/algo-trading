@@ -68,6 +68,46 @@
   .feed td{padding:6px 8px;border-bottom:1px solid #2a2a28;font-variant-numeric:tabular-nums}
   .empty{color:var(--ink3);padding:40px 20px;text-align:center}
   .adv{padding:10px 20px;color:var(--ink3);font-size:11px;border-top:1px solid var(--line)}
+
+  /* editor */
+  .panel{margin:0 20px 20px;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+  .phead{display:flex;align-items:center;gap:14px;padding:10px 14px;cursor:pointer;
+         user-select:none;flex-wrap:wrap}
+  .phead h2{font-size:12px;letter-spacing:1px;text-transform:uppercase;
+            color:var(--ink2);margin:0;font-weight:400}
+  .phead .caret{color:var(--ink3);font-size:11px}
+  .pbody{padding:0 14px 14px;display:none}
+  .panel.open .pbody{display:block}
+  .set{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink2)}
+  .set input[type=number]{width:72px}
+  input,select,textarea{background:#1c1c1b;color:var(--ink);border:1px solid var(--line);
+    border-radius:5px;padding:5px 7px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
+  input:focus,select:focus{outline:none;border-color:var(--for)}
+  input[type=checkbox]{accent-color:var(--for);width:14px;height:14px;padding:0}
+  button{background:#2e2e2c;color:var(--ink);border:1px solid var(--line);border-radius:5px;
+    padding:5px 11px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;cursor:pointer}
+  button:hover{border-color:var(--ink3)}
+  button.primary{background:rgba(57,135,229,.2);border-color:var(--for);color:#9cc6f5}
+  button.danger:hover{border-color:var(--against);color:var(--against)}
+  .addrow{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;
+          padding:10px 0 12px;border-bottom:1px solid var(--line)}
+  .fld{display:flex;flex-direction:column;gap:3px}
+  .fld label{font-size:10px;text-transform:uppercase;letter-spacing:.9px;color:var(--ink3)}
+  .fld.grow{flex:1;min-width:160px}
+  .fld.grow input{width:100%}
+  .ltable{width:100%;border-collapse:collapse;font-size:12px;margin-top:4px}
+  .ltable th{text-align:left;color:var(--ink3);font-weight:400;font-size:10px;
+             letter-spacing:1px;text-transform:uppercase;padding:7px 8px;
+             border-bottom:1px solid var(--line)}
+  .ltable td{padding:6px 8px;border-bottom:1px solid #2a2a28;font-variant-numeric:tabular-nums}
+  .ltable tr.off td{opacity:.45}
+  .ltable .acts{text-align:right;white-space:nowrap}
+  .ltable .acts button{padding:3px 8px;margin-left:5px}
+  .msg{font-size:12px;padding:8px 10px;border-radius:6px;margin-top:10px;display:none}
+  .msg.show{display:block}
+  .msg.ok{background:rgba(25,158,112,.14);border:1px solid rgba(25,158,112,.4);color:#4cd4a0}
+  .msg.err{background:rgba(230,103,103,.14);border:1px solid rgba(230,103,103,.45);color:#f09a9a}
+  .msg.warn{background:rgba(201,133,0,.14);border:1px solid rgba(201,133,0,.45);color:#e0a52e}
 </style></head><body>
 <header>
   <div class="sym" id="sym">—</div>
@@ -83,6 +123,42 @@
   <table><thead><tr><th>time</th><th>level</th><th>side</th><th>price</th>
   <th>score</th><th>invalidation</th></tr></thead><tbody id="sigs"></tbody></table>
 </div>
+<div class="panel" id="panel">
+  <div class="phead" id="phead">
+    <span class="caret" id="caret">&#9656;</span>
+    <h2>levels &amp; settings</h2>
+    <span style="flex:1"></span>
+    <span class="set" onclick="event.stopPropagation()">threshold
+      <input type="number" id="setTh" step="0.01" min="0" max="1"></span>
+    <label class="set" onclick="event.stopPropagation()">
+      <input type="checkbox" id="setTurn"> require turn</label>
+    <label class="set" onclick="event.stopPropagation()">
+      <input type="checkbox" id="setMem"> level memory</label>
+    <span class="set" id="depthState">book —</span>
+  </div>
+  <div class="pbody">
+    <div class="addrow">
+      <div class="fld"><label>price</label><input type="number" id="fPrice" step="any" placeholder="98000"></div>
+      <div class="fld"><label>width &plusmn;</label><input type="number" id="fWidth" step="any" placeholder="150"></div>
+      <div class="fld"><label>side</label>
+        <select id="fSide"><option value="long">long (support)</option>
+                           <option value="short">short (resistance)</option></select></div>
+      <div class="fld grow"><label>note — why you marked it</label>
+        <input type="text" id="fNote" placeholder="prior day low + 4h demand"></div>
+      <div class="fld"><label>&nbsp;</label><button class="primary" id="btnAdd">add level</button></div>
+    </div>
+    <table class="ltable"><thead><tr>
+      <th>level</th><th>zone</th><th>side</th><th>note</th><th>marked</th><th></th>
+    </tr></thead><tbody id="ltbody"></tbody></table>
+    <div class="msg" id="msg"></div>
+    <div style="color:var(--ink3);font-size:11px;margin-top:10px">
+      Edits write through to <span id="lpath">config/levels.toml</span> — the file stays the
+      source of truth, so what you add here survives a restart. <b>marked</b> is when the level
+      was first written down; it is preserved through edits, because a level you moved is still
+      a level you marked then.
+    </div>
+  </div>
+</div>
 <div class="adv">Advisory only — this never places an order. Evidence is shown for and against;
 read both before acting. A signal needs the sequence: <b>ABSORBING</b> (aggression failing) then
 <b>TURNING</b> (it reverses). Absorption on its own does not fire.</div>
@@ -91,6 +167,7 @@ const $=id=>document.getElementById(id);
 const fmt=(v,d=2)=>v==null?"—":Number(v).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
 const hhmmss=ms=>new Date(ms).toISOString().slice(11,19);
 let signals=[];
+let openedOnce=false;
 
 function lagClass(ms){ if(ms==null)return"";return ms<500?"good":ms<2000?"warn":"bad"; }
 
@@ -154,19 +231,137 @@ function render(s){
   $("lagbox").className="stat lag "+lagClass(lag);
   const sorted=[...lvls].sort((a,b)=>(a.distance??1e18)-(b.distance??1e18));
   $("cards").innerHTML=sorted.length?sorted.map(card).join(""):
-    `<div class="empty">no active levels — add them to config/levels.toml</div>`;
+    `<div class="empty">no active levels — add one in <b>levels &amp; settings</b> below,
+     before price gets there</div>`;
+  // Nothing to watch means the first thing you need is the editor. Once only:
+  // re-opening a panel the operator closed would be the page arguing with them.
+  if(!openedOnce && !(s.registry||[]).length){ openedOnce=true;
+    $("panel").classList.add("open"); $("caret").innerHTML="&#9662;"; }
+  syncSettings(s);
+  renderRegistry(s.registry);
   if(s.new_signals?.length){ signals=[...s.new_signals,...signals].slice(0,50); }
   $("sigs").innerHTML=signals.map(x=>`<tr><td>${hhmmss(x.timestamp)}</td><td>${x.level_id}</td>
     <td style="color:${x.side==="long"?"var(--for)":"var(--against)"}">${x.side.toUpperCase()}</td>
     <td>${fmt(x.price,2)}</td><td>${fmt(x.score,3)}</td><td>${fmt(x.invalidation,2)}</td></tr>`).join("");
 }
 
+// ── editor ────────────────────────────────────────────────────────────
+// The panel writes through the same socket the state arrives on. Every field
+// the process reads at runtime is here: anything still requiring a restart
+// says so rather than pretending to be editable.
+let sock=null, editing=null;
+
+const send=o=>{ if(sock&&sock.readyState===1){ sock.send(JSON.stringify(o)); return true; }
+                say("not connected — the monitor may have stopped","err"); return false; };
+
+function say(text,kind){
+  const m=$("msg"); m.textContent=text; m.className="msg show "+(kind||"ok");
+  clearTimeout(say._t); say._t=setTimeout(()=>{m.className="msg";}, 7000);
+}
+
+function addLevel(){
+  const price=parseFloat($("fPrice").value), width=parseFloat($("fWidth").value);
+  if(!(price>0)) return say("price must be a number above 0","err");
+  if(!(width>0)) return say("width must be a number above 0 — it is the half-width, "
+                            +"so the zone is price \u00b1 width","err");
+  const lv={price,width,side:$("fSide").value,note:$("fNote").value.trim()};
+  if(editing) lv.id=editing;
+  if(send({cmd:"level.upsert",level:lv})){
+    $("fPrice").value=""; $("fWidth").value=""; $("fNote").value="";
+    setEditing(null);
+  }
+}
+
+function setEditing(id){
+  editing=id;
+  $("btnAdd").textContent=id?"save "+id:"add level";
+  $("btnAdd").classList.toggle("primary",true);
+}
+
+function editLevel(l){
+  setEditing(l.id);
+  $("fPrice").value=l.price; $("fWidth").value=l.width;
+  $("fSide").value=l.side; $("fNote").value=l.note||"";
+  $("panel").classList.add("open"); $("caret").innerHTML="&#9662;";
+  $("fPrice").focus();
+}
+
+function delLevel(l){
+  // Outcomes are keyed by id and are NOT deleted with the level, so re-adding
+  // the same price later inherits them. Worth saying before, not after.
+  if(!confirm(`Delete ${l.id}?\n\nIts recorded outcomes stay on disk — re-adding `
+              +`the same level later will inherit them.`)) return;
+  send({cmd:"level.remove",id:l.id});
+}
+
+function renderRegistry(reg){
+  const tb=$("ltbody");
+  if(!reg||!reg.length){
+    tb.innerHTML=`<tr><td colspan="6" style="color:var(--ink3);padding:14px 8px">`
+      +`no levels yet — add one above, before price gets there</td></tr>`;
+    return;
+  }
+  tb.innerHTML=reg.map((l,i)=>`<tr class="${l.enabled&&!l.expired?"":"off"}">
+    <td>${l.id}</td>
+    <td>${fmt(l.price,2)} <span style="color:var(--ink3)">${fmt(l.low??l.price-l.width,2)}–${fmt(l.high??l.price+l.width,2)}</span></td>
+    <td style="color:${l.side==="long"?"var(--for)":"var(--against)"}">${l.side.toUpperCase()}</td>
+    <td style="color:var(--ink2)">${l.note||""}</td>
+    <td style="color:var(--ink3)">${l.first_seen_ms?hhmmss(l.first_seen_ms):"—"}${l.expired?" · expired":""}</td>
+    <td class="acts">
+      <button data-act="edit" data-i="${i}">edit</button>
+      <button data-act="park" data-i="${i}">${l.enabled?"park":"arm"}</button>
+      <button class="danger" data-act="del" data-i="${i}">delete</button>
+    </td></tr>`).join("");
+  tb.onclick=e=>{
+    const b=e.target.closest("button"); if(!b) return;
+    const l=reg[+b.dataset.i];
+    if(b.dataset.act==="edit") editLevel(l);
+    else if(b.dataset.act==="park") send({cmd:"level.enable",id:l.id,enabled:!l.enabled});
+    else if(b.dataset.act==="del") delLevel(l);
+  };
+}
+
+// Settings mirror the process, EXCEPT while focused: overwriting a box mid-type
+// at 5 Hz makes it impossible to type a threshold at all.
+function syncSettings(s){
+  const th=$("setTh");
+  if(document.activeElement!==th) th.value=Number(s.threshold??0.62).toFixed(2);
+  $("setTurn").checked=!!s.require_turn;
+  $("setMem").checked=!!s.level_memory;
+  $("depthState").textContent="book "+(s.depth?"on":"off — restart with --depth");
+  $("depthState").style.color=s.depth?"var(--ink2)":"var(--ink3)";
+  if(s.levels_path) $("lpath").textContent=s.levels_path;
+}
+
+$("phead").onclick=()=>{
+  const open=$("panel").classList.toggle("open");
+  $("caret").innerHTML=open?"&#9662;":"&#9656;";
+};
+$("btnAdd").onclick=addLevel;
+$("fNote").onkeydown=e=>{ if(e.key==="Enter") addLevel(); };
+$("setTh").onchange=()=>send({cmd:"config.set",threshold:parseFloat($("setTh").value)});
+$("setTurn").onchange=()=>send({cmd:"config.set",require_turn:$("setTurn").checked});
+$("setMem").onchange=()=>send({cmd:"config.set",level_memory:$("setMem").checked});
+
+function onAck(a){
+  if(!a.ok) return say(a.error||"command failed","err");
+  if(a.warning) return say(a.warning,"warn");
+  if(a.cmd==="config.set") return say("applied: "+Object.keys(a.changed||{}).join(", "),"ok");
+  if(a.cmd==="level.remove") return say("deleted "+a.id,"ok");
+  if(a.cmd==="level.enable") return say((a.enabled?"armed ":"parked ")+a.id,"ok");
+  say("saved "+a.id,"ok");
+}
+
 function connect(){
   const ws=new WebSocket(`ws://${location.host}/ws`);
+  sock=ws;
   ws.onopen =()=>{$("conn").textContent="live";$("conn").style.color="#4cd4a0";};
   ws.onclose=()=>{$("conn").textContent="reconnecting";$("conn").style.color="var(--against)";
                   setTimeout(connect,1000);};
-  ws.onmessage=e=>{try{render(JSON.parse(e.data));}catch(err){console.error(err);}};
+  ws.onmessage=e=>{try{
+    const m=JSON.parse(e.data);
+    if(m.ack) onAck(m); else render(m);
+  }catch(err){console.error(err);}};
 }
 connect();
 </script></body></html>

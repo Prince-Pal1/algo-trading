@@ -1,8 +1,8 @@
 """Live level-gated flow monitor.
 
-You supply levels in config/levels.toml. This watches what flow does when price
-reaches them and reports evidence — for and against — on a live page. It never
-places an order.
+You supply levels — in config/levels.toml, or from the live page, which writes
+through to the same file. This watches what flow does when price reaches them
+and reports evidence — for and against. It never places an order.
 
     python -m scripts.flow_monitor --symbol BTCUSDT
     python -m scripts.flow_monitor --symbol BTCUSDT --depth      # + order book
@@ -32,7 +32,7 @@ import time
 from src.data.feeds.binance_ws import BinanceWebSocketFeed
 from src.flow.evidence import DEFAULT_THRESHOLD
 from src.flow.level_memory import LevelMemory
-from src.flow.level_registry import DEFAULT_LEVELS_PATH, LevelRegistry
+from src.flow.level_registry import DEFAULT_LEVELS_PATH, Level, LevelRegistry, LevelSide
 from src.flow.live_server import DEFAULT_HZ, DEFAULT_PORT, LiveServer
 from src.flow.signal_log import SignalLog
 from src.flow.zone_state import FlowEngine, ZoneState
@@ -70,8 +70,9 @@ class FlowMonitor:
 
         self.signal_log = SignalLog(target_mult=args.target_mult)
         self.server = LiveServer(
-            get_snapshot=lambda: self.engine.snapshot(_now_ms()),
+            get_snapshot=self._snapshot,
             port=args.port, hz=args.hz,
+            on_command=self._on_command,
         )
 
         self.feed = BinanceWebSocketFeed(
@@ -86,6 +87,160 @@ class FlowMonitor:
 
         # Previous states, for detecting zone entry (the null-hypothesis hook).
         self._prev_states: dict[str, ZoneState] = {}
+
+    def _snapshot(self) -> dict:
+        """Engine state plus what the editor needs.
+
+        The registry list is separate from `levels` on purpose: the engine only
+        holds monitors for ACTIVE levels, so a parked or expired one would
+        vanish from the page and could never be re-armed from there.
+        """
+        snap = self.engine.snapshot(_now_ms())
+        snap["depth"] = bool(self.args.depth)
+        snap["levels_path"] = str(self.args.levels)
+        snap["registry"] = [
+            {
+                "id": lv.id,
+                "symbol": lv.symbol,
+                "price": lv.price,
+                "width": lv.width,
+                "side": lv.side.value,
+                "note": lv.note,
+                "enabled": lv.enabled,
+                "first_seen_ms": lv.first_seen_ms,
+                "expires_ms": lv.expires_ms,
+                "expired": lv.is_expired(_now_ms()),
+            }
+            for lv in sorted(self.registry.levels.values(),
+                             key=lambda lv: (lv.symbol, lv.price))
+        ]
+        return snap
+
+    # ── commands from the page ─────────────────────────────────────────
+    #
+    # These run on the server task, not the tick path. Everything here is
+    # synchronous and short: one asyncio loop means no lock is needed, but it
+    # also means a slow command would stall ingestion, so nothing here waits
+    # on anything.
+
+    def _on_command(self, payload: dict) -> dict:
+        cmd = str(payload.get("cmd", ""))
+        now = _now_ms()
+
+        if cmd == "level.upsert":
+            level = self._level_from(payload.get("level") or {})
+            existed = self.registry.get(level.id) is not None
+            self.registry.upsert(level, now_ms=now)
+            self.engine.sync_levels(now_ms=now)
+            result = {"ok": True, "id": level.id}
+            # Adding a level that price is already inside is the one move that
+            # breaks the forward-test guarantee: you cannot claim you marked it
+            # before price arrived when price is standing in it. It is allowed —
+            # sometimes that is genuinely the trade — but it is said out loud,
+            # and first_seen in the log makes it detectable afterwards.
+            if not existed and level.contains(self.engine.last_price):
+                result["warning"] = (
+                    "price is inside this zone right now — this level is not "
+                    "forward-clean, and the log will show it"
+                )
+            return result
+
+        if cmd == "level.remove":
+            lid = str(payload.get("id", ""))
+            if not self.registry.remove(lid):
+                return {"ok": False, "error": f"no such level: {lid}"}
+            self.engine.sync_levels(now_ms=now)
+            return {"ok": True, "id": lid}
+
+        if cmd == "level.enable":
+            lid = str(payload.get("id", ""))
+            enabled = bool(payload.get("enabled", True))
+            if not self.registry.set_enabled(lid, enabled):
+                return {"ok": False, "error": f"no such level: {lid}"}
+            self.engine.sync_levels(now_ms=now)
+            return {"ok": True, "id": lid, "enabled": enabled}
+
+        if cmd == "config.set":
+            return self._apply_config(payload)
+
+        return {"ok": False, "error": f"unknown command: {cmd!r}"}
+
+    def _apply_config(self, payload: dict) -> dict:
+        changed = {}
+        if "threshold" in payload:
+            threshold = float(payload["threshold"])
+            if not 0.0 <= threshold <= 1.0:
+                return {"ok": False, "error": "threshold must be between 0 and 1"}
+            self.engine.apply_settings(threshold=threshold)
+            changed["threshold"] = threshold
+        if "require_turn" in payload:
+            require_turn = bool(payload["require_turn"])
+            self.engine.apply_settings(require_turn=require_turn)
+            changed["require_turn"] = require_turn
+        if "level_memory" in payload:
+            enabled = bool(payload["level_memory"])
+            # Turning it on mid-session has to read the file: the object was
+            # constructed disabled and skipped its load, so without this the
+            # first hour of "memory on" would report no history at all.
+            if enabled and not self.memory.enabled:
+                self.memory.enabled = True
+                self.memory.load()
+            else:
+                self.memory.enabled = enabled
+            changed["level_memory"] = enabled
+        if not changed:
+            return {"ok": False, "error": "nothing to set"}
+        log.info("flow_config_changed", **changed)
+        return {"ok": True, "changed": changed}
+
+    def _level_from(self, raw: dict) -> Level:
+        """Build a Level from page input. Raises ValueError with a readable
+        message — the page shows it verbatim, so it has to read like English.
+
+        An edit INHERITS every field the caller did not send. The page's form
+        carries price, width, side and note; it has no box for `enabled` or
+        `expires`. Defaulting those instead of inheriting them means editing a
+        note re-arms a level you deliberately parked, and clears an expiry you
+        set — both silent, both discovered later at the worst moment.
+        """
+        try:
+            price = float(raw.get("price"))
+            width = float(raw.get("width"))
+        except (TypeError, ValueError):
+            raise ValueError("price and width must be numbers")
+        side = str(raw.get("side", "long")).strip().lower()
+        if side not in ("long", "short"):
+            raise ValueError("side must be long or short")
+        symbol = str(raw.get("symbol") or self.symbol).strip().upper()
+        lid = str(raw.get("id") or "").strip()
+        if not lid:
+            lid = self._make_id(symbol, price, side)
+
+        prior = self.registry.get(lid)
+        enabled = raw["enabled"] if "enabled" in raw else (
+            prior.enabled if prior else True)
+        expires_ms = prior.expires_ms if prior else None
+        return Level(
+            id=lid,
+            symbol=symbol,
+            price=price,
+            width=width,
+            side=LevelSide(side),
+            note=str(raw.get("note", "")).strip(),
+            enabled=bool(enabled),
+            expires_ms=expires_ms,
+        )
+
+    def _make_id(self, symbol: str, price: float, side: str) -> str:
+        """Readable, stable, and unique — outcomes are keyed by it, so a
+        collision would silently merge two levels' histories."""
+        base = f"{symbol.lower()}-{price:g}-{side}"
+        if self.registry.get(base) is None:
+            return base
+        n = 2
+        while self.registry.get(f"{base}-{n}") is not None:
+            n += 1
+        return f"{base}-{n}"
 
     # ── hot path ───────────────────────────────────────────────────────
 

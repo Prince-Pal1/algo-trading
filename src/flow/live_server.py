@@ -18,6 +18,18 @@ rather than tucked in a corner.
 Dark-only by design: this is a local operator console that sits beside Bookmap,
 not a document. Colours are the dark-mode steps of the validated diverging
 palette (blue #3987e5 / red #e66767 on #1a1a19).
+
+INBOUND COMMANDS
+----------------
+The socket is two-way: the page sends level edits and settings changes back
+(`on_command`). That turns a read-only display into something that mutates a
+file on disk, which is why the handshake checks Origin.
+
+WebSockets are exempt from the same-origin policy — any page you happen to have
+open can open a socket to 127.0.0.1 and start talking. Binding to loopback stops
+the network, not the browser. So a handshake carrying an Origin that is not this
+server is refused. A missing Origin (curl, a script) is allowed: that is a local
+process, which already has the file.
 """
 
 from __future__ import annotations
@@ -61,6 +73,7 @@ class LiveServer:
     port: int = DEFAULT_PORT
     hz: float = DEFAULT_HZ
     host: str = "127.0.0.1"
+    on_command: object = None                 # callable(dict) -> dict, or None
     _clients: set = field(default_factory=set)
     _pending_signals: list = field(default_factory=list)
     # Signals fire whether or not a browser is attached. Without a buffer, a
@@ -80,9 +93,57 @@ class LiveServer:
         log.info("flow_ui_connected", clients=len(self._clients))
         try:
             await self._send_backlog(ws)
-            await ws.wait_closed()
+            async for message in ws:
+                await self._on_message(ws, message)
+        except websockets.ConnectionClosed:
+            pass
         finally:
             self._clients.discard(ws)
+
+    async def _on_message(self, ws: ServerConnection, message) -> None:
+        """Handle one inbound command. A bad command answers, never raises.
+
+        The page is the only caller, but it is still the outside: a malformed
+        or unknown command must not take down the socket the operator is
+        watching price through.
+        """
+        try:
+            payload = orjson.loads(message)
+        except Exception:
+            await self._reply(ws, {"ok": False, "error": "malformed json"})
+            return
+        if self.on_command is None:
+            await self._reply(ws, {"ok": False, "error": "this monitor is read-only"})
+            return
+        try:
+            result = self.on_command(payload)
+        except Exception as e:
+            log.error("flow_ui_command_failed",
+                      cmd=str(payload.get("cmd")), error=str(e))
+            result = {"ok": False, "error": str(e)}
+        result.setdefault("cmd", payload.get("cmd"))
+        await self._reply(ws, result)
+        if result.get("ok"):
+            await self._broadcast_now()
+
+    async def _reply(self, ws: ServerConnection, result: dict) -> None:
+        result["ack"] = True
+        try:
+            await ws.send(orjson.dumps(result).decode())
+        except Exception:
+            self._clients.discard(ws)
+
+    async def _broadcast_now(self) -> None:
+        """Push state immediately rather than waiting out the tick interval —
+        an edit that takes 200 ms to appear reads as an edit that did not
+        register, and the operator clicks it again."""
+        try:
+            snapshot = self.get_snapshot()
+            snapshot["new_signals"] = []
+        except Exception as e:
+            log.error("flow_ui_snapshot_failed", error=str(e))
+            return
+        await self._send_all(orjson.dumps(snapshot).decode())
 
     async def _send_backlog(self, ws: ServerConnection) -> None:
         """Replay recent signals so a late-opened page is self-consistent."""
@@ -95,10 +156,28 @@ class LiveServer:
         except Exception as e:
             log.warning("flow_ui_backlog_failed", error=str(e))
 
-    @staticmethod
-    def _process_request(connection, request):
+    def _allowed_origin(self, origin: str | None) -> bool:
+        """Only this server's own page may open a socket.
+
+        A browser attaches Origin automatically and cannot be talked out of it,
+        so an absent Origin means a non-browser client on this machine — which
+        can already edit the file directly, and is allowed.
+        """
+        if not origin:
+            return True
+        return origin in (
+            f"http://{self.host}:{self.port}",
+            f"http://localhost:{self.port}",
+            f"http://127.0.0.1:{self.port}",
+        )
+
+    def _process_request(self, connection, request):
         """Serve the page for anything that is not the WebSocket path."""
         if request.path.rstrip("/") in ("/ws",):
+            origin = request.headers.get("Origin")
+            if not self._allowed_origin(origin):
+                log.warning("flow_ui_origin_rejected", origin=origin)
+                return Response(403, "Forbidden", Headers({"Content-Length": "0"}), b"")
             return None  # let the handshake proceed
         body = _page_bytes()
         return Response(
@@ -132,11 +211,14 @@ class LiveServer:
                 except Exception as e:
                     log.error("flow_ui_snapshot_failed", error=str(e))
                     continue
-                for client in list(self._clients):
-                    try:
-                        await client.send(payload)
-                    except websockets.ConnectionClosed:
-                        self._clients.discard(client)
-                    except Exception as e:
-                        log.warning("flow_ui_send_failed", error=str(e))
-                        self._clients.discard(client)
+                await self._send_all(payload)
+
+    async def _send_all(self, payload: str) -> None:
+        for client in list(self._clients):
+            try:
+                await client.send(payload)
+            except websockets.ConnectionClosed:
+                self._clients.discard(client)
+            except Exception as e:
+                log.warning("flow_ui_send_failed", error=str(e))
+                self._clients.discard(client)
