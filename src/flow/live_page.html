@@ -120,7 +120,7 @@
 <main id="cards"><div class="empty">waiting for data…</div></main>
 <div class="feed">
   <div class="lab">signals this session</div>
-  <table><thead><tr><th>time</th><th>level</th><th>side</th><th>price</th>
+  <table><thead><tr><th>time</th><th>level</th><th>test</th><th>side</th><th>price</th>
   <th>score</th><th>invalidation</th></tr></thead><tbody id="sigs"></tbody></table>
 </div>
 <div class="panel" id="panel">
@@ -246,9 +246,18 @@ function render(s){
   syncSettings(s);
   renderRegistry(s.registry);
   if(s.new_signals?.length){ signals=[...s.new_signals,...signals].slice(0,50); }
-  $("sigs").innerHTML=signals.map(x=>`<tr><td>${hhmmss(x.timestamp)}</td><td>${x.level_id}</td>
+  // The test number is here so an open position can be told apart from the
+  // card. A level re-arms `cooldown_ms` after it resolves and starts a fresh
+  // test; if the card reads test #3 and your signal was test #1, the card is
+  // measuring a later test of the same level, not the trade you are in.
+  const liveTest=Object.fromEntries(lvls.map(l=>[l.level_id,l.test_count]));
+  $("sigs").innerHTML=signals.map(x=>{
+    const stale=liveTest[x.level_id]>x.test_count;
+    return `<tr><td>${hhmmss(x.timestamp)}</td><td>${x.level_id}</td>
+    <td${stale?' style="color:var(--ink3)" title="the card has moved on to a later test"':""}>#${x.test_count}${stale?` &rarr; #${liveTest[x.level_id]}`:""}</td>
     <td style="color:${x.side==="long"?"var(--for)":"var(--against)"}">${x.side.toUpperCase()}</td>
-    <td>${fmt(x.price,2)}</td><td>${fmt(x.score,3)}</td><td>${fmt(x.invalidation,2)}</td></tr>`).join("");
+    <td>${fmt(x.price,2)}</td><td>${fmt(x.score,3)}</td><td>${fmt(x.invalidation,2)}</td></tr>`;
+  }).join("");
 }
 
 // ── editor ────────────────────────────────────────────────────────────
