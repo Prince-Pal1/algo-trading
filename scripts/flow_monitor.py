@@ -73,6 +73,7 @@ class FlowMonitor:
             get_snapshot=self._snapshot,
             port=args.port, hz=args.hz,
             on_command=self._on_command,
+            get_chart=lambda: self.engine.tape.to_dict(),
         )
 
         self.feed = BinanceWebSocketFeed(

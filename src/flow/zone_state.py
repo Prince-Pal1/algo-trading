@@ -61,6 +61,7 @@ from src.flow.evidence import DEFAULT_THRESHOLD, EvidenceReport, score_zone
 from src.flow.features import MarketContext, ZoneAccumulator, ZoneFeatures
 from src.flow.level_memory import FAILED, HELD, LevelMemory
 from src.flow.level_registry import Level, LevelRegistry, LevelSide
+from src.flow.tape import FlowTape
 from src.utils.logger import get_logger
 from src.utils.types import OrderBookSnapshot, Tick
 
@@ -71,6 +72,15 @@ log = get_logger("zone_state")
 # level is already invalidated, so a FAILING phase that only appeared then
 # would never be visible.
 FAILING_EXCURSION_FRAC = 0.6
+
+# Footprint rows the chart window should span. ~48 keeps each row several
+# pixels tall on a 380px pane, which is the point: a row thinner than a pixel
+# draws nothing at all.
+FOOTPRINT_ROWS = 48
+# How much taller than the zone the chart window is. Must match the page's
+# `computeGeo` (zone +/- 0.9x its height), or the rows are sized for a window
+# that is not the one being drawn.
+WINDOW_ZONE_MULT = 2.8
 
 
 class ZoneState(str, enum.Enum):
@@ -445,6 +455,7 @@ class ZoneMonitor:
 
     def snapshot(self) -> dict:
         """Publishable view. Cheap — safe to call at UI cadence."""
+        from src.flow.narrative import describe   # deferred: narrative imports us
         features = self._acc.features() if self._acc is not None else None
         # Read memory directly rather than from features: features only exist
         # while a zone is being evaluated, and the prior record is worth showing
@@ -461,6 +472,7 @@ class ZoneMonitor:
             "price": self.level.price,
             "low": self.level.low,
             "high": self.level.high,
+            "invalidation": round(self.invalidation_price(), 8),
             "note": self.level.note,
             "state": self.state.value,
             "phase": self.phase.value,
@@ -490,6 +502,11 @@ class ZoneMonitor:
             "prior_failed": prior_failed,
             "prior_last": self.memory.last_outcome(self.level.id)
             if self.memory is not None else None,
+            "narrative": describe(
+                self.level, self.state, self.phase, features,
+                self.last_price, self.level.distance(self.last_price)
+                if self.last_price else 0.0,
+            ),
             "supporting": [
                 {"name": i.name, "weight": round(i.weight, 4), "detail": i.detail}
                 for i in self._report.supporting
@@ -516,6 +533,7 @@ class FlowEngine:
     memory: LevelMemory | None = None     # optional; None disables it entirely
     require_turn: bool = True
     monitors: dict[str, ZoneMonitor] = field(default_factory=dict)
+    tape: FlowTape = field(default_factory=FlowTape)
 
     _prices: deque = field(default_factory=lambda: deque(maxlen=200_000))
     # Rolling print sizes, for the large-print baseline. Sampled from ALL
@@ -565,6 +583,7 @@ class FlowEngine:
         for lid in list(self.monitors):
             if lid not in active:
                 del self.monitors[lid]
+        self._set_bucket_size()
 
     def on_tick(self, tick: Tick, local_ms: int | None = None) -> list[FlowSignal]:
         """Hot path. Returns any signals produced by this tick."""
@@ -573,7 +592,10 @@ class FlowEngine:
         if local_ms is not None:
             self._lag_ms = local_ms - tick.timestamp
 
+        self.tape.on_tick(tick)
         self._prices.append((tick.timestamp, tick.price))
+        if self.tape.bucket_size <= 0 and self._tick_size > 0:
+            self._set_bucket_size()
         if len(self._sizes) == self._sizes.maxlen:
             self._size_sum -= self._sizes[0]
         self._sizes.append(tick.quantity)
@@ -594,6 +616,7 @@ class FlowEngine:
 
     def on_book(self, snapshot: OrderBookSnapshot) -> None:
         self._infer_tick_size(snapshot)
+        self.tape.on_book(snapshot)
         for monitor in self.monitors.values():
             monitor.on_book(snapshot)
 
@@ -626,6 +649,42 @@ class FlowEngine:
             self._tick_size = float(f"{smallest:.8g}")
             log.info("tick_size_inferred", symbol=self.symbol,
                      tick_size=self._tick_size, raw=smallest)
+            self._set_bucket_size()
+
+    def _set_bucket_size(self) -> None:
+        """Footprint row height, as a tick multiple.
+
+        Sized from the NARROWEST active zone, not from the market's range: the
+        chart window is anchored on the zone, so that is the span the rows have
+        to resolve. Sizing it off the 15-minute baseline produced rows a
+        five-hundredth of the window tall — every footprint bar clamped to one
+        pixel, which is a chart that draws nothing.
+
+        A tick multiple rather than an arbitrary division, because rows that do
+        not divide the tick put two price levels in some rows and one in others
+        — which renders as banding that reads like real structure (the same trap
+        the depth heatmap hit, see ARCHITECTURE Known Gotchas 2026-09-21).
+
+        Only re-sized when the implied height moves by 2x or more; a grid that
+        shifts under you on every level edit is unreadable, and each change
+        costs the history (see `FlowTape.set_bucket_size`).
+        """
+        if self._tick_size <= 0:
+            return
+        widths = [m.level.width for m in self.monitors.values()]
+        span = min(widths) * WINDOW_ZONE_MULT if widths else 0.0
+        if span <= 0:
+            span = self._baseline_range(self._last_tick_ms) if self._tick_count > 500 else 0.0
+        if span <= 0:
+            return
+        mult = max(1, round(span / (FOOTPRINT_ROWS * self._tick_size)))
+        proposed = mult * self._tick_size
+        current = self.tape.bucket_size
+        if current > 0 and 0.5 <= proposed / current <= 2.0:
+            return
+        if self.tape.set_bucket_size(proposed):
+            log.info("footprint_bucket_set", symbol=self.symbol,
+                     bucket_size=self.tape.bucket_size, tick_size=self._tick_size)
 
     def _baseline_trade_size(self) -> float:
         """Rolling mean print size. O(1) — the sum is maintained incrementally."""
@@ -661,6 +720,16 @@ class FlowEngine:
             "tick_size": self._tick_size,
             "level_memory": self.memory is not None and self.memory.enabled,
             "require_turn": self.require_turn,
+            # The forming column every frame; the closed history only when `seq`
+            # moves, which is once per interval rather than five times a second.
+            "tape": {
+                "seq": self.tape.seq,
+                "interval_ms": self.tape.interval_ms,
+                "bucket_size": self.tape.bucket_size,
+                "has_book": self.tape._last_book is not None,
+                "cvd": round(self.tape.cvd, 6),
+                "live": self.tape.live_column(),
+            },
             "levels": [m.snapshot() for m in sorted(
                 self.monitors.values(), key=lambda m: m.level.price
             )],

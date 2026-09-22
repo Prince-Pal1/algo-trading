@@ -74,6 +74,7 @@ class LiveServer:
     hz: float = DEFAULT_HZ
     host: str = "127.0.0.1"
     on_command: object = None                 # callable(dict) -> dict, or None
+    get_chart: object = None                  # callable -> dict, or None
     _clients: set = field(default_factory=set)
     _pending_signals: list = field(default_factory=list)
     # Signals fire whether or not a browser is attached. Without a buffer, a
@@ -81,6 +82,7 @@ class LiveServer:
     # beside a level card reading CONFIRMED — contradictory, and it hides
     # exactly what you opened the page to see.
     _recent_signals: deque = field(default_factory=lambda: deque(maxlen=50))
+    _sent_chart_seq: int = -1
 
     def publish_signals(self, records: list[dict]) -> None:
         """Queue signals for the next broadcast. Cheap; safe from the tick path."""
@@ -146,15 +148,36 @@ class LiveServer:
         await self._send_all(orjson.dumps(snapshot).decode())
 
     async def _send_backlog(self, ws: ServerConnection) -> None:
-        """Replay recent signals so a late-opened page is self-consistent."""
-        if not self._recent_signals:
-            return
+        """First frame for a new page: recent signals AND the full chart history.
+
+        A page that opened mid-session must not start with an empty chart and
+        fill in one column every five seconds — the history is what makes the
+        current column mean anything.
+        """
         try:
             snapshot = self.get_snapshot()
             snapshot["new_signals"] = list(self._recent_signals)
+            self._attach_chart(snapshot, force=True)
             await ws.send(orjson.dumps(snapshot).decode())
         except Exception as e:
             log.warning("flow_ui_backlog_failed", error=str(e))
+
+    def _attach_chart(self, snapshot: dict, force: bool = False) -> None:
+        """Add the closed-column history only when it actually changed.
+
+        The forming column rides along in every frame because it changes every
+        frame. The other 179 do not, and re-sending them five times a second
+        would be ~99% of the payload carrying no news.
+        """
+        if self.get_chart is None:
+            return
+        seq = (snapshot.get("tape") or {}).get("seq", 0)
+        if force or seq != self._sent_chart_seq:
+            try:
+                snapshot["chart"] = self.get_chart()
+                self._sent_chart_seq = seq
+            except Exception as e:
+                log.warning("flow_ui_chart_failed", error=str(e))
 
     def _allowed_origin(self, origin: str | None) -> bool:
         """Only this server's own page may open a socket.
@@ -207,6 +230,7 @@ class LiveServer:
                     snapshot = self.get_snapshot()
                     snapshot["new_signals"] = self._pending_signals
                     self._pending_signals = []
+                    self._attach_chart(snapshot)
                     payload = orjson.dumps(snapshot).decode()
                 except Exception as e:
                     log.error("flow_ui_snapshot_failed", error=str(e))

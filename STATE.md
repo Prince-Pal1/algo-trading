@@ -114,6 +114,25 @@ Which exposed that they had not been:
 
 **250 flow tests pass** — 18 rewritten rather than patched, since they encoded the old geometry as intent. The page now previews the resulting zone live as you type price/width/side, which is cheaper than any label for making the direction unambiguous.
 
+**Live chart (same session).** Prince asked for candles, CVD, order flow and price-relative-to-zone, drawn the way Bookmap does it. The card was text for a situation that is inherently spatial.
+
+New `src/flow/tape.py` keeps rolling columns — candle, aggressor volume, volume-at-price footprint, and one book sample per column — sparse and keyed by an absolute price-bucket index, because price drifts and a fixed grid would either clip or rebuild. New `src/flow/narrative.py` turns the current features into a plain-English read: where price sits in the zone, who is pushing, whether it is working, what the last 30 seconds did. It states measurements only; a parametrised test asserts no advice vocabulary leaks into it.
+
+The page gained a canvas chart — depth heatmap, zone band, delta-coloured candles, footprint rail, CVD pane, crosshair readout. No charting library and no CDN: a console you watch mid-trade must not depend on the internet being up. Closed columns rasterise once per `seq` into an offscreen canvas and get blitted; only the forming column redraws at 5 Hz, which is also why the transport sends the history only when a column closes.
+
+**Bookmap's framework adapted, not copied.** Its price window is the market's; ours is anchored on the zone, because that is the only part being watched. Candles outside the window are clipped rather than allowed to stretch the axis.
+
+Four bugs, all found by rendering it and looking, none by the tests:
+
+- **the axis stretched to fit the tape**, so an hour that opened 900 above the level squashed the zone into four pixels
+- **the footprint row height latched before the baseline range existed** — computed the first time a book arrived, when the price deque is still nearly empty, so it latched at one tick and every bar clamped to 1px. A chart that draws nothing looks empty, not broken.
+- **`sqrt` on the heatmap ramp** lifted a near-uniform book to mid-ramp everywhere and buried the zone under a bright slab. Linear is the honest map: a book IS mostly nothing with a few walls.
+- **the APPROACHING branch was unreachable** — `narrative.describe` tested `features is None` first, and there is no accumulator until price is inside, so every approach printed "Waiting"
+
+All four are Known Gotchas. The palette went through the dataviz skill's validator rather than being eyeballed: blue↔red passes every check on the dark surface (CVD ΔE 19.2 protan, 29.0 normal), and the sequential blue ramp was checked for lightness monotonicity.
+
+**294 flow tests pass** (42 new).
+
 **Next:** Phase 2 — run it in shadow mode on BTC, ignore everything it says, collect outcomes. Whether level memory helps is a Phase 3 question against the logged null-hypothesis baselines, which is precisely why it ships off.
 
 ## Session 31 — order-flow / CVD research tooling (2026-09-21)
