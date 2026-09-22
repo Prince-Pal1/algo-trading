@@ -49,6 +49,11 @@ W_RETEST = 0.25          # exhausted retest — the strongest single read
 W_LARGE_PRINTS = 0.12
 W_ACCEL_BREAK = 0.18
 W_ICEBERG = 0.22        # hidden size defending a price — book + tape together
+# Failing is roughly twice as informative as holding: a level that broke has
+# demonstrated the defender is not there, while a level that held may simply
+# never have been tested seriously. See level_memory.py.
+W_PRIOR_FAILED = 0.20
+W_PRIOR_HELD = 0.10
 
 
 @dataclass(frozen=True)
@@ -239,6 +244,24 @@ def score_zone(
         items.append(EvidenceItem(
             "repeated_test", -1, W_REPEAT_TEST,
             f"test #{features.test_count} this session — levels thin with retesting",
+        ))
+
+    # ── Memory: how this level resolved before ─────────────────────────
+    # Zero when level memory is disabled, so these never fire unless it is on.
+    # Deliberately in tension with `repeated_test` above: that measures rapid
+    # retesting consuming liquidity now, this measures how tests *resolved*,
+    # possibly days ago. They are meant to disagree.
+    if features.prior_failed > 0:
+        items.append(EvidenceItem(
+            "prior_failure", -1,
+            W_PRIOR_FAILED * min(1.0, features.prior_failed / 2.0),
+            f"level failed {features.prior_failed}x before — the defender was not there",
+        ))
+    if features.prior_held > 0 and features.prior_failed == 0:
+        items.append(EvidenceItem(
+            "prior_hold", +1,
+            W_PRIOR_HELD * min(1.0, features.prior_held / 2.0),
+            f"level held {features.prior_held}x before, never failed",
         ))
 
     # ── Book: supporting only, never leading (spoofable) ───────────────

@@ -59,6 +59,7 @@ from dataclasses import dataclass, field
 
 from src.flow.evidence import DEFAULT_THRESHOLD, EvidenceReport, score_zone
 from src.flow.features import MarketContext, ZoneAccumulator, ZoneFeatures
+from src.flow.level_memory import FAILED, HELD, LevelMemory
 from src.flow.level_registry import Level, LevelRegistry, LevelSide
 from src.utils.logger import get_logger
 from src.utils.types import OrderBookSnapshot, Tick
@@ -136,6 +137,8 @@ class FlowSignal:
             "iceberg_price": self.features.iceberg_price,
             "iceberg_traded": round(self.features.iceberg_traded, 6),
             "iceberg_displayed": round(self.features.iceberg_displayed, 6),
+            "prior_held": self.features.prior_held,
+            "prior_failed": self.features.prior_failed,
             "velocity_ratio": round(self.features.velocity_ratio, 4),
             "supporting": [
                 {"name": i.name, "weight": round(i.weight, 4), "detail": i.detail}
@@ -160,6 +163,7 @@ class ZoneMonitor:
     cooldown_ms: int = 300_000        # hold after a resolution before re-arming
     score_interval_ms: int = 1_000    # re-score at most this often
     require_turn: bool = True         # fire only on ABSORBING -> TURNING
+    memory: LevelMemory | None = None # optional prior-outcome history
     turn_threshold: float = 0.15      # late-delta flip that counts as a turn
     absorption_floor: float = 0.25
 
@@ -174,6 +178,7 @@ class ZoneMonitor:
     _last_score_ms: int = 0
     _report: EvidenceReport | None = None
     _signalled_this_test: bool = False
+    _test_resolved: bool = False
 
     # ── hot path ───────────────────────────────────────────────────────
 
@@ -185,8 +190,22 @@ class ZoneMonitor:
         self.last_ts = ts
 
         if self.state in (ZoneState.CONFIRMED, ZoneState.INVALIDATED):
+            # A confirmation that then breaks is the outcome memory most wants
+            # to hear about: the defender was there, and then was not. Catch it
+            # during the cooldown, because by the time the cooldown expires
+            # price may have wandered back and the exit test would miss it.
+            if (
+                self.memory is not None
+                and self.state is ZoneState.CONFIRMED
+                and not self._test_resolved
+                and self._breached(price)
+            ):
+                self._record_outcome(FAILED, ts, price)
+
             # Hold the outcome visible until the cooldown expires, then re-arm.
             if ts - self._resolved_ms >= self.cooldown_ms:
+                if self.state is ZoneState.CONFIRMED:
+                    self._classify_exit(price, ts)
                 self._reset_to_idle()
             return None
 
@@ -230,10 +249,14 @@ class ZoneMonitor:
         if features.adverse_excursion > self.level.width * self.invalidation_mult:
             self.state = ZoneState.INVALIDATED
             self._resolved_ms = ts
+            self._record_outcome(FAILED, ts, price)
             return None
 
         if not inside and not near:
-            # Left the area without resolving — re-arm, keep the test count.
+            # Left the area. Which side it left on is the outcome: away from the
+            # level is a hold, and anything else is inconclusive — which is
+            # recorded as nothing, because an inconclusive test is not evidence.
+            self._classify_exit(price, ts)
             self._reset_to_idle()
             return None
 
@@ -261,6 +284,12 @@ class ZoneMonitor:
 
     def _enter_zone(self, tick: Tick, context: MarketContext) -> None:
         self.test_count += 1
+        self._test_resolved = False
+        prior_held, prior_failed = (
+            self.memory.counts(self.level.id, tick.timestamp)
+            if self.memory is not None
+            else (0, 0)
+        )
         self.state = ZoneState.EVALUATING
         self.phase = ZonePhase.WATCHING
         self._entered_ms = tick.timestamp
@@ -275,15 +304,51 @@ class ZoneMonitor:
             zone_width=self.level.width,
             tick_size=context.tick_size,
             test_count=self.test_count,
+            prior_held=prior_held,
+            prior_failed=prior_failed,
         )
         self._acc.on_tick(tick)
 
     def _reset_to_idle(self) -> None:
         self.state = ZoneState.IDLE
         self.phase = ZonePhase.WATCHING
+        self._test_resolved = False
         self._acc = None
         self._report = None
         self._signalled_this_test = False
+
+    def _invalidation_price(self) -> float:
+        """Where the level is considered gone. Also published on every signal."""
+        buffer = self.level.width * self.invalidation_mult
+        return (
+            self.level.low - buffer
+            if self.level.side is LevelSide.LONG
+            else self.level.high + buffer
+        )
+
+    def _breached(self, price: float) -> bool:
+        invalidation = self._invalidation_price()
+        return (
+            price < invalidation
+            if self.level.side is LevelSide.LONG
+            else price > invalidation
+        )
+
+    def _classify_exit(self, price: float, ts: int) -> None:
+        """A hold is leaving on the favourable side; everything else is silence."""
+        if self.level.side is LevelSide.LONG:
+            held = price > self.level.high
+        else:
+            held = price < self.level.low
+        if held:
+            self._record_outcome(HELD, ts, price)
+
+    def _record_outcome(self, outcome: str, ts: int, price: float) -> None:
+        """At most one outcome per test, and only when memory is enabled."""
+        if self._test_resolved or self.memory is None:
+            return
+        self._test_resolved = True
+        self.memory.record(self.level.id, outcome, ts, price)
 
     def _update_phase(self, features: ZoneFeatures) -> None:
         """Advance the attack/defence sequence. See the module docstring."""
@@ -323,12 +388,6 @@ class ZoneMonitor:
     def _build_signal(
         self, ts: int, price: float, features: ZoneFeatures, report: EvidenceReport
     ) -> FlowSignal:
-        buffer = self.level.width * self.invalidation_mult
-        invalidation = (
-            self.level.low - buffer
-            if self.level.side is LevelSide.LONG
-            else self.level.high + buffer
-        )
         return FlowSignal(
             level_id=self.level.id,
             symbol=self.level.symbol,
@@ -337,7 +396,7 @@ class ZoneMonitor:
             price=price,
             score=report.score,
             threshold=self.threshold,
-            invalidation=round(invalidation, 8),
+            invalidation=round(self._invalidation_price(), 8),
             features=features,
             report=report,
             note=self.level.note,
@@ -355,6 +414,14 @@ class ZoneMonitor:
     def snapshot(self) -> dict:
         """Publishable view. Cheap — safe to call at UI cadence."""
         features = self._acc.features() if self._acc is not None else None
+        # Read memory directly rather than from features: features only exist
+        # while a zone is being evaluated, and the prior record is worth showing
+        # on an idle level too. Both are (0, 0) when memory is off.
+        prior_held, prior_failed = (
+            self.memory.counts(self.level.id, self.last_ts or None)
+            if self.memory is not None
+            else (0, 0)
+        )
         return {
             "level_id": self.level.id,
             "symbol": self.level.symbol,
@@ -387,6 +454,10 @@ class ZoneMonitor:
             "retest_volume_ratio": round(features.retest_volume_ratio, 3) if features else 0.0,
             "iceberg_ratio": round(features.iceberg_ratio, 2) if features else 0.0,
             "iceberg_price": features.iceberg_price if features else 0.0,
+            "prior_held": prior_held,
+            "prior_failed": prior_failed,
+            "prior_last": self.memory.last_outcome(self.level.id)
+            if self.memory is not None else None,
             "supporting": [
                 {"name": i.name, "weight": round(i.weight, 4), "detail": i.detail}
                 for i in self._report.supporting
@@ -410,6 +481,8 @@ class FlowEngine:
     symbol: str
     threshold: float = DEFAULT_THRESHOLD
     baseline_window_ms: int = 900_000     # 15 min of price history
+    memory: LevelMemory | None = None     # optional; None disables it entirely
+    require_turn: bool = True
     monitors: dict[str, ZoneMonitor] = field(default_factory=dict)
 
     _prices: deque = field(default_factory=lambda: deque(maxlen=200_000))
@@ -428,7 +501,10 @@ class FlowEngine:
         for lid, level in active.items():
             existing = self.monitors.get(lid)
             if existing is None:
-                self.monitors[lid] = ZoneMonitor(level=level, threshold=self.threshold)
+                self.monitors[lid] = ZoneMonitor(
+                    level=level, threshold=self.threshold,
+                    memory=self.memory, require_turn=self.require_turn,
+                )
             else:
                 existing.level = level  # pick up edits without losing state
         for lid in list(self.monitors):
@@ -519,6 +595,7 @@ class FlowEngine:
             if self._last_tick_ms else 0.0,
             "baseline_trade_size": round(self._baseline_trade_size(), 8),
             "tick_size": self._tick_size,
+            "level_memory": self.memory is not None and self.memory.enabled,
             "levels": [m.snapshot() for m in sorted(
                 self.monitors.values(), key=lambda m: m.level.price
             )],

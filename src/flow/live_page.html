@@ -56,6 +56,8 @@
   li.f:before{content:"+";color:var(--for)} li.a:before{content:"\2212";color:var(--against)}
   .lab{font-size:10px;letter-spacing:1px;color:var(--ink3);text-transform:uppercase;margin-top:10px}
   .thin{color:var(--warn);font-size:11px;margin-top:8px}
+  .mem{font-variant-numeric:tabular-nums}
+  .mem .h{color:var(--for)} .mem .x{color:var(--against)}
   .ice{margin-top:10px;padding:8px 10px;border-radius:6px;font-size:12px;
        background:rgba(25,158,112,.14);border:1px solid rgba(25,158,112,.4);color:#4cd4a0}
   .ice b{font-size:14px}
@@ -92,6 +94,18 @@ let signals=[];
 
 function lagClass(ms){ if(ms==null)return"";return ms<500?"good":ms<2000?"warn":"bad"; }
 
+// Prior outcomes. Rendered on idle levels too: the useful moment for "this
+// broke twice" is before price arrives, not once it is already in the zone.
+// Blank when level memory is off, which is the default.
+function mem(l){
+  const h=l.prior_held||0, x=l.prior_failed||0;
+  if(!h&&!x) return "";
+  const parts=[];
+  if(x) parts.push(`<span class="x">failed ${x}\u00d7</span>`);
+  if(h) parts.push(`<span class="h">held ${h}\u00d7</span>`);
+  return ` \u00b7 <span class="mem">${parts.join(" / ")}</span>`;
+}
+
 function card(l){
   const st=l.state, ph=l.phase, cls=st==="EVALUATING"?"eval":st==="CONFIRMED"?"conf":st==="INVALIDATED"?"inval":"";
   const score=l.score, pct=score==null?0:Math.round(score*100);
@@ -106,7 +120,7 @@ function card(l){
         ${fmt(l.low,2)}–${fmt(l.high,2)}</span></span>
       <span>${ph&&ph!=="WATCHING"?`<span class="phase ${ph.toLowerCase()}">${ph}</span>`:""}<span class="badge ${cls}" style="margin-left:6px">${st}</span></span>
     </div>
-    <div class="note">${l.side.toUpperCase()} · ${l.note||""} · test #${l.test_count} · ${dist}</div>
+    <div class="note">${l.side.toUpperCase()} · ${l.note||""} · test #${l.test_count} · ${dist}${mem(l)}</div>
     ${score!=null?`<div class="bar"><i style="width:${pct}%"></i><span class="th" style="left:${thPct}%"></span></div>
       <div class="scorerow"><span>score ${fmt(score,3)}</span><span>threshold ${fmt(l.threshold,2)}</span></div>`:""}
     ${inZone?`<div class="grid">

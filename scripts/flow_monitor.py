@@ -31,6 +31,7 @@ import time
 
 from src.data.feeds.binance_ws import BinanceWebSocketFeed
 from src.flow.evidence import DEFAULT_THRESHOLD
+from src.flow.level_memory import LevelMemory
 from src.flow.level_registry import DEFAULT_LEVELS_PATH, LevelRegistry
 from src.flow.live_server import DEFAULT_HZ, DEFAULT_PORT, LiveServer
 from src.flow.signal_log import SignalLog
@@ -57,8 +58,13 @@ class FlowMonitor:
         self.registry = LevelRegistry(path=args.levels)
         self.registry.load(now_ms=_now_ms(), force=True)
 
+        # Off unless asked for: a new heuristic that changes scoring should
+        # not start affecting signals by default.
+        self.memory = LevelMemory(enabled=args.level_memory)
+
         self.engine = FlowEngine(
-            registry=self.registry, symbol=self.symbol, threshold=args.threshold
+            registry=self.registry, symbol=self.symbol, threshold=args.threshold,
+            memory=self.memory, require_turn=not args.no_turn,
         )
         self.engine.sync_levels(now_ms=_now_ms())
 
@@ -145,6 +151,7 @@ class FlowMonitor:
         log.info(
             "flow_monitor_start",
             symbol=self.symbol, levels=len(active), depth=self.args.depth,
+            level_memory=self.args.level_memory, require_turn=not self.args.no_turn,
             threshold=self.args.threshold, ui=f"http://127.0.0.1:{self.args.port}",
         )
         if not active:
@@ -184,7 +191,13 @@ def main() -> None:
     parser.add_argument("--target-mult", type=float, default=2.0,
                         help="outcome target as a multiple of the risk distance")
     parser.add_argument("--depth", action="store_true",
-                        help="also subscribe to the order book (book evidence)")
+                        help="also subscribe to the order book (enables iceberg detection)")
+    parser.add_argument("--level-memory", action="store_true",
+                        help="remember how each level resolved before, across restarts "
+                             "(off by default — it changes scoring)")
+    parser.add_argument("--no-turn", action="store_true",
+                        help="fire on score alone instead of requiring the "
+                             "ABSORBING->TURNING sequence (comparison arm)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--hz", type=float, default=DEFAULT_HZ,
                         help="UI broadcast rate")

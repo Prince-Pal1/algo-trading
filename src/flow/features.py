@@ -142,6 +142,8 @@ class ZoneFeatures:
     iceberg_price: float        # where that ratio occurred
     iceberg_traded: float       # volume traded at that price
     iceberg_displayed: float    # most ever displayed there
+    prior_held: int             # times this level previously held (0 when memory off)
+    prior_failed: int           # times it previously failed
     test_count: int             # which test of this level this is (1-based)
     book_size_at_level: float   # resting size near the level (0 when no book)
     book_refills: int           # times that resting size replenished — iceberg proxy
@@ -185,6 +187,9 @@ class ZoneAccumulator:
     baseline_trade_size: float = 0.0
     zone_width: float = 0.0
     tick_size: float = 0.0
+    # Snapshotted at zone entry so the read cannot shift mid-test.
+    prior_held: int = 0
+    prior_failed: int = 0
 
     entered_ms: int = 0
     _last_ms: int = 0
@@ -394,6 +399,8 @@ class ZoneAccumulator:
             iceberg_price=ice_price,
             iceberg_traded=ice_traded,
             iceberg_displayed=ice_displayed,
+            prior_held=self.prior_held,
+            prior_failed=self.prior_failed,
             test_count=self.test_count,
             book_size_at_level=self._book_size,
             book_refills=self._book_refills,
