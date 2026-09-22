@@ -227,3 +227,31 @@ class TestEngineTickInference:
         eng = self._engine()
         eng.on_book(_book(98000.0, 5.0))
         assert eng.snapshot(local_ms=TS)["tick_size"] == pytest.approx(TICK)
+
+    def test_float_noise_is_snapped_away(self):
+        """A real BTCUSDT book gives 0.00999999999476131 for a 0.01 tick —
+        differencing two binary floats does not produce a round number. The
+        bucketing error is tiny, but a tick that prints like that reads as
+        broken and fails any equality check against the real tick."""
+        eng = self._engine()
+        prices = [98000.0 + i * 0.01 for i in range(6)]
+        book = OrderBookSnapshot(
+            symbol="BTCUSDT",
+            bids=[OrderBookLevel(price=p, quantity=1.0) for p in reversed(prices)],
+            asks=[], timestamp=TS,
+        )
+        raw = abs(prices[1] - prices[0])
+        assert raw != 0.01, "expected float noise in the fixture itself"
+        eng.on_book(book)
+        assert eng._tick_size == 0.01
+
+    def test_snapping_keeps_a_genuinely_small_tick(self):
+        """8 significant digits, not 8 decimal places — a 1e-8 tick survives."""
+        eng = self._engine()
+        book = OrderBookSnapshot(
+            symbol="SHIBUSDT",
+            bids=[OrderBookLevel(price=1.0 + i * 1e-8, quantity=1.0) for i in range(3)],
+            asks=[], timestamp=TS,
+        )
+        eng.on_book(book)
+        assert eng._tick_size == pytest.approx(1e-8, rel=1e-3)

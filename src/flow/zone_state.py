@@ -573,6 +573,14 @@ class FlowEngine:
         trade prices would need statistics. Latched once: the tick does not
         change intraday, and re-deriving it per snapshot would let one odd
         book shrink it.
+
+        The gap is SNAPPED to 8 significant digits. Differencing two binary
+        floats does not give a round number — BTCUSDT's 0.01 tick comes back
+        from a live book as 0.00999999999476131 — and while the bucketing error
+        that causes is tiny, a tick that prints like that is wrong, reads as
+        broken, and would fail any later equality check against the real tick.
+        Eight digits is far more precision than any instrument's tick carries
+        and far less than the noise.
         """
         if self._tick_size > 0 or snapshot is None:
             return
@@ -583,8 +591,9 @@ class FlowEngine:
                 if gap > 0 and (smallest == 0.0 or gap < smallest):
                     smallest = gap
         if smallest > 0:
-            self._tick_size = smallest
-            log.info("tick_size_inferred", symbol=self.symbol, tick_size=smallest)
+            self._tick_size = float(f"{smallest:.8g}")
+            log.info("tick_size_inferred", symbol=self.symbol,
+                     tick_size=self._tick_size, raw=smallest)
 
     def _baseline_trade_size(self) -> float:
         """Rolling mean print size. O(1) — the sum is maintained incrementally."""
