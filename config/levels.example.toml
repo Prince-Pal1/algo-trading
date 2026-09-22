@@ -1,0 +1,36 @@
+# Level definitions for the flow monitor.
+#
+# Copy to config/levels.toml and edit before each session. The monitor reloads
+# this file on a timer, so levels can be added mid-session — but a level is only
+# honest if it was written BEFORE price reached it. The outcome log records when
+# each level was first seen, so back-dated levels are detectable.
+#
+# Fields:
+#   id      unique, stable across reloads (outcomes are keyed by it)
+#   symbol  must match the feed symbol exactly
+#   price   centre of the zone
+#   width   half-width in price units — zone is price ± width
+#   side    "long"  = you expect this to hold as support
+#           "short" = you expect this to hold as resistance
+#   note    why you marked it. Recorded with every signal
+#   expires optional RFC3339; the level disarms itself after this
+#   enabled set false to park a level without deleting it
+
+[[level]]
+id          = "btc-pdl"
+symbol      = "BTCUSDT"
+price       = 98000.0
+width       = 150.0
+side        = "long"
+note        = "prior day low + 4h demand"
+enabled     = true
+
+[[level]]
+id          = "btc-vah"
+symbol      = "BTCUSDT"
+price       = 101500.0
+width       = 200.0
+side        = "short"
+note        = "value area high, untested"
+expires     = "2026-09-30T00:00:00Z"
+enabled     = true

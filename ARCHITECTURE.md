@@ -247,6 +247,21 @@ Phase 3b-2. Canonical plan: `docs/planning/m3s_plan_v1.md` § v1.1 ADDENDUM. Sub
 | Python Parser | `src/research/parsers/python_framework_parser.py` | `ast`, regex | Import CLI | ✅ working (Freqtrade, Backtrader) |
 | Import CLI | `scripts/import_strategy.py` | Parsers, CodeGen, Strategy IR | Manual run | ✅ working |
 
+### Flow — level-gated order flow (Python -- src/flow/)
+
+Human supplies levels; the engine reports what flow does when price reaches them.
+It never selects a level and never places an order.
+
+| Module | File | Depends On | Used By | Status |
+|---|---|---|---|---|
+| Level Registry | `src/flow/level_registry.py` | `tomllib`, `config/levels.toml` | Flow Engine, monitor | ✅ 2026-09-22 (TOML levels; preserves `first_seen_ms` across reloads — the only thing separating a level written before price arrived from hindsight; malformed file keeps prior levels rather than disarming live ones) |
+| Zone Features | `src/flow/features.py` | Types | Evidence, Zone State | ✅ 2026-09-22 (`ZoneAccumulator` — ~0.9 µs/tick, bounded deques, no allocation per tick. `absorption = |delta_ratio| × (1 − min(1, range_ratio))` scaled by a trade-count confidence ramp) |
+| Evidence Scorer | `src/flow/evidence.py` | Features, Level Registry | Zone State | ✅ 2026-09-22 (rule-based by design — rules generate the labels ML would later need. Tape weighted ~2× book because crypto book display is spoofable. Always reports FOR **and** AGAINST) |
+| Zone State Machine | `src/flow/zone_state.py` | Features, Evidence, Types | `scripts/flow_monitor.py` | ✅ 2026-09-22 (`ZoneMonitor` IDLE→APPROACHING→EVALUATING→CONFIRMED/INVALIDATED→IDLE; invalidation beats confirmation; one signal per test; `FlowEngine` routes ticks, tracks baseline range + tape lag) |
+| Signal / Outcome Log | `src/flow/signal_log.py` | `orjson` | `scripts/flow_monitor.py` | ✅ 2026-09-22 (JSONL. Logs a **null-hypothesis baseline for every zone entry**, not just confirmations, so "does the scorer beat taking the level?" is answerable from the log) |
+| Live Server + Page | `src/flow/live_server.py` + `live_page.html` | `websockets`, `orjson` | Browser | ✅ 2026-09-22 (serves page on `GET /`, pushes snapshots on `/ws` at 5 Hz. NOT Streamlit — see Known Gotchas. Lag is the headline number; 50-signal ring buffer replayed on connect) |
+| Flow Monitor CLI | `scripts/flow_monitor.py` | Binance WS feed, all of `src/flow/` | Manual run | ✅ 2026-09-22 (`--symbol --depth --threshold --port`; uvloop; levels hot-reload every 10s) |
+
 ### Dashboard (Python -- src/dashboard/)
 
 | Module | File | Depends On | Used By | Status |
@@ -373,6 +388,23 @@ binance_ws @depth@100ms (diff stream)   +   REST /api/v3/depth (snapshot)
           --> depth_recorder.to_heatmap_grid()   (tick-aligned price buckets)
             --> scripts/depth.py {record,show,heatmap}       (terminal / PNG)
             --> dashboard page 8 via flow_charts.depth_heatmap()  (browser)
+```
+
+### Level-Gated Flow Path (advisory — crypto only)
+```
+config/levels.toml  (YOU write these, before price arrives)
+  --> level_registry.LevelRegistry        (hot-reload, first_seen_ms preserved)
+       │
+binance_ws @trade ──> FlowEngine.on_tick()          HOT PATH ~0.9 µs/tick
+       │              └─> ZoneMonitor per level  (state machine)
+       │                    └─> ZoneAccumulator  (delta, absorption, excursion)
+       │                          └─> evidence.score_zone()  FOR / AGAINST
+       ├─> SignalLog          signals + baselines + outcomes (JSONL, off hot path)
+       └─> LiveServer         5 Hz WebSocket push -> http://127.0.0.1:8760
+
+binance_ws @depth ──> OrderBookState --> ZoneMonitor.on_book()  (optional, --depth)
+
+Advisory only: emits FlowSignal objects, never orders. No auto-execution path exists.
 
 CVD sees AGGRESSIVE flow (who crossed the spread); depth sees PASSIVE resting
 liquidity. Neither sees what the other sees — that is why both exist.
@@ -483,6 +515,10 @@ Trade Fill Event
 
 | Date | Description |
 |---|---|
+| 2026-09-22 | **At a SUPPORT level the bullish evidence is aggressive SELLING that fails to move price** — not buying. Sellers hammer the bid, a passive buyer absorbs, price holds. Invert this sign and the system buys support only once buyers are already lifting the ask, i.e. at the worst available price, while calling it "confirmation". `features.py` documents it and `test_features_evidence.py::TestAbsorptionSign` pins it in both directions for support and resistance. |
+| 2026-09-22 | **Absorption is maximal on a near-empty zone unless it is damped.** With three trades the price excursion is ~0, so `|delta_ratio| × (1 − range_ratio)` returns ~1.0 — arithmetically true, completely meaningless. `sufficient` already blocks *signalling* on thin zones, but the score is also rendered live, and a confident 0.95 built on three prints is exactly the false authority this system exists to avoid. Fixed with a trade-count confidence ramp in `ZoneAccumulator.features()`. Caught by a test, not in review. |
+| 2026-09-22 | **Streamlit is the wrong tool for a live operator view.** It re-runs the whole script per refresh (1–3 s). For a page you watch while price is inside your level, that lag makes every number stale. `src/flow/live_server.py` serves a static page once and pushes state over a WebSocket at 5 Hz instead; the Streamlit dashboard keeps the post-hoc analysis, where lag does not matter. |
+| 2026-09-22 | **`pkill -f <pattern>` matches the shell running it.** A command whose own text contains the pattern kills its own shell mid-script — silently, so a heredoc later in the same command never runs and the file it was writing simply does not appear. Use a more specific pattern, split the string, or match on pid. |
 | 2026-09-21 | **`ParquetStore` cannot store depth — it deduplicates on `timestamp` alone.** `storage.py` `save()` does `drop_duplicates(subset=["timestamp"])`, which is right for OHLCV and flow bars (one row per bar) and catastrophic for depth, where every sample writes dozens of rows sharing one timestamp. Routing depth through it keeps ONE price level per sample and silently discards the rest; the resulting heatmap looks plausible and is almost entirely missing. `depth_recorder.DepthStore` exists solely to dedupe on the composite key `(timestamp, side, price)`. |
 | 2026-09-21 | **A desynced order book does not fail loudly — it drifts.** Binance depth streams send diffs, not snapshots, so a single missed update leaves the book permanently wrong while it keeps answering queries normally. `OrderBookState` checks contiguity on every event (spot: `U <= lastUpdateId+1`; USD-M futures: `pu == lastUpdateId`), flips to DESYNCED on a gap, and then returns `None` from `snapshot()` until it is re-bootstrapped from REST. Refusing to serve is the point: a stale book is worse than no book. A reconnect also invalidates every book, so `binance_ws.start()` resets and re-bootstraps rather than resuming. |
 | 2026-09-21 | **Heatmap price bins must align to the instrument's tick size.** Equal-width bins that do not divide the tick put two price levels in some rows and one in others, which renders as moiré banding that reads like real liquidity structure. `to_heatmap_grid` infers the tick (modal gap between adjacent distinct prices) and buckets on it, falling back to equal-width bins only when the price range is too wide to fit the row ceiling — and it reports which one it used. |

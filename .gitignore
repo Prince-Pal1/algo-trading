@@ -16,6 +16,7 @@ build/
 
 # Config with secrets
 config/exchanges.toml
+config/levels.toml
 
 # Environment files
 .env

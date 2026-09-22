@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Flow Monitor</title>
+<style>
+  :root{
+    --bg:#1a1a19; --card:#232322; --line:#383835;
+    --ink:#fff; --ink2:#c3c2b7; --ink3:#8a8980;
+    --for:#3987e5; --against:#e66767; --ok:#199e70; --warn:#c98500;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+  header{display:flex;align-items:center;gap:24px;flex-wrap:wrap;
+         padding:14px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;
+         background:var(--bg);z-index:5}
+  .sym{font-size:20px;font-weight:700;letter-spacing:.5px}
+  .stat{display:flex;flex-direction:column;gap:2px}
+  .stat .k{font-size:10px;text-transform:uppercase;letter-spacing:.9px;color:var(--ink3)}
+  .stat .v{font-size:18px;font-variant-numeric:tabular-nums}
+  .lag .v{font-weight:700;padding:1px 8px;border-radius:4px}
+  .lag.good .v{background:rgba(25,158,112,.18);color:#4cd4a0}
+  .lag.warn .v{background:rgba(201,133,0,.2);color:#e0a52e}
+  .lag.bad  .v{background:rgba(230,103,103,.2);color:var(--against)}
+  main{padding:18px 20px;display:grid;gap:14px;
+       grid-template-columns:repeat(auto-fill,minmax(420px,1fr))}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .card.eval{border-color:var(--for);box-shadow:0 0 0 1px rgba(57,135,229,.35)}
+  .card.conf{border-color:var(--ok);box-shadow:0 0 0 1px rgba(25,158,112,.4)}
+  .card.inval{border-color:var(--against);opacity:.75}
+  .ctop{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+  .lvl{font-size:17px;font-weight:700;font-variant-numeric:tabular-nums}
+  .badge{font-size:10px;letter-spacing:1px;padding:3px 8px;border-radius:4px;
+         background:#2e2e2c;color:var(--ink2);text-transform:uppercase}
+  .badge.eval{background:rgba(57,135,229,.2);color:#7fb4f0}
+  .badge.conf{background:rgba(25,158,112,.2);color:#4cd4a0}
+  .badge.inval{background:rgba(230,103,103,.2);color:var(--against)}
+  .note{color:var(--ink3);font-size:12px;margin:4px 0 10px}
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:10px 0}
+  .grid div{background:#1e1e1d;border-radius:6px;padding:6px 8px}
+  .grid .k{font-size:9px;text-transform:uppercase;letter-spacing:.8px;color:var(--ink3)}
+  .grid .v{font-size:14px;font-variant-numeric:tabular-nums}
+  .bar{height:8px;background:#1e1e1d;border-radius:4px;overflow:hidden;margin:10px 0 4px;
+       position:relative}
+  .bar i{display:block;height:100%;background:var(--for)}
+  .bar .th{position:absolute;top:-3px;width:2px;height:14px;background:var(--ink2)}
+  .scorerow{display:flex;justify-content:space-between;font-size:11px;color:var(--ink3)}
+  ul{list-style:none;margin:8px 0 0;padding:0}
+  li{padding:3px 0 3px 14px;position:relative;font-size:12px;color:var(--ink2)}
+  li:before{position:absolute;left:0;font-weight:700}
+  li.f:before{content:"+";color:var(--for)} li.a:before{content:"\2212";color:var(--against)}
+  .lab{font-size:10px;letter-spacing:1px;color:var(--ink3);text-transform:uppercase;margin-top:10px}
+  .thin{color:var(--warn);font-size:11px;margin-top:8px}
+  .feed{padding:0 20px 24px}
+  .feed table{width:100%;border-collapse:collapse;font-size:12px}
+  .feed th{text-align:left;color:var(--ink3);font-weight:400;font-size:10px;
+           text-transform:letter-spacing:1px;padding:6px 8px;border-bottom:1px solid var(--line)}
+  .feed td{padding:6px 8px;border-bottom:1px solid #2a2a28;font-variant-numeric:tabular-nums}
+  .empty{color:var(--ink3);padding:40px 20px;text-align:center}
+  .adv{padding:10px 20px;color:var(--ink3);font-size:11px;border-top:1px solid var(--line)}
+</style></head><body>
+<header>
+  <div class="sym" id="sym">—</div>
+  <div class="stat"><span class="k">price</span><span class="v" id="px">—</span></div>
+  <div class="stat lag" id="lagbox"><span class="k">lag</span><span class="v" id="lag">—</span></div>
+  <div class="stat"><span class="k">ticks</span><span class="v" id="ticks">0</span></div>
+  <div class="stat"><span class="k">baseline range</span><span class="v" id="base">—</span></div>
+  <div class="stat"><span class="k">link</span><span class="v" id="conn">connecting</span></div>
+</header>
+<main id="cards"><div class="empty">waiting for data…</div></main>
+<div class="feed">
+  <div class="lab">signals this session</div>
+  <table><thead><tr><th>time</th><th>level</th><th>side</th><th>price</th>
+  <th>score</th><th>invalidation</th></tr></thead><tbody id="sigs"></tbody></table>
+</div>
+<div class="adv">Advisory only — this never places an order. Evidence is shown for and against;
+read both before acting.</div>
+<script>
+const $=id=>document.getElementById(id);
+const fmt=(v,d=2)=>v==null?"—":Number(v).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
+const hhmmss=ms=>new Date(ms).toISOString().slice(11,19);
+let signals=[];
+
+function lagClass(ms){ if(ms==null)return"";return ms<500?"good":ms<2000?"warn":"bad"; }
+
+function card(l){
+  const st=l.state, cls=st==="EVALUATING"?"eval":st==="CONFIRMED"?"conf":st==="INVALIDATED"?"inval":"";
+  const score=l.score, pct=score==null?0:Math.round(score*100);
+  const thPct=Math.round((l.threshold||0.62)*100);
+  // Metrics stay visible after resolution — the numbers behind a
+  // confirmation matter most in the moments right after it fires.
+  const inZone=st==="EVALUATING"||st==="CONFIRMED"||st==="INVALIDATED";
+  const dist=l.distance==null?"—":(l.distance===0?"IN ZONE":fmt(l.distance,2));
+  return `<div class="card ${cls}">
+    <div class="ctop">
+      <span class="lvl">${fmt(l.price,2)} <span style="color:var(--ink3);font-size:12px">
+        ${fmt(l.low,2)}–${fmt(l.high,2)}</span></span>
+      <span class="badge ${cls}">${st}</span>
+    </div>
+    <div class="note">${l.side.toUpperCase()} · ${l.note||""} · test #${l.test_count} · ${dist}</div>
+    ${score!=null?`<div class="bar"><i style="width:${pct}%"></i><span class="th" style="left:${thPct}%"></span></div>
+      <div class="scorerow"><span>score ${fmt(score,3)}</span><span>threshold ${fmt(l.threshold,2)}</span></div>`:""}
+    ${inZone?`<div class="grid">
+      <div><div class="k">dwell</div><div class="v">${Math.round((l.dwell_ms||0)/1000)}s</div></div>
+      <div><div class="k">delta</div><div class="v" style="color:${l.delta<0?'var(--against)':'var(--for)'}">${fmt(l.delta,1)}</div></div>
+      <div><div class="k">absorption</div><div class="v">${fmt(l.absorption,2)}</div></div>
+      <div><div class="k">range</div><div class="v">${fmt(l.range_ratio,2)}x</div></div>
+    </div>`:""}
+    ${!l.sufficient&&inZone?`<div class="thin">thin — ${l.trade_count} trades, not enough to act on</div>`:""}
+    ${l.supporting?.length?`<div class="lab">for</div><ul>${l.supporting.map(i=>`<li class="f">${i.detail}</li>`).join("")}</ul>`:""}
+    ${l.opposing?.length?`<div class="lab">against</div><ul>${l.opposing.map(i=>`<li class="a">${i.detail}</li>`).join("")}</ul>`:""}
+  </div>`;
+}
+
+function render(s){
+  $("sym").textContent=s.symbol;
+  $("ticks").textContent=(s.tick_count||0).toLocaleString();
+  $("base").textContent=fmt(s.baseline_range,2);
+  const lvls=s.levels||[];
+  const px=lvls.length?lvls[0].last_price:null;
+  $("px").textContent=fmt(px,2);
+  const lag=s.lag_ms;
+  $("lag").textContent=lag==null?"—":lag+"ms";
+  $("lagbox").className="stat lag "+lagClass(lag);
+  const sorted=[...lvls].sort((a,b)=>(a.distance??1e18)-(b.distance??1e18));
+  $("cards").innerHTML=sorted.length?sorted.map(card).join(""):
+    `<div class="empty">no active levels — add them to config/levels.toml</div>`;
+  if(s.new_signals?.length){ signals=[...s.new_signals,...signals].slice(0,50); }
+  $("sigs").innerHTML=signals.map(x=>`<tr><td>${hhmmss(x.timestamp)}</td><td>${x.level_id}</td>
+    <td style="color:${x.side==="long"?"var(--for)":"var(--against)"}">${x.side.toUpperCase()}</td>
+    <td>${fmt(x.price,2)}</td><td>${fmt(x.score,3)}</td><td>${fmt(x.invalidation,2)}</td></tr>`).join("");
+}
+
+function connect(){
+  const ws=new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen =()=>{$("conn").textContent="live";$("conn").style.color="#4cd4a0";};
+  ws.onclose=()=>{$("conn").textContent="reconnecting";$("conn").style.color="var(--against)";
+                  setTimeout(connect,1000);};
+  ws.onmessage=e=>{try{render(JSON.parse(e.data));}catch(err){console.error(err);}};
+}
+connect();
+</script></body></html>
