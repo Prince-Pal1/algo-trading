@@ -139,10 +139,12 @@
   <div class="pbody">
     <div class="addrow">
       <div class="fld"><label>price</label><input type="number" id="fPrice" step="any" placeholder="98000"></div>
-      <div class="fld"><label>width &plusmn;</label><input type="number" id="fWidth" step="any" placeholder="150"></div>
+      <div class="fld"><label>width</label><input type="number" id="fWidth" step="any" placeholder="150"></div>
       <div class="fld"><label>side</label>
         <select id="fSide"><option value="long">long (support)</option>
                            <option value="short">short (resistance)</option></select></div>
+      <div class="fld"><label>zone</label>
+        <div id="zonePreview" style="font-size:12px;color:var(--ink3);padding:6px 0">—</div></div>
       <div class="fld grow"><label>note — why you marked it</label>
         <input type="text" id="fNote" placeholder="prior day low + 4h demand"></div>
       <div class="fld"><label>&nbsp;</label><button class="primary" id="btnAdd">add level</button></div>
@@ -152,6 +154,10 @@
     </tr></thead><tbody id="ltbody"></tbody></table>
     <div class="msg" id="msg"></div>
     <div style="color:var(--ink3);font-size:11px;margin-top:10px">
+      <b>width</b> runs from the level into the side price penetrates: a <b>short</b> at 4000
+      width 100 is watched 4000–4100, a <b>long</b> at 4000 width 100 is watched 3900–4000. It is
+      also the risk — price leaving the far side is the level failing, and that price is the
+      invalidation published with every signal.<br>
       Edits write through to <span id="lpath">config/levels.toml</span> — the file stays the
       source of truth, so what you add here survives a restart. <b>marked</b> is when the level
       was first written down; it is preserved through edits, because a level you moved is still
@@ -281,7 +287,7 @@ function setEditing(id){
 function editLevel(l){
   setEditing(l.id);
   $("fPrice").value=l.price; $("fWidth").value=l.width;
-  $("fSide").value=l.side; $("fNote").value=l.note||"";
+  $("fSide").value=l.side; $("fNote").value=l.note||""; previewZone();
   $("panel").classList.add("open"); $("caret").innerHTML="&#9662;";
   $("fPrice").focus();
 }
@@ -303,7 +309,7 @@ function renderRegistry(reg){
   }
   tb.innerHTML=reg.map((l,i)=>`<tr class="${l.enabled&&!l.expired?"":"off"}">
     <td>${l.id}</td>
-    <td>${fmt(l.price,2)} <span style="color:var(--ink3)">${fmt(l.low??l.price-l.width,2)}–${fmt(l.high??l.price+l.width,2)}</span></td>
+    <td>${fmt(l.price,2)} <span style="color:var(--ink3)">${fmt(l.low,2)}–${fmt(l.high,2)}</span></td>
     <td style="color:${l.side==="long"?"var(--for)":"var(--against)"}">${l.side.toUpperCase()}</td>
     <td style="color:var(--ink2)">${l.note||""}</td>
     <td style="color:var(--ink3)">${l.first_seen_ms?hhmmss(l.first_seen_ms):"—"}${l.expired?" · expired":""}</td>
@@ -337,6 +343,21 @@ $("phead").onclick=()=>{
   const open=$("panel").classList.toggle("open");
   $("caret").innerHTML=open?"&#9662;":"&#9656;";
 };
+// The width runs one way, not both. Showing the resulting zone as it is typed
+// is cheaper than any label: a support at 4000 width 100 is 3900-4000, and a
+// resistance at 4000 width 100 is 4000-4100.
+function previewZone(){
+  const p=parseFloat($("fPrice").value), w=parseFloat($("fWidth").value);
+  const el=$("zonePreview");
+  if(!(p>0)||!(w>0)){ el.textContent="—"; return; }
+  const short=$("fSide").value==="short";
+  const lo=short?p:p-w, hi=short?p+w:p;
+  el.innerHTML=`<b style="color:var(--ink2)">${fmt(lo,2)} – ${fmt(hi,2)}</b>`;
+}
+["fPrice","fWidth","fSide"].forEach(id=>{
+  $(id).oninput=previewZone; $(id).onchange=previewZone;
+});
+
 $("btnAdd").onclick=addLevel;
 $("fNote").onkeydown=e=>{ if(e.key==="Enter") addLevel(); };
 $("setTh").onchange=()=>send({cmd:"config.set",threshold:parseFloat($("setTh").value)});

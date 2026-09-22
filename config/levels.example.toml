@@ -8,8 +8,12 @@
 # Fields:
 #   id      unique, stable across reloads (outcomes are keyed by it)
 #   symbol  must match the feed symbol exactly
-#   price   centre of the zone
-#   width   half-width in price units — zone is price ± width
+#   price   the level itself — the edge you are trading off
+#   width   how far PAST the level the zone runs, in price units:
+#             short 4000 width 100 -> watched 4000-4100 (price rallies into it)
+#             long  4000 width 100 -> watched 3900-4000 (price falls into it)
+#           It is also the risk: price leaving the far side fails the level,
+#           and that price is the invalidation published with every signal.
 #   side    "long"  = you expect this to hold as support
 #           "short" = you expect this to hold as resistance
 #   note    why you marked it. Recorded with every signal

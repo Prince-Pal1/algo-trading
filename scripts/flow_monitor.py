@@ -104,6 +104,11 @@ class FlowMonitor:
                 "symbol": lv.symbol,
                 "price": lv.price,
                 "width": lv.width,
+                # Sent, not re-derived in the page: the zone is directional and
+                # a second copy of that rule in JavaScript is a second place to
+                # get it wrong.
+                "low": lv.low,
+                "high": lv.high,
                 "side": lv.side.value,
                 "note": lv.note,
                 "enabled": lv.enabled,
@@ -253,14 +258,11 @@ class FlowMonitor:
         for lid, monitor in self.engine.monitors.items():
             prev = self._prev_states.get(lid)
             if monitor.state is ZoneState.EVALUATING and prev is not ZoneState.EVALUATING:
-                buffer = monitor.level.width * monitor.invalidation_mult
-                invalidation = (
-                    monitor.level.low - buffer
-                    if monitor.level.side.value == "long"
-                    else monitor.level.high + buffer
-                )
+                # Same definition the state machine and every signal use —
+                # a baseline scored against a different stop is not a baseline.
                 self.signal_log.record_baseline(
-                    monitor.level, tick.price, tick.timestamp, invalidation
+                    monitor.level, tick.price, tick.timestamp,
+                    monitor.invalidation_price(),
                 )
             self._prev_states[lid] = monitor.state
 

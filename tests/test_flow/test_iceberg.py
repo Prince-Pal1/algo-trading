@@ -220,7 +220,7 @@ class TestEngineTickInference:
     def test_tick_reaches_the_accumulator(self):
         eng = self._engine()
         eng.on_book(_book(98000.0, 5.0))
-        eng.on_tick(Tick("BTCUSDT", 98050.0, 1.0, TS, True), local_ms=TS)
+        eng.on_tick(Tick("BTCUSDT", 97950.0, 1.0, TS, True), local_ms=TS)
         assert eng.monitors["s"]._acc.tick_size == pytest.approx(TICK)
 
     def test_tick_in_engine_snapshot(self):

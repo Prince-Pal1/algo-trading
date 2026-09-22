@@ -38,7 +38,7 @@ def _monitor(**kw) -> ZoneMonitor:
 
 def _absorb(mon: ZoneMonitor, n: int, start_ms: int, price_fn=None) -> list:
     """Feed absorbed selling: one-sided sells, price pinned."""
-    price_fn = price_fn or (lambda i: 98000.0 + (i % 3))
+    price_fn = price_fn or (lambda i: 97990.0 + (i % 3))
     out = []
     for i in range(n):
         sig = mon.on_tick(_tick(price_fn(i), True, start_ms + i * 100), CTX)
@@ -63,17 +63,17 @@ class TestTransitions:
 
     def test_entering_zone_evaluates(self):
         mon = _monitor()
-        mon.on_tick(_tick(98050.0), CTX)
+        mon.on_tick(_tick(97950.0), CTX)
         assert mon.state is ZoneState.EVALUATING
 
     def test_entering_increments_test_count(self):
         mon = _monitor()
-        mon.on_tick(_tick(98050.0), CTX)
+        mon.on_tick(_tick(97950.0), CTX)
         assert mon.test_count == 1
 
     def test_leaving_area_returns_to_idle(self):
         mon = _monitor()
-        mon.on_tick(_tick(98050.0, ts=TS), CTX)
+        mon.on_tick(_tick(97950.0, ts=TS), CTX)
         mon.on_tick(_tick(99500.0, ts=TS + 1000), CTX)
         assert mon.state is ZoneState.IDLE
 
@@ -85,9 +85,9 @@ class TestTransitions:
 
     def test_test_count_survives_leaving_and_returning(self):
         mon = _monitor()
-        mon.on_tick(_tick(98050.0, ts=TS), CTX)
+        mon.on_tick(_tick(97950.0, ts=TS), CTX)
         mon.on_tick(_tick(99500.0, ts=TS + 1000), CTX)
-        mon.on_tick(_tick(98050.0, ts=TS + 2000), CTX)
+        mon.on_tick(_tick(97950.0, ts=TS + 2000), CTX)
         assert mon.test_count == 2
 
 
@@ -119,10 +119,33 @@ class TestConfirmation:
         assert sig.level_id == "sup"
         assert sig.side is LevelSide.LONG
 
-    def test_invalidation_below_support(self):
+    def test_invalidation_is_the_far_edge_of_the_zone(self):
+        """At mult=1 the published stop IS the edge price must not cross.
+
+        It used to be computed as `level.low - width`, a full width BEYOND the
+        zone — so the engine killed a level at one price while every signal
+        published a stop at another, and the outcome log scored wins and losses
+        against the wider one.
+        """
         mon = _monitor(min_dwell_ms=5_000, invalidation_mult=1.0)
         sig = _absorb(mon, 200, TS)[0]
-        assert sig.invalidation < mon.level.low
+        assert sig.invalidation == mon.level.low == 97_900.0
+        assert sig.invalidation == mon.invalidation_price()
+
+    def test_invalidation_matches_where_the_engine_kills_it(self):
+        """The one number, from both ends: what a signal promises and what the
+        state machine does must not be two different prices."""
+        mon = _monitor(min_dwell_ms=0, invalidation_mult=1.0, threshold=2.0)
+        stop = mon.invalidation_price()
+        ts, price, died = TS, 97_995.0, None
+        while died is None and price > 97_500.0:
+            ts += 100
+            mon.on_tick(_tick(price, True, ts), CTX)
+            if mon.state is ZoneState.INVALIDATED:
+                died = price
+            price -= 1.0
+        assert died is not None
+        assert stop - 2.0 <= died <= stop, f"stop {stop}, died at {died}"
 
     def test_signal_dict_serializable(self):
         import orjson
@@ -134,8 +157,8 @@ class TestConfirmation:
 class TestInvalidation:
     def test_push_through_invalidates(self):
         mon = _monitor(invalidation_mult=1.0)
-        mon.on_tick(_tick(98050.0, ts=TS), CTX)
-        mon.on_tick(_tick(97850.0, ts=TS + 1000), CTX)   # 150 below level
+        mon.on_tick(_tick(97950.0, ts=TS), CTX)
+        mon.on_tick(_tick(97850.0, ts=TS + 1000), CTX)   # past 97,900
         assert mon.state is ZoneState.INVALIDATED
 
     def test_invalidation_beats_confirmation(self):
@@ -149,9 +172,10 @@ class TestInvalidation:
         assert mon.state is ZoneState.INVALIDATED
 
     def test_resistance_invalidates_upward(self):
+        """A resistance zone sits ABOVE the level: 98,000-98,100."""
         level = Level("res", "BTCUSDT", 98000.0, 100.0, LevelSide.SHORT)
         mon = ZoneMonitor(level=level, invalidation_mult=1.0, require_turn=False)
-        mon.on_tick(_tick(97950.0, ts=TS), CTX)
+        mon.on_tick(_tick(98050.0, ts=TS), CTX)
         mon.on_tick(_tick(98250.0, ts=TS + 1000), CTX)
         assert mon.state is ZoneState.INVALIDATED
 
@@ -161,13 +185,13 @@ class TestCooldown:
         """A dashboard must be able to show 'confirmed N minutes ago'."""
         mon = _monitor(min_dwell_ms=5_000, cooldown_ms=600_000)
         _absorb(mon, 200, TS)
-        mon.on_tick(_tick(98050.0, ts=TS + 30_000), CTX)
+        mon.on_tick(_tick(97950.0, ts=TS + 30_000), CTX)
         assert mon.state is ZoneState.CONFIRMED
 
     def test_cooldown_blocks_new_signals(self):
         mon = _monitor(min_dwell_ms=5_000, cooldown_ms=600_000)
         _absorb(mon, 200, TS)
-        mon.on_tick(_tick(98050.0, ts=TS + 30_000), CTX)
+        mon.on_tick(_tick(97950.0, ts=TS + 30_000), CTX)
         assert _absorb(mon, 200, TS + 40_000) == []
 
     def test_cooldown_expires_to_idle(self):
@@ -217,7 +241,7 @@ class TestFlowEngine:
 
     def test_sync_preserves_state_on_edit(self):
         eng = self._engine()
-        eng.on_tick(_tick(98050.0), local_ms=TS)
+        eng.on_tick(_tick(97950.0), local_ms=TS)
         assert eng.monitors["sup"].state is ZoneState.EVALUATING
         eng.registry.levels["sup"].note = "edited"
         eng.sync_levels(now_ms=TS)
@@ -226,13 +250,13 @@ class TestFlowEngine:
     def test_routes_to_all_monitors(self):
         second = Level("sup2", "BTCUSDT", 97000.0, 100.0, LevelSide.LONG)
         eng = self._engine(_support(), second)
-        eng.on_tick(_tick(98050.0), local_ms=TS)
+        eng.on_tick(_tick(97950.0), local_ms=TS)
         assert eng.monitors["sup"].state is ZoneState.EVALUATING
         assert eng.monitors["sup2"].state is ZoneState.IDLE
 
     def test_lag_measured(self):
         eng = self._engine()
-        eng.on_tick(_tick(98050.0, ts=TS), local_ms=TS + 250)
+        eng.on_tick(_tick(97950.0, ts=TS), local_ms=TS + 250)
         assert eng._lag_ms == 250
 
     def test_baseline_range_from_history(self):
@@ -250,7 +274,7 @@ class TestFlowEngine:
     def test_engine_snapshot_serializable(self):
         import orjson
         eng = self._engine()
-        eng.on_tick(_tick(98050.0, ts=TS), local_ms=TS + 10)
+        eng.on_tick(_tick(97950.0, ts=TS), local_ms=TS + 10)
         snap = orjson.loads(orjson.dumps(eng.snapshot(local_ms=TS + 10)))
         assert snap["symbol"] == "BTCUSDT"
         assert snap["lag_ms"] == 10
@@ -293,19 +317,29 @@ class TestSequenceDetection:
         assert self._run(mon, absorb_n=300, turn_n=0)
 
     def test_breaking_sets_failing_phase(self):
+        """Selling through a support zone, most of the way to invalidation."""
         mon = ZoneMonitor(level=_support(), min_dwell_ms=5_000, require_turn=True)
         ts = TS
-        for i in range(200):
-            mon.on_tick(_tick(98080.0 - i * 0.8, True, ts), CTX)
+        for i in range(80):
+            mon.on_tick(_tick(97995.0 - i * 1.0, True, ts), CTX)
             ts += 120
         assert mon.phase is ZonePhase.FAILING
+
+    def test_failing_needs_more_than_a_dip(self):
+        """A shallow probe into the zone is not the level failing."""
+        mon = ZoneMonitor(level=_support(), min_dwell_ms=5_000, require_turn=True)
+        ts = TS
+        for i in range(80):
+            mon.on_tick(_tick(97995.0 - (i % 20) * 1.0, True, ts), CTX)
+            ts += 120
+        assert mon.phase is not ZonePhase.FAILING
 
     def test_phase_resets_on_new_test(self):
         mon = ZoneMonitor(level=_support(), min_dwell_ms=5_000, require_turn=True)
         self._run(mon, absorb_n=300, turn_n=0)
         assert mon.phase is ZonePhase.ABSORBING
         mon.on_tick(_tick(99500.0, True, TS + 500_000), CTX)   # leave
-        mon.on_tick(_tick(98050.0, True, TS + 501_000), CTX)   # return
+        mon.on_tick(_tick(97950.0, True, TS + 501_000), CTX)   # return
         assert mon.phase is ZonePhase.WATCHING
 
     def test_phase_in_snapshot(self):

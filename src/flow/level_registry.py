@@ -46,7 +46,7 @@ class Level:
     id: str
     symbol: str
     price: float
-    width: float
+    width: float          # how far PAST the level the zone runs — see low/high
     side: LevelSide
     note: str = ""
     expires_ms: int | None = None
@@ -65,16 +65,25 @@ class Level:
         if self.width >= self.price:
             raise ValueError(
                 f"level {self.id}: width {self.width} >= price {self.price} — "
-                "width is a half-width in price units, not a percentage"
+                "width is a distance in price units, not a percentage"
             )
+
+    # The zone extends from the level INTO the side price penetrates, not
+    # symmetrically around it. A resistance at 4000 with width 100 is watched
+    # from 4000 to 4100 — price rallies into it and pokes above; a support at
+    # 4000 is watched from 3900 to 4000. The level itself is the edge you are
+    # trading off, and the width is how far through it you will tolerate.
+    #
+    # This also makes invalidation fall out cleanly: leaving the zone on the
+    # far side IS the level failing, so `width` is both the zone and the risk.
 
     @property
     def low(self) -> float:
-        return self.price - self.width
+        return self.price if self.side is LevelSide.SHORT else self.price - self.width
 
     @property
     def high(self) -> float:
-        return self.price + self.width
+        return self.price + self.width if self.side is LevelSide.SHORT else self.price
 
     def contains(self, price: float) -> bool:
         return self.low <= price <= self.high
@@ -231,8 +240,11 @@ _FILE_HEADER = """\
 # what `first_seen` records. It is preserved across edits and restarts; do not
 # hand-edit it unless you mean to change what the outcome log will believe.
 #
-#   price    centre of the zone        width  half-width (zone is price +/- width)
-#   side     long = support, short = resistance
+#   price    the level itself — the edge you are trading off
+#   width    how far PAST the level the zone runs. A short at 4000 width 100 is
+#            watched 4000-4100; a long at 4000 width 100 is watched 3900-4000.
+#            It is also the risk: leaving the zone on the far side fails the level.
+#   side     long = support (zone below), short = resistance (zone above)
 #   note     why you marked it — recorded with every signal
 #   expires  optional RFC3339; the level disarms itself after this
 #   enabled  false parks a level without deleting it

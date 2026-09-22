@@ -218,7 +218,7 @@ class TestCommands:
         is the one move that breaks the forward-test guarantee."""
         from src.utils.types import Tick
         mon = _monitor(tmp_path, monkeypatch)
-        mon.engine.on_tick(Tick("BTCUSDT", 98_010.0, 1.0, TS, False))
+        mon.engine.on_tick(Tick("BTCUSDT", 97_950.0, 1.0, TS, False))
         result = mon._on_command({"cmd": "level.upsert", "level": {
             "price": 98_000.0, "width": 150.0, "side": "long"}})
         assert result["ok"] is True

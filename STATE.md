@@ -99,6 +99,21 @@ The last two are one lesson: a form that edits a subset of fields must inherit t
 
 **242 flow tests pass** (35 new). `--depth` stays a launch flag, since toggling it means resubscribing the feed mid-run; the panel says so rather than offering a control that lies.
 
+**Directional zone geometry (same session, after the first live run).** Prince: "if its 4000 short 100-width, then the range will be 4000-4100; if its 4000 long 100-width then the range will be 3900-4000."
+
+He is right, and the old centred zone (`price ± width`) was wrong in a way worth naming: half of a support's zone sat ABOVE the level, territory price has not tested yet. The zone now runs from the level INTO the side price penetrates. The level is the edge you trade off; the width is how far through it you tolerate — and therefore the risk.
+
+That last part is the payoff: `width` is now one number meaning one thing. Leaving the far side of the zone IS the level failing, so the zone edge and the invalidation price are the same price.
+
+Which exposed that they had not been:
+
+- **The published stop was twice the engine's own invalidation.** `_build_signal` used `level.low - width * mult` — for a support, `price - 2*width` — while `on_tick` killed the level at `adverse_excursion > width * mult`, i.e. `price - width`. Every signal advertised a stop twice as far as the engine's, and `SignalLog` scored outcomes against the wider one, inflating the logged win rate of signals *and* baselines. One definition now, `invalidation_price()`, with a test that drives price down until the engine kills it and asserts the two agree.
+- **`ZonePhase.FAILING` had become unreachable.** It was gated on `range_ratio > 1.2` — in-zone travel exceeding 1.2× the 15-minute baseline range. With a directional zone the in-zone range cannot exceed the width, because leaving invalidates: a 200-wide level against a 350-wide baseline could never reach 1.2 however hard it broke. Now gated on `adverse_excursion >= 0.6 × width`. The general lesson is worth keeping: a threshold in units of one thing, gating a quantity bounded by another, is a silent no-op waiting to happen.
+
+**Scores are not comparable across this change.** The zone halved in height, which caps `range_ratio`, which raises absorption (`|delta_ratio| × (1 − min(1, range_ratio))`). Anything collected in shadow mode before this is calibrated to different geometry and should not be pooled with what comes after.
+
+**250 flow tests pass** — 18 rewritten rather than patched, since they encoded the old geometry as intent. The page now previews the resulting zone live as you type price/width/side, which is cheaper than any label for making the direction unambiguous.
+
 **Next:** Phase 2 — run it in shadow mode on BTC, ignore everything it says, collect outcomes. Whether level memory helps is a Phase 3 question against the logged null-hypothesis baselines, which is precisely why it ships off.
 
 ## Session 31 — order-flow / CVD research tooling (2026-09-21)

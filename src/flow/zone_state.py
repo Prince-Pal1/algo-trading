@@ -66,6 +66,12 @@ from src.utils.types import OrderBookSnapshot, Tick
 
 log = get_logger("zone_state")
 
+# How far through your zone price must travel against you, as a fraction of the
+# width, before the phase reads FAILING. Below 1.0 by definition: at 1.0 the
+# level is already invalidated, so a FAILING phase that only appeared then
+# would never be visible.
+FAILING_EXCURSION_FRAC = 0.6
+
 
 class ZoneState(str, enum.Enum):
     IDLE = "IDLE"                  # price far away, nothing to do
@@ -317,14 +323,29 @@ class ZoneMonitor:
         self._report = None
         self._signalled_this_test = False
 
-    def _invalidation_price(self) -> float:
-        """Where the level is considered gone. Also published on every signal."""
+    def invalidation_price(self) -> float:
+        """Where the level is considered gone — the ONE definition.
+
+        It is measured from the level itself, matching the adverse-excursion
+        test in `on_tick` exactly: `adverse > width * invalidation_mult` means
+        price has travelled that far past the level, which is this price.
+
+        It used to be computed as `level.low - width * mult`, which for a
+        support is `level.price - 2 * width` — twice as far as the state
+        machine's own invalidation. So a level was declared dead at one price
+        while every signal published a stop at another, and the outcome log
+        scored wins and losses against the wider one. Two definitions of the
+        same number is one too many.
+        """
         buffer = self.level.width * self.invalidation_mult
         return (
-            self.level.low - buffer
+            self.level.price - buffer
             if self.level.side is LevelSide.LONG
-            else self.level.high + buffer
+            else self.level.price + buffer
         )
+
+    def _invalidation_price(self) -> float:   # back-compat alias
+        return self.invalidation_price()
 
     def _breached(self, price: float) -> bool:
         invalidation = self._invalidation_price()
@@ -359,9 +380,20 @@ class ZoneMonitor:
             if is_support
             else features.late_delta_ratio < -self.turn_threshold
         )
+        # "Failing" is measured against YOUR zone, not against the market's
+        # recent range. The old gate was `range_ratio > 1.2` — in-zone travel
+        # exceeding 1.2x the 15-minute baseline range — which the directional
+        # zone made nearly unreachable: the zone is only `width` tall, and
+        # price leaving it invalidates, so the in-zone range can never exceed
+        # the width. A 200-wide level against a 350-wide baseline could not
+        # reach 1.2 however hard it broke.
+        #
+        # Travel most of the way through your own zone, against you, with
+        # one-sided aggression, IS the level going — and it says so in the
+        # units you set.
         breaking = (
             (features.delta_ratio < -0.30 if is_support else features.delta_ratio > 0.30)
-            and features.range_ratio > 1.2
+            and features.adverse_excursion >= FAILING_EXCURSION_FRAC * self.level.width
         )
 
         if breaking:

@@ -184,9 +184,9 @@ class TestOutcomeDetection:
         return ts
 
     def _hold_it(self, mon: ZoneMonitor, start: int) -> int:
-        """Enter the zone, then leave upward past the approach band."""
+        """Enter the zone (97,950-98,000), then leave upward past the band."""
         ts = start
-        for price in (98_020.0, 98_030.0, 98_120.0, 98_260.0, 98_400.0):
+        for price in (97_980.0, 97_990.0, 98_060.0, 98_160.0, 98_400.0):
             ts += 1000
             mon.on_tick(_tick(price, ts), CTX)
         return ts
@@ -212,7 +212,7 @@ class TestOutcomeDetection:
         mon = ZoneMonitor(level=level, memory=mem, require_turn=False,
                           min_dwell_ms=0)
         ts = TS
-        for price in (97_980.0, 97_970.0, 97_880.0, 97_740.0, 97_600.0):
+        for price in (98_020.0, 98_030.0, 97_940.0, 97_840.0, 97_600.0):
             ts += 1000
             mon.on_tick(_tick(price, ts), CTX)
         assert mem.counts("res", ts) == (1, 0)

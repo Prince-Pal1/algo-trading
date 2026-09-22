@@ -41,7 +41,7 @@ class TestLevelValidation:
     def test_valid_level(self):
         lv = Level("l1", "BTCUSDT", 98000.0, 100.0, LevelSide.LONG)
         assert lv.low == 97900.0
-        assert lv.high == 98100.0
+        assert lv.high == 98000.0
 
     def test_empty_id_rejected(self):
         with pytest.raises(ValueError, match="id must be non-empty"):
@@ -61,33 +61,62 @@ class TestLevelValidation:
 
     def test_width_larger_than_price_rejected(self):
         """Catches someone passing a percentage where price units are expected."""
-        with pytest.raises(ValueError, match="width is a half-width"):
+        with pytest.raises(ValueError, match="width is a distance"):
             Level("l1", "BTCUSDT", 100.0, 100.0, LevelSide.LONG)
 
 
 class TestZoneGeometry:
+    """The zone runs from the level INTO the side price penetrates.
+
+    A support at 98,000 with width 100 is watched 97,900-98,000; a resistance
+    at 98,000 with width 100 is watched 98,000-98,100. The level is the edge
+    you trade off, and the width is how far through it you will tolerate —
+    which is also the risk, since leaving the far side fails the level.
+    """
+
     def _lv(self):
         return Level("l1", "BTCUSDT", 98000.0, 100.0, LevelSide.LONG)
 
+    def _res(self):
+        return Level("l2", "BTCUSDT", 98000.0, 100.0, LevelSide.SHORT)
+
+    def test_support_zone_sits_below_the_level(self):
+        lv = self._lv()
+        assert (lv.low, lv.high) == (97900.0, 98000.0)
+
+    def test_resistance_zone_sits_above_the_level(self):
+        res = self._res()
+        assert (res.low, res.high) == (98000.0, 98100.0)
+
     def test_contains_inside(self):
-        assert self._lv().contains(98050.0) is True
+        assert self._lv().contains(97950.0) is True
+        assert self._res().contains(98050.0) is True
 
     def test_contains_on_edge(self):
         lv = self._lv()
         assert lv.contains(97900.0) is True
-        assert lv.contains(98100.0) is True
+        assert lv.contains(98000.0) is True
+
+    def test_the_other_side_of_the_level_is_outside(self):
+        """Price approaching from above has not tested a support yet."""
+        assert self._lv().contains(98050.0) is False
+        assert self._res().contains(97950.0) is False
 
     def test_contains_outside(self):
         assert self._lv().contains(97800.0) is False
 
     def test_distance_zero_inside(self):
-        assert self._lv().distance(98000.0) == 0.0
+        assert self._lv().distance(97950.0) == 0.0
 
     def test_distance_below(self):
         assert self._lv().distance(97800.0) == pytest.approx(100.0)
 
     def test_distance_above(self):
-        assert self._lv().distance(98300.0) == pytest.approx(200.0)
+        assert self._lv().distance(98300.0) == pytest.approx(300.0)
+
+    def test_width_is_the_whole_zone_not_half(self):
+        lv = self._lv()
+        assert lv.high - lv.low == pytest.approx(lv.width)
 
 
 class TestExpiry:
