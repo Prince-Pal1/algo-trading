@@ -11,7 +11,11 @@ from __future__ import annotations
 import pytest
 
 from src.flow.evidence import DEFAULT_THRESHOLD, score_zone
-from src.flow.features import MIN_TRADES_FOR_EVIDENCE, ZoneAccumulator
+from src.flow.features import (
+    LARGE_PRINT_MULT,
+    MIN_TRADES_FOR_EVIDENCE,
+    ZoneAccumulator,
+)
 from src.flow.level_registry import Level, LevelSide
 from src.utils.types import OrderBookLevel, OrderBookSnapshot, Tick
 
@@ -306,3 +310,172 @@ class TestScoring:
     def test_summary_readable(self):
         acc = _fill(ZoneAccumulator(98000.0, True, 100.0), 60, lambda i: 98000.0, True)
         assert "score" in score_zone(_support(), acc.features()).summary()
+
+
+def _acc(**kw) -> ZoneAccumulator:
+    base = dict(level_price=98000.0, is_support=True, baseline_range=100.0,
+                baseline_trade_size=1.0, zone_width=100.0)
+    base.update(kw)
+    return ZoneAccumulator(**base)
+
+
+class TestTapeVelocity:
+    def test_rate_measured(self):
+        acc = _acc(late_window_ms=10_000)
+        ts = TS
+        for _ in range(50):                       # 5/sec for 10s
+            acc.on_tick(_tick(98000.0, 1.0, True, ts))
+            ts += 200
+        assert acc.features().trades_per_sec == pytest.approx(5.0, rel=0.2)
+
+    def test_acceleration_detected(self):
+        acc = _acc(late_window_ms=10_000)
+        ts = TS
+        for _ in range(10):                       # slow
+            acc.on_tick(_tick(98000.0, 1.0, True, ts))
+            ts += 1000
+        for _ in range(80):                       # then fast
+            acc.on_tick(_tick(98000.0, 1.0, True, ts))
+            ts += 125
+        assert acc.features().velocity_ratio > 3.0
+
+    def test_steady_tape_is_not_accelerating(self):
+        acc = _acc(late_window_ms=10_000)
+        ts = TS
+        for _ in range(100):
+            acc.on_tick(_tick(98000.0, 1.0, True, ts))
+            ts += 200
+        assert acc.features().velocity_ratio == pytest.approx(1.0, abs=0.3)
+
+    def test_too_few_trades_is_neutral(self):
+        acc = _acc()
+        acc.on_tick(_tick(98000.0, 1.0, True, TS))
+        f = acc.features()
+        assert f.trades_per_sec == 0.0
+        assert f.velocity_ratio == 1.0
+
+
+class TestLargePrints:
+    def test_outsized_prints_counted(self):
+        acc = _acc(baseline_trade_size=1.0)
+        for i in range(20):
+            acc.on_tick(_tick(98000.0, 1.0, True, TS + i * 100))
+        for i in range(3):
+            acc.on_tick(_tick(98000.0, LARGE_PRINT_MULT + 1.0, True, TS + 5000 + i * 100))
+        f = acc.features()
+        assert f.large_print_count == 3
+        assert 0.0 < f.large_print_share < 1.0
+
+    def test_no_baseline_means_no_detection(self):
+        """Without a market norm there is nothing to call 'large'."""
+        acc = _acc(baseline_trade_size=0.0)
+        for i in range(20):
+            acc.on_tick(_tick(98000.0, 500.0, True, TS + i * 100))
+        assert acc.features().large_print_count == 0
+
+    def test_ordinary_prints_not_flagged(self):
+        acc = _acc(baseline_trade_size=1.0)
+        for i in range(30):
+            acc.on_tick(_tick(98000.0, 1.5, True, TS + i * 100))
+        assert acc.features().large_print_count == 0
+
+
+class TestProbesAndRetest:
+    def _probe_sequence(self, first_qty: float, second_qty: float) -> ZoneAccumulator:
+        acc = _acc()
+        ts = TS
+        for i in range(30):                       # probe 1 at the low
+            acc.on_tick(_tick(98000.0 - (i % 3), first_qty, True, ts))
+            ts += 100
+        for _ in range(20):                       # retrace away
+            acc.on_tick(_tick(98060.0, 1.0, False, ts))
+            ts += 100
+        for _ in range(20):                       # probe 2
+            acc.on_tick(_tick(97999.0, second_qty, True, ts))
+            ts += 100
+        return acc
+
+    def test_two_probes_counted(self):
+        assert self._probe_sequence(2.0, 0.5).features().probe_count == 2
+
+    def test_lower_volume_retest_flagged(self):
+        f = self._probe_sequence(4.0, 0.2).features()
+        assert f.retest_volume_ratio < 0.7
+        assert f.exhausted_retest is True
+
+    def test_heavier_retest_not_flagged(self):
+        f = self._probe_sequence(0.5, 4.0).features()
+        assert f.retest_volume_ratio > 1.3
+        assert f.exhausted_retest is False
+
+    def test_single_probe_has_no_ratio(self):
+        acc = _acc()
+        for i in range(30):
+            acc.on_tick(_tick(98000.0, 1.0, True, TS + i * 100))
+        f = acc.features()
+        assert f.probe_count == 1
+        assert f.retest_volume_ratio == 0.0
+        assert f.exhausted_retest is False
+
+    def test_continuous_push_is_one_probe(self):
+        """New lows in one sustained attack are one probe, not many."""
+        acc = _acc()
+        for i in range(40):
+            acc.on_tick(_tick(98000.0 - i * 0.5, 1.0, True, TS + i * 100))
+        assert acc.features().probe_count == 1
+
+    def test_open_probe_is_visible(self):
+        """A retest happening right now is what you want to see."""
+        acc = self._probe_sequence(4.0, 0.2)
+        assert acc.features().probe_count == 2   # second probe still open
+
+
+class TestNewEvidenceRules:
+    def test_exhausted_retest_counts_for(self):
+        acc = _acc()
+        ts = TS
+        for i in range(40):
+            acc.on_tick(_tick(98000.0 - (i % 3), 4.0, True, ts))
+            ts += 100
+        for _ in range(20):
+            acc.on_tick(_tick(98060.0, 1.0, False, ts))
+            ts += 100
+        for _ in range(20):
+            acc.on_tick(_tick(97999.0, 0.1, True, ts))
+            ts += 100
+        report = score_zone(_support(), acc.features())
+        assert "exhausted_retest" in [i.name for i in report.supporting]
+
+    def test_heavy_retest_counts_against(self):
+        acc = _acc()
+        ts = TS
+        for i in range(30):
+            acc.on_tick(_tick(98000.0 - (i % 3), 0.2, True, ts))
+            ts += 100
+        for _ in range(20):
+            acc.on_tick(_tick(98060.0, 1.0, False, ts))
+            ts += 100
+        for _ in range(30):
+            acc.on_tick(_tick(97999.0, 5.0, True, ts))
+            ts += 100
+        report = score_zone(_support(), acc.features())
+        assert "heavy_retest" in [i.name for i in report.opposing]
+
+    def test_large_prints_absorbed_counts_for(self):
+        acc = _acc(baseline_trade_size=1.0)
+        for i in range(40):
+            acc.on_tick(_tick(98000.0 + (i % 3), 6.0, True, TS + i * 100))
+        report = score_zone(_support(), acc.features())
+        assert "large_prints_absorbed" in [i.name for i in report.supporting]
+
+    def test_accelerating_break_counts_against(self):
+        acc = _acc(late_window_ms=10_000)
+        ts = TS
+        for _ in range(8):
+            acc.on_tick(_tick(98050.0, 1.0, True, ts))
+            ts += 1000
+        for i in range(80):
+            acc.on_tick(_tick(98040.0 - i * 3, 1.0, True, ts))
+            ts += 125
+        report = score_zone(_support(), acc.features())
+        assert "accelerating_break" in [i.name for i in report.opposing]

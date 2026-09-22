@@ -12,6 +12,26 @@ is actually here.
                                                                                                   │
                                        IDLE <───────────── cooldown_ms elapsed ───────────────────┘
 
+THE SEQUENCE — why absorption alone does not fire a signal
+-----------------------------------------------------------
+A trader does not enter on absorption. They wait for a sequence:
+
+    1. aggression arrives at the level
+    2. it FAILS — price does not go
+    3. the aggressors are now trapped, offside, needing to cover
+    4. price turns, and the entry is taken as the trapped side covers
+
+Step 3 is the entry, not step 2. Absorption says somebody is defending; the
+*turn* says the attackers gave up. The gap between them is where most losses
+live — a defender can absorb for twenty minutes and then step away, which is
+exactly what makes "absorption = buy" a losing rule.
+
+So `ZonePhase` models the sequence explicitly and a signal fires only on
+ABSORBING -> TURNING. Set `require_turn=False` to fall back to scoring alone,
+which exists so the two can be compared on logged outcomes rather than argued
+about.
+
+
 HOT PATH
 --------
 `on_tick` runs on every trade and is pure float arithmetic over bounded deques —
@@ -38,7 +58,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from src.flow.evidence import DEFAULT_THRESHOLD, EvidenceReport, score_zone
-from src.flow.features import ZoneAccumulator, ZoneFeatures
+from src.flow.features import MarketContext, ZoneAccumulator, ZoneFeatures
 from src.flow.level_registry import Level, LevelRegistry, LevelSide
 from src.utils.logger import get_logger
 from src.utils.types import OrderBookSnapshot, Tick
@@ -59,6 +79,15 @@ class ZoneState(str, enum.Enum):
     # that lasted one tick would be invisible.
 
 
+class ZonePhase(str, enum.Enum):
+    """Where the attack/defence sequence has got to inside a zone."""
+
+    WATCHING = "WATCHING"      # in the zone, nothing notable yet
+    ABSORBING = "ABSORBING"    # opposing aggression failing to move price
+    TURNING = "TURNING"        # absorption established AND flow flipping — the entry
+    FAILING = "FAILING"        # price travelling with the aggression; level going
+
+
 @dataclass
 class FlowSignal:
     """A confirmation. Advisory only — this is never an order."""
@@ -76,6 +105,7 @@ class FlowSignal:
     note: str
     test_count: int
     level_first_seen_ms: int
+    phase: ZonePhase = ZonePhase.WATCHING
 
     def to_dict(self) -> dict:
         return {
@@ -86,6 +116,7 @@ class FlowSignal:
             "price": self.price,
             "score": round(self.score, 4),
             "threshold": self.threshold,
+            "phase": self.phase.value,
             "invalidation": self.invalidation,
             "note": self.note,
             "test_count": self.test_count,
@@ -98,6 +129,10 @@ class FlowSignal:
             "adverse_excursion": round(self.features.adverse_excursion, 6),
             "trade_count": self.features.trade_count,
             "volume": round(self.features.volume, 6),
+            "probe_count": self.features.probe_count,
+            "retest_volume_ratio": round(self.features.retest_volume_ratio, 4),
+            "large_print_share": round(self.features.large_print_share, 4),
+            "velocity_ratio": round(self.features.velocity_ratio, 4),
             "supporting": [
                 {"name": i.name, "weight": round(i.weight, 4), "detail": i.detail}
                 for i in self.report.supporting
@@ -120,8 +155,12 @@ class ZoneMonitor:
     min_dwell_ms: int = 20_000        # minimum time in zone before a signal can fire
     cooldown_ms: int = 300_000        # hold after a resolution before re-arming
     score_interval_ms: int = 1_000    # re-score at most this often
+    require_turn: bool = True         # fire only on ABSORBING -> TURNING
+    turn_threshold: float = 0.15      # late-delta flip that counts as a turn
+    absorption_floor: float = 0.25
 
     state: ZoneState = ZoneState.IDLE
+    phase: ZonePhase = ZonePhase.WATCHING
     test_count: int = 0
     last_price: float = 0.0
     last_ts: int = 0
@@ -134,7 +173,7 @@ class ZoneMonitor:
 
     # ── hot path ───────────────────────────────────────────────────────
 
-    def on_tick(self, tick: Tick, baseline_range: float) -> FlowSignal | None:
+    def on_tick(self, tick: Tick, context: MarketContext) -> FlowSignal | None:
         """Feed one trade. Returns a signal only on the transition to CONFIRMED."""
         price = tick.price
         ts = tick.timestamp
@@ -153,14 +192,14 @@ class ZoneMonitor:
 
         if self.state is ZoneState.IDLE:
             if inside:
-                self._enter_zone(tick, baseline_range)
+                self._enter_zone(tick, context)
             elif near:
                 self.state = ZoneState.APPROACHING
             return None
 
         if self.state is ZoneState.APPROACHING:
             if inside:
-                self._enter_zone(tick, baseline_range)
+                self._enter_zone(tick, context)
             elif not near:
                 self.state = ZoneState.IDLE
             return None
@@ -180,6 +219,8 @@ class ZoneMonitor:
 
         if features is None:
             features = self._acc.features()
+        else:
+            self._update_phase(features)
 
         # Invalidation takes precedence over confirmation.
         if features.adverse_excursion > self.level.width * self.invalidation_mult:
@@ -192,9 +233,11 @@ class ZoneMonitor:
             self._reset_to_idle()
             return None
 
+        turn_ok = (not self.require_turn) or self.phase is ZonePhase.TURNING
         if (
             self._report is not None
             and self._report.confirmed
+            and turn_ok
             and not self._signalled_this_test
             and ts - self._entered_ms >= self.min_dwell_ms
         ):
@@ -212,9 +255,10 @@ class ZoneMonitor:
 
     # ── internals ──────────────────────────────────────────────────────
 
-    def _enter_zone(self, tick: Tick, baseline_range: float) -> None:
+    def _enter_zone(self, tick: Tick, context: MarketContext) -> None:
         self.test_count += 1
         self.state = ZoneState.EVALUATING
+        self.phase = ZonePhase.WATCHING
         self._entered_ms = tick.timestamp
         self._last_score_ms = tick.timestamp
         self._signalled_this_test = False
@@ -222,16 +266,54 @@ class ZoneMonitor:
         self._acc = ZoneAccumulator(
             level_price=self.level.price,
             is_support=self.level.side is LevelSide.LONG,
-            baseline_range=baseline_range,
+            baseline_range=context.baseline_range,
+            baseline_trade_size=context.baseline_trade_size,
+            zone_width=self.level.width,
             test_count=self.test_count,
         )
         self._acc.on_tick(tick)
 
     def _reset_to_idle(self) -> None:
         self.state = ZoneState.IDLE
+        self.phase = ZonePhase.WATCHING
         self._acc = None
         self._report = None
         self._signalled_this_test = False
+
+    def _update_phase(self, features: ZoneFeatures) -> None:
+        """Advance the attack/defence sequence. See the module docstring."""
+        is_support = self.level.side is LevelSide.LONG
+        opposing = features.delta_ratio < 0 if is_support else features.delta_ratio > 0
+        turning = (
+            features.late_delta_ratio > self.turn_threshold
+            if is_support
+            else features.late_delta_ratio < -self.turn_threshold
+        )
+        breaking = (
+            (features.delta_ratio < -0.30 if is_support else features.delta_ratio > 0.30)
+            and features.range_ratio > 1.2
+        )
+
+        if breaking:
+            self.phase = ZonePhase.FAILING
+            return
+
+        if self.phase is ZonePhase.ABSORBING and turning:
+            self.phase = ZonePhase.TURNING
+            return
+
+        if self.phase is ZonePhase.TURNING:
+            # A turn that reverts to one-sided opposing pressure was not a turn.
+            if opposing and not turning:
+                self.phase = ZonePhase.ABSORBING
+            return
+
+        if (
+            features.sufficient
+            and opposing
+            and features.absorption >= self.absorption_floor
+        ):
+            self.phase = ZonePhase.ABSORBING
 
     def _build_signal(
         self, ts: int, price: float, features: ZoneFeatures, report: EvidenceReport
@@ -256,6 +338,7 @@ class ZoneMonitor:
             note=self.level.note,
             test_count=self.test_count,
             level_first_seen_ms=self.level.first_seen_ms,
+            phase=self.phase,
         )
 
     # ── reads ──────────────────────────────────────────────────────────
@@ -276,6 +359,7 @@ class ZoneMonitor:
             "high": self.level.high,
             "note": self.level.note,
             "state": self.state.value,
+            "phase": self.phase.value,
             "resolved_ms": self._resolved_ms or None,
             "test_count": self.test_count,
             "last_price": self.last_price,
@@ -291,6 +375,11 @@ class ZoneMonitor:
             "absorption": round(features.absorption, 4) if features else 0.0,
             "range_ratio": round(features.range_ratio, 4) if features else 0.0,
             "adverse_excursion": round(features.adverse_excursion, 6) if features else 0.0,
+            "trades_per_sec": round(features.trades_per_sec, 2) if features else 0.0,
+            "velocity_ratio": round(features.velocity_ratio, 2) if features else 1.0,
+            "large_print_share": round(features.large_print_share, 3) if features else 0.0,
+            "probe_count": features.probe_count if features else 0,
+            "retest_volume_ratio": round(features.retest_volume_ratio, 3) if features else 0.0,
             "supporting": [
                 {"name": i.name, "weight": round(i.weight, 4), "detail": i.detail}
                 for i in self._report.supporting
@@ -317,6 +406,10 @@ class FlowEngine:
     monitors: dict[str, ZoneMonitor] = field(default_factory=dict)
 
     _prices: deque = field(default_factory=lambda: deque(maxlen=200_000))
+    # Rolling print sizes, for the large-print baseline. Sampled from ALL
+    # ticks, so a zone is judged against the market's norm, not its own.
+    _sizes: deque = field(default_factory=lambda: deque(maxlen=5_000))
+    _size_sum: float = 0.0
     _tick_count: int = 0
     _lag_ms: int = 0
     _last_tick_ms: int = 0
@@ -342,11 +435,19 @@ class FlowEngine:
             self._lag_ms = local_ms - tick.timestamp
 
         self._prices.append((tick.timestamp, tick.price))
-        baseline = self._baseline_range(tick.timestamp)
+        if len(self._sizes) == self._sizes.maxlen:
+            self._size_sum -= self._sizes[0]
+        self._sizes.append(tick.quantity)
+        self._size_sum += tick.quantity
+
+        context = MarketContext(
+            baseline_range=self._baseline_range(tick.timestamp),
+            baseline_trade_size=self._baseline_trade_size(),
+        )
 
         signals: list[FlowSignal] = []
         for monitor in self.monitors.values():
-            signal = monitor.on_tick(tick, baseline)
+            signal = monitor.on_tick(tick, context)
             if signal is not None:
                 signals.append(signal)
         return signals
@@ -354,6 +455,10 @@ class FlowEngine:
     def on_book(self, snapshot: OrderBookSnapshot) -> None:
         for monitor in self.monitors.values():
             monitor.on_book(snapshot)
+
+    def _baseline_trade_size(self) -> float:
+        """Rolling mean print size. O(1) — the sum is maintained incrementally."""
+        return self._size_sum / len(self._sizes) if self._sizes else 0.0
 
     def _baseline_range(self, now_ms: int) -> float:
         """High-low over the recent window. Cheap enough at trade cadence."""
@@ -381,6 +486,7 @@ class FlowEngine:
             "threshold": self.threshold,
             "baseline_range": round(self._baseline_range(self._last_tick_ms), 8)
             if self._last_tick_ms else 0.0,
+            "baseline_trade_size": round(self._baseline_trade_size(), 8),
             "levels": [m.snapshot() for m in sorted(
                 self.monitors.values(), key=lambda m: m.level.price
             )],

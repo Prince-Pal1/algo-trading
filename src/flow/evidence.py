@@ -45,6 +45,9 @@ W_BOOK_SIZE = 0.08
 W_BOOK_REFILL = 0.10
 W_BOOK_IMBALANCE = 0.07
 W_REPEAT_TEST = 0.12
+W_RETEST = 0.25          # exhausted retest — the strongest single read
+W_LARGE_PRINTS = 0.12
+W_ACCEL_BREAK = 0.18
 
 
 @dataclass(frozen=True)
@@ -170,6 +173,48 @@ def score_zone(
         items.append(EvidenceItem(
             "level_holding", +1, W_ADVERSE * 0.6,
             f"adverse excursion only {features.adverse_excursion:.2f}",
+        ))
+
+    # ── Tape: the retest ───────────────────────────────────────────────
+    # After the first reaction, price returns to probe the extreme again. If
+    # that probe trades LESS than the first, the aggressors are spent — there
+    # is nobody left to push. If it trades MORE, the attack was reinforced.
+    if features.exhausted_retest:
+        items.append(EvidenceItem(
+            "exhausted_retest", +1, W_RETEST,
+            f"retest traded {features.retest_volume_ratio:.0%} of the first probe "
+            f"({features.probe_count} probes) — aggressors spent",
+        ))
+    elif features.probe_count >= 2 and features.retest_volume_ratio > 1.3:
+        items.append(EvidenceItem(
+            "heavy_retest", -1, W_RETEST * 0.6,
+            f"retest traded {features.retest_volume_ratio:.0%} of the first probe "
+            "— attack reinforced, not exhausted",
+        ))
+
+    # ── Tape: who is doing the trading ─────────────────────────────────
+    # Outsized prints on the side that is failing means the participant being
+    # absorbed is a large one, which makes the absorption read far stronger
+    # than the same delta arriving as retail-sized dust.
+    if (
+        features.large_print_share >= 0.25
+        and aggression_is_opposing
+        and features.absorption >= absorption_floor
+    ):
+        items.append(EvidenceItem(
+            "large_prints_absorbed", +1, W_LARGE_PRINTS,
+            f"{features.large_print_count} outsized prints "
+            f"({features.large_print_share:.0%} of volume) absorbed",
+        ))
+
+    # ── Tape: accelerating break ───────────────────────────────────────
+    # Velocity rising while price is also travelling is momentum through the
+    # level, not a test of it.
+    if features.velocity_ratio > 2.0 and features.range_ratio > 1.2:
+        items.append(EvidenceItem(
+            "accelerating_break", -1, W_ACCEL_BREAK,
+            f"tape {features.velocity_ratio:.1f}x faster with range "
+            f"{features.range_ratio:.1f}x — momentum through the level",
         ))
 
     # ── Structure: repeated tests weaken a level ───────────────────────

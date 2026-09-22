@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import pytest
 
+from src.flow.features import MarketContext
 from src.flow.level_registry import Level, LevelRegistry, LevelSide
-from src.flow.zone_state import FlowEngine, ZoneMonitor, ZoneState
+from src.flow.zone_state import FlowEngine, ZoneMonitor, ZonePhase, ZoneState
 from src.utils.types import Tick
 
 TS = 1_757_000_000_000
-BASELINE = 100.0
+# Market norms the engine would normally supply.
+CTX = MarketContext(baseline_range=100.0, baseline_trade_size=1.0)
 
 
 def _tick(price: float, maker: bool = True, ts: int = TS, qty: float = 1.0) -> Tick:
@@ -27,6 +29,10 @@ def _support(width: float = 100.0) -> Level:
 
 
 def _monitor(**kw) -> ZoneMonitor:
+    # require_turn defaults False here: most tests exercise scoring and
+    # state transitions, not the absorption->turn sequence, which has its
+    # own class below.
+    kw.setdefault("require_turn", False)
     return ZoneMonitor(level=_support(), **kw)
 
 
@@ -35,7 +41,7 @@ def _absorb(mon: ZoneMonitor, n: int, start_ms: int, price_fn=None) -> list:
     price_fn = price_fn or (lambda i: 98000.0 + (i % 3))
     out = []
     for i in range(n):
-        sig = mon.on_tick(_tick(price_fn(i), True, start_ms + i * 100), BASELINE)
+        sig = mon.on_tick(_tick(price_fn(i), True, start_ms + i * 100), CTX)
         if sig:
             out.append(sig)
     return out
@@ -47,41 +53,41 @@ class TestTransitions:
 
     def test_far_price_stays_idle(self):
         mon = _monitor()
-        mon.on_tick(_tick(99000.0), BASELINE)
+        mon.on_tick(_tick(99000.0), CTX)
         assert mon.state is ZoneState.IDLE
 
     def test_near_price_approaches(self):
         mon = _monitor(approach_mult=3.0)
-        mon.on_tick(_tick(98250.0), BASELINE)   # 150 away, within 3x100
+        mon.on_tick(_tick(98250.0), CTX)   # 150 away, within 3x100
         assert mon.state is ZoneState.APPROACHING
 
     def test_entering_zone_evaluates(self):
         mon = _monitor()
-        mon.on_tick(_tick(98050.0), BASELINE)
+        mon.on_tick(_tick(98050.0), CTX)
         assert mon.state is ZoneState.EVALUATING
 
     def test_entering_increments_test_count(self):
         mon = _monitor()
-        mon.on_tick(_tick(98050.0), BASELINE)
+        mon.on_tick(_tick(98050.0), CTX)
         assert mon.test_count == 1
 
     def test_leaving_area_returns_to_idle(self):
         mon = _monitor()
-        mon.on_tick(_tick(98050.0, ts=TS), BASELINE)
-        mon.on_tick(_tick(99500.0, ts=TS + 1000), BASELINE)
+        mon.on_tick(_tick(98050.0, ts=TS), CTX)
+        mon.on_tick(_tick(99500.0, ts=TS + 1000), CTX)
         assert mon.state is ZoneState.IDLE
 
     def test_approaching_then_away_returns_idle(self):
         mon = _monitor()
-        mon.on_tick(_tick(98250.0, ts=TS), BASELINE)
-        mon.on_tick(_tick(99500.0, ts=TS + 1000), BASELINE)
+        mon.on_tick(_tick(98250.0, ts=TS), CTX)
+        mon.on_tick(_tick(99500.0, ts=TS + 1000), CTX)
         assert mon.state is ZoneState.IDLE
 
     def test_test_count_survives_leaving_and_returning(self):
         mon = _monitor()
-        mon.on_tick(_tick(98050.0, ts=TS), BASELINE)
-        mon.on_tick(_tick(99500.0, ts=TS + 1000), BASELINE)
-        mon.on_tick(_tick(98050.0, ts=TS + 2000), BASELINE)
+        mon.on_tick(_tick(98050.0, ts=TS), CTX)
+        mon.on_tick(_tick(99500.0, ts=TS + 1000), CTX)
+        mon.on_tick(_tick(98050.0, ts=TS + 2000), CTX)
         assert mon.test_count == 2
 
 
@@ -128,8 +134,8 @@ class TestConfirmation:
 class TestInvalidation:
     def test_push_through_invalidates(self):
         mon = _monitor(invalidation_mult=1.0)
-        mon.on_tick(_tick(98050.0, ts=TS), BASELINE)
-        mon.on_tick(_tick(97850.0, ts=TS + 1000), BASELINE)   # 150 below level
+        mon.on_tick(_tick(98050.0, ts=TS), CTX)
+        mon.on_tick(_tick(97850.0, ts=TS + 1000), CTX)   # 150 below level
         assert mon.state is ZoneState.INVALIDATED
 
     def test_invalidation_beats_confirmation(self):
@@ -138,15 +144,15 @@ class TestInvalidation:
         _absorb(mon, 200, TS)
         mon._signalled_this_test = False
         mon.state = ZoneState.EVALUATING
-        sig = mon.on_tick(_tick(97800.0, True, TS + 50_000), BASELINE)
+        sig = mon.on_tick(_tick(97800.0, True, TS + 50_000), CTX)
         assert sig is None
         assert mon.state is ZoneState.INVALIDATED
 
     def test_resistance_invalidates_upward(self):
         level = Level("res", "BTCUSDT", 98000.0, 100.0, LevelSide.SHORT)
-        mon = ZoneMonitor(level=level, invalidation_mult=1.0)
-        mon.on_tick(_tick(97950.0, ts=TS), BASELINE)
-        mon.on_tick(_tick(98250.0, ts=TS + 1000), BASELINE)
+        mon = ZoneMonitor(level=level, invalidation_mult=1.0, require_turn=False)
+        mon.on_tick(_tick(97950.0, ts=TS), CTX)
+        mon.on_tick(_tick(98250.0, ts=TS + 1000), CTX)
         assert mon.state is ZoneState.INVALIDATED
 
 
@@ -155,19 +161,19 @@ class TestCooldown:
         """A dashboard must be able to show 'confirmed N minutes ago'."""
         mon = _monitor(min_dwell_ms=5_000, cooldown_ms=600_000)
         _absorb(mon, 200, TS)
-        mon.on_tick(_tick(98050.0, ts=TS + 30_000), BASELINE)
+        mon.on_tick(_tick(98050.0, ts=TS + 30_000), CTX)
         assert mon.state is ZoneState.CONFIRMED
 
     def test_cooldown_blocks_new_signals(self):
         mon = _monitor(min_dwell_ms=5_000, cooldown_ms=600_000)
         _absorb(mon, 200, TS)
-        mon.on_tick(_tick(98050.0, ts=TS + 30_000), BASELINE)
+        mon.on_tick(_tick(98050.0, ts=TS + 30_000), CTX)
         assert _absorb(mon, 200, TS + 40_000) == []
 
     def test_cooldown_expires_to_idle(self):
         mon = _monitor(min_dwell_ms=5_000, cooldown_ms=10_000)
         _absorb(mon, 200, TS)
-        mon.on_tick(_tick(99000.0, ts=TS + 100_000), BASELINE)
+        mon.on_tick(_tick(99000.0, ts=TS + 100_000), CTX)
         assert mon.state is ZoneState.IDLE
 
 
@@ -211,7 +217,7 @@ class TestFlowEngine:
 
     def test_sync_preserves_state_on_edit(self):
         eng = self._engine()
-        eng.on_tick(_tick(98050.0), TS)
+        eng.on_tick(_tick(98050.0), local_ms=TS)
         assert eng.monitors["sup"].state is ZoneState.EVALUATING
         eng.registry.levels["sup"].note = "edited"
         eng.sync_levels(now_ms=TS)
@@ -220,7 +226,7 @@ class TestFlowEngine:
     def test_routes_to_all_monitors(self):
         second = Level("sup2", "BTCUSDT", 97000.0, 100.0, LevelSide.LONG)
         eng = self._engine(_support(), second)
-        eng.on_tick(_tick(98050.0), TS)
+        eng.on_tick(_tick(98050.0), local_ms=TS)
         assert eng.monitors["sup"].state is ZoneState.EVALUATING
         assert eng.monitors["sup2"].state is ZoneState.IDLE
 
@@ -232,13 +238,13 @@ class TestFlowEngine:
     def test_baseline_range_from_history(self):
         eng = self._engine()
         for i in range(100):
-            eng.on_tick(_tick(98500.0 + i, ts=TS + i * 1000), TS)
+            eng.on_tick(_tick(98500.0 + i, ts=TS + i * 1000), local_ms=TS)
         assert eng._baseline_range(TS + 99_000) == pytest.approx(99.0)
 
     def test_baseline_ignores_stale_prices(self):
         eng = self._engine()
-        eng.on_tick(_tick(90000.0, ts=TS), TS)
-        eng.on_tick(_tick(98000.0, ts=TS + 3_600_000), TS)
+        eng.on_tick(_tick(90000.0, ts=TS), local_ms=TS)
+        eng.on_tick(_tick(98000.0, ts=TS + 3_600_000), local_ms=TS)
         assert eng._baseline_range(TS + 3_600_000) == pytest.approx(0.0)
 
     def test_engine_snapshot_serializable(self):
@@ -249,3 +255,60 @@ class TestFlowEngine:
         assert snap["symbol"] == "BTCUSDT"
         assert snap["lag_ms"] == 10
         assert len(snap["levels"]) == 1
+
+
+class TestSequenceDetection:
+    """Absorption alone must NOT fire. The attack has to fail AND reverse."""
+
+    def _run(self, mon: ZoneMonitor, absorb_n: int, turn_n: int) -> list:
+        out, ts = [], TS
+        for i in range(absorb_n):                      # aggressive sells, price pinned
+            sig = mon.on_tick(_tick(98000.0 + (i % 4), True, ts), CTX)
+            ts += 120
+            if sig:
+                out.append(sig)
+        for i in range(turn_n):                        # flow flips to buyers
+            sig = mon.on_tick(_tick(98005.0 + (i % 4), False, ts), CTX)
+            ts += 120
+            if sig:
+                out.append(sig)
+        return out
+
+    def test_absorption_alone_does_not_fire(self):
+        mon = ZoneMonitor(level=_support(), min_dwell_ms=5_000, require_turn=True)
+        signals = self._run(mon, absorb_n=300, turn_n=0)
+        assert signals == []
+        assert mon.phase is ZonePhase.ABSORBING
+        assert mon.report.confirmed is True   # the score was there; the turn was not
+
+    def test_turn_after_absorption_fires(self):
+        mon = ZoneMonitor(level=_support(), min_dwell_ms=5_000, require_turn=True)
+        signals = self._run(mon, absorb_n=300, turn_n=300)
+        assert signals
+        assert signals[0].phase is ZonePhase.TURNING
+
+    def test_require_turn_false_fires_on_absorption(self):
+        """The comparison arm — so the two can be judged on logged outcomes."""
+        mon = ZoneMonitor(level=_support(), min_dwell_ms=5_000, require_turn=False)
+        assert self._run(mon, absorb_n=300, turn_n=0)
+
+    def test_breaking_sets_failing_phase(self):
+        mon = ZoneMonitor(level=_support(), min_dwell_ms=5_000, require_turn=True)
+        ts = TS
+        for i in range(200):
+            mon.on_tick(_tick(98080.0 - i * 0.8, True, ts), CTX)
+            ts += 120
+        assert mon.phase is ZonePhase.FAILING
+
+    def test_phase_resets_on_new_test(self):
+        mon = ZoneMonitor(level=_support(), min_dwell_ms=5_000, require_turn=True)
+        self._run(mon, absorb_n=300, turn_n=0)
+        assert mon.phase is ZonePhase.ABSORBING
+        mon.on_tick(_tick(99500.0, True, TS + 500_000), CTX)   # leave
+        mon.on_tick(_tick(98050.0, True, TS + 501_000), CTX)   # return
+        assert mon.phase is ZonePhase.WATCHING
+
+    def test_phase_in_snapshot(self):
+        mon = ZoneMonitor(level=_support(), min_dwell_ms=600_000, require_turn=True)
+        self._run(mon, absorb_n=300, turn_n=0)
+        assert mon.snapshot()["phase"] == "ABSORBING"

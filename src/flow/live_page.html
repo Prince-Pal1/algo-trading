@@ -35,8 +35,13 @@
   .badge.eval{background:rgba(57,135,229,.2);color:#7fb4f0}
   .badge.conf{background:rgba(25,158,112,.2);color:#4cd4a0}
   .badge.inval{background:rgba(230,103,103,.2);color:var(--against)}
+  .phase{font-size:10px;letter-spacing:1px;padding:3px 8px;border-radius:4px;
+         background:#2e2e2c;color:var(--ink3);text-transform:uppercase;margin-left:6px}
+  .phase.absorbing{background:rgba(201,133,0,.22);color:#e0a52e}
+  .phase.turning{background:rgba(25,158,112,.22);color:#4cd4a0;font-weight:700}
+  .phase.failing{background:rgba(230,103,103,.22);color:var(--against)}
   .note{color:var(--ink3);font-size:12px;margin:4px 0 10px}
-  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:10px 0}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}
   .grid div{background:#1e1e1d;border-radius:6px;padding:6px 8px}
   .grid .k{font-size:9px;text-transform:uppercase;letter-spacing:.8px;color:var(--ink3)}
   .grid .v{font-size:14px;font-variant-numeric:tabular-nums}
@@ -74,7 +79,8 @@
   <th>score</th><th>invalidation</th></tr></thead><tbody id="sigs"></tbody></table>
 </div>
 <div class="adv">Advisory only — this never places an order. Evidence is shown for and against;
-read both before acting.</div>
+read both before acting. A signal needs the sequence: <b>ABSORBING</b> (aggression failing) then
+<b>TURNING</b> (it reverses). Absorption on its own does not fire.</div>
 <script>
 const $=id=>document.getElementById(id);
 const fmt=(v,d=2)=>v==null?"—":Number(v).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -84,7 +90,7 @@ let signals=[];
 function lagClass(ms){ if(ms==null)return"";return ms<500?"good":ms<2000?"warn":"bad"; }
 
 function card(l){
-  const st=l.state, cls=st==="EVALUATING"?"eval":st==="CONFIRMED"?"conf":st==="INVALIDATED"?"inval":"";
+  const st=l.state, ph=l.phase, cls=st==="EVALUATING"?"eval":st==="CONFIRMED"?"conf":st==="INVALIDATED"?"inval":"";
   const score=l.score, pct=score==null?0:Math.round(score*100);
   const thPct=Math.round((l.threshold||0.62)*100);
   // Metrics stay visible after resolution — the numbers behind a
@@ -95,7 +101,7 @@ function card(l){
     <div class="ctop">
       <span class="lvl">${fmt(l.price,2)} <span style="color:var(--ink3);font-size:12px">
         ${fmt(l.low,2)}–${fmt(l.high,2)}</span></span>
-      <span class="badge ${cls}">${st}</span>
+      <span>${ph&&ph!=="WATCHING"?`<span class="phase ${ph.toLowerCase()}">${ph}</span>`:""}<span class="badge ${cls}" style="margin-left:6px">${st}</span></span>
     </div>
     <div class="note">${l.side.toUpperCase()} · ${l.note||""} · test #${l.test_count} · ${dist}</div>
     ${score!=null?`<div class="bar"><i style="width:${pct}%"></i><span class="th" style="left:${thPct}%"></span></div>
@@ -105,6 +111,11 @@ function card(l){
       <div><div class="k">delta</div><div class="v" style="color:${l.delta<0?'var(--against)':'var(--for)'}">${fmt(l.delta,1)}</div></div>
       <div><div class="k">absorption</div><div class="v">${fmt(l.absorption,2)}</div></div>
       <div><div class="k">range</div><div class="v">${fmt(l.range_ratio,2)}x</div></div>
+      <div><div class="k">tape</div><div class="v">${fmt(l.trades_per_sec,1)}/s
+        <span style="color:var(--ink3);font-size:11px">${fmt(l.velocity_ratio,1)}x</span></div></div>
+      <div><div class="k">retest</div><div class="v">${l.probe_count>1?
+        `<span style="color:${l.retest_volume_ratio<0.7?'var(--ok)':'var(--against)'}">${fmt(l.retest_volume_ratio*100,0)}%</span>`
+        :`<span style="color:var(--ink3)">probe ${l.probe_count||0}</span>`}</div></div>
     </div>`:""}
     ${!l.sufficient&&inZone?`<div class="thin">thin — ${l.trade_count} trades, not enough to act on</div>`:""}
     ${l.supporting?.length?`<div class="lab">for</div><ul>${l.supporting.map(i=>`<li class="f">${i.detail}</li>`).join("")}</ul>`:""}
