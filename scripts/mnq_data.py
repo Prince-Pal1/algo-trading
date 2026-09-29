@@ -63,7 +63,12 @@ def fetch_databento(start: str, end: str, symbol: str, yes: bool) -> None:
     client = db.Historical(key)
     query = dict(dataset="GLBX.MDP3", symbols=[symbol], stype_in="continuous",
                  schema="ohlcv-1m", start=start, end=end)
-    cost = client.metadata.get_cost(**query)
+    try:
+        cost = client.metadata.get_cost(**query)
+    except Exception as exc:
+        sys.exit(f"  Databento refused the request:\n  {exc}\n\n"
+                 "  If it says auth: DATABENTO_API_KEY must be your own key, copied from\n"
+                 "  databento.com -> Portal -> API Keys (it starts with db-).")
     print(f"  Databento {symbol} 1-minute bars {start} -> {end}: estimated cost ${cost:.2f}")
     if not yes and input("  download? [y/N] ").strip().lower() != "y":
         sys.exit("  cancelled")
