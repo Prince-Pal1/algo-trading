@@ -133,6 +133,15 @@
 | Clenow Momentum Strategy | `src/strategies/momentum/clenow_momentum.py` | 💀 KILLED at B.3 (Session 22) | Kept in repo with `enabled=false`; obituary at `docs/strategy_obituaries/strategy_b_clenow_momentum.md` |
 | Universe Manifest | `config/universes.toml` | ✅ shipped | Survivorship-bias-aware top-30 altcoin manifest + delisted tokens (LUNA, FTT, UST, CEL, SRM) |
 
+### Futures Strategies (research -- src/strategies/futures/, CME, no execution path)
+
+| Module | File | Depends On | Used By | Status |
+|---|---|---|---|---|
+| MNQ Hybrid Scalp Simulator | `src/strategies/futures/mnq_hybrid.py` | pandas, numpy | `scripts/mnq_backtest.py` | ✅ 2026-09-29 (transcript-exact rules: long limit at prev close − 3.1×ATR re-placed each candle, TP 2.0/SL 1.5 ATR tick-conformed; short on shooting star, market next open, exit following open. Own bar loop — not `BacktestEngine` (see Known Gotchas). 3-tier intrabar ambiguity ported from hypo `ambiguity_resolver.py`, 1m bars settle it. Emits engine-compatible `HybridTrade` so `compute_metrics`/`save_run` work. `FUTURES_FEE_PROFILES` via `make_futures_fee_model()` — no default) |
+| MNQ Data Fetcher | `scripts/mnq_data.py` | `databento` / `yfinance` (optional) | user, offline | ✅ 2026-09-29 (Databento `MNQ.v.0` ohlcv-1m with cost confirm, key from `DATABENTO_API_KEY` only; yfinance 60d 5m; CSV incl. TradingView export → `data/mnq/mnq_{1m,5m}.parquet`) |
+| MNQ Backtest CLI | `scripts/mnq_backtest.py` | Simulator, ResultStore | user | ✅ 2026-09-29 (`--fee-profile` required; 4 runs: video long/short/short+daily filter/trader; band sweep 2.5-3.7; ambiguity bracket when no 1m; writes `reports/mnq_hybrid_summary.{md,json}`) |
+| MNQ Pine Script | `strategies/pine/mnq_hybrid_scalp.pine` | TradingView | user | ✅ 2026-09-29 (Pine v5 twin of the simulator for chart review) |
+
 ### M3S -- Master Money Management (Python -- src/m3s/)
 
 Phase 3b-2. Canonical plan: `docs/planning/m3s_plan_v1.md` § v1.1 ADDENDUM. Sub-phase 0.1 (scaffolding) complete Session 22; remaining sub-phases listed in `ROADMAP.md`.
@@ -201,7 +210,7 @@ Phase 3b-2. Canonical plan: `docs/planning/m3s_plan_v1.md` § v1.1 ADDENDUM. Sub
 | Rebalancer | `src/portfolio/rebalancer.py` | M3S Allocator | Main Loop | 📋 planned |
 | Backtest Engine | `src/backtest/engine.py` | Feature Engine, Strategies, Metrics, RiskManager (optional) | Research | ✅ verified (TradingView match, optional risk gating) |
 | Backtest Metrics | `src/backtest/metrics.py` | `scipy`, `numpy`, `pandas` | Engine, ResultStore, Report | ✅ working |
-| Result Store | `src/backtest/result_store.py` | Metrics, Report, Charts, `structlog` | CLI | ✅ working |
+| Result Store | `src/backtest/result_store.py` | Metrics, Report, Charts, `structlog` | CLI | ✅ working (`save_run(initial_capital=...)` kwarg added 2026-09-29, default 10,000 unchanged) |
 | Chart Renderers | `src/backtest/charts.py` | `plotly` | Report, Dashboard | ✅ working (14 chart types) |
 | HTML Report | `src/backtest/report.py` | Charts, `jinja2`, `plotly` | ResultStore | ✅ working (extended sections) |
 | QuantStats Bridge | `src/backtest/quantstats_bridge.py` | `quantstats` | CLI, Dashboard | ✅ working |
@@ -367,6 +376,15 @@ Exchange WS (Binance/IC Markets/Alpaca/IBKR)
                   --> Trade Log (SQLite) + Redis (hot state)
 ```
 
+### MNQ Futures Backtest Path (research — offline)
+```
+scripts/mnq_data.py (user's machine: Databento / yfinance / CSV) --> data/mnq/mnq_{1m,5m}.parquet
+  --> scripts/mnq_backtest.py load_bars() --> resample_1m_to_5m() (1m kept for intrabar order)
+    --> mnq_hybrid.simulate(bars5, cfg, FuturesFeeModel, bars1) --> SimResult(trades, equity)
+      --> daily_equity() --> ResultStore.save_run(initial_capital=100k)  (SQLite + JSON + HTML per run)
+      --> write_report() --> reports/mnq_hybrid_summary.{md,json}
+```
+
 ### Order Flow / CVD Path (research — offline, crypto only)
 ```
 Binance Data Vision daily aggTrades ZIP  (free, no API key)
@@ -485,6 +503,7 @@ Trade Fill Event
 |---|---|---|---|
 | `data/historical/{symbol}_{tf}.parquet` | Downloader | VectorBT, NautilusTrader | OHLCV bars |
 | `data/backtest_results/{strategy}_{date}.parquet` | Backtest Runner | Report Generator | Backtest output |
+| `data/mnq/mnq_{1m,5m}.parquet` | `scripts/mnq_data.py` | `scripts/mnq_backtest.py` | MNQ OHLCV, `ts` Unix ms UTC, optional `instrument_id` for rolls |
 
 ### Backtest DB Tables (data/trades.db)
 
@@ -519,6 +538,9 @@ Trade Fill Event
 
 | Date | Description |
 |---|---|
+| 2026-09-29 | **pandas 3 keeps the datetime resolution it was built with.** `pd.to_datetime(ms, unit="ms")` gives a `datetime64[ms]` index, so the old idiom `.astype("int64") // 1_000_000` divided milliseconds by a million: the MNQ daily equity landed in January 1970, `compute_metrics` resampled it to one day and reported Sharpe 0.0 with no error. Convert with `(idx - pd.Timestamp(0, tz="UTC")) // pd.Timedelta(milliseconds=1)`, which is resolution-agnostic. Same family: `np.issubdtype` raises on tz-aware dtypes (Databento's `ts_event`); use `pd.api.types.is_numeric_dtype`. Pinned by `TestBacktestScript::test_daily_equity_is_in_unix_ms` + `TestDataPrep`. |
+| 2026-09-29 | **`ResultStore.save_run()` computed every return % against $10,000** regardless of account size (it called `compute_metrics` without `initial_capital`). A $100k futures account showed +905% for a +$500 run. Added an `initial_capital` kwarg (default unchanged so existing callers are unaffected); pass it whenever the account isn't $10k. |
+| 2026-09-29 | **`BacktestEngine` can't run a CME futures strategy.** It only enters at the next open (no resting limit orders), charges commission as a % of notional, and has no contract multiplier; `leveraged_engine` is CFD/gold-specific. The MNQ hybrid scalp needs a limit that follows a band candle by candle, per-contract fees, $2/point and tick rounding, so it has its own simulator in `src/strategies/futures/mnq_hybrid.py` that emits engine-compatible trades for `compute_metrics`/`save_run`. |
 | 2026-09-22 | **A dead feed looked exactly like a calm market.** `lag_ms` is measured when a tick ARRIVES, so when nothing arrives it freezes at its last good value — the page showed `40ms`, green, indefinitely, while ten minutes of nothing went by, and the WebSocket to the monitor stayed up so `link: live` agreed. On a console whose stated premise is *a stale score is worse than no score*, this was the most dangerous defect in the stack. `snapshot()` now also publishes `stale_ms`, measured at PUBLISH time against the last tick so it climbs whether or not anything arrives; the page leads with whichever is worse and shows a red NO DATA banner past 10s. Pinned by `TestStaleness::test_lag_alone_would_have_lied`. General shape: **a freshness metric computed on arrival cannot detect absence** — it has to be computed on read. |
 | 2026-09-22 | **`_baseline_range` was a full window scan on every tick — 99.7% of the hot path, and it got worse as the market got busier.** It walked back over every price in the 15-minute window per trade: measured at 153 µs/tick at 5 trades/sec but **3653 µs/tick at 50**, i.e. O(ticks in window) PER tick. At a burst rate of several hundred trades a second it would have stopped keeping up, and the symptom would have been the lag number climbing during fast tape — the one moment the console has to be trusted. Replaced with `RollingExtremes`, two monotonic deques giving exact sliding-window high/low in O(1) amortized (188 entries held for a 60,000-tick window, zero disagreement with the scan it replaced). Cost is now flat with rate: ~10-17 µs/tick from 5/s to 500/s. |
 | 2026-09-22 | **The full feature set was rebuilt on every tick to read one field.** `ZoneMonitor.on_tick` called `ZoneAccumulator.features()` per trade for the invalidation check, which needs only `adverse_excursion` — an O(1) tracked float — while `features()` runs two windowed scans (`_velocity` over 60s, `_late_delta_ratio` over 30s) plus the iceberg pass. That was ~550 µs/tick at BTC's rate. The accumulator now exposes `adverse_excursion()` on its own and the full set is built only on the scoring interval or when a signal is actually emitted. |
