@@ -8,6 +8,11 @@ Run on a machine with internet access. Writes to data/mnq/ (gitignored).
     export DATABENTO_API_KEY=...
     python3 -m scripts.mnq_data databento --start 2023-01-01 --end 2026-09-26
 
+    # Free, no signup, years of 1-minute bars: Dukascopy's Nasdaq 100 CFD,
+    # the same source as our gold history. A stand-in for MNQ, not MNQ itself:
+    # candles are built from bid quotes and there are no contract rolls.
+    python3 -m scripts.mnq_data dukascopy --start 2023-01-01 --end 2026-09-26
+
     # Free, no signup, but only ~60 days of 5-minute bars and no roll info.
     python3 -m scripts.mnq_data yfinance
 
@@ -25,6 +30,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +47,8 @@ def _save(df: pd.DataFrame, label: str) -> Path:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     path = OUT_DIR / f"mnq_{kind}.parquet"
     df.to_parquet(path, index=False)
+    # The backtest report names its data source from this.
+    path.with_suffix(".source.txt").write_text(label)
     first = pd.to_datetime(df["ts"].iloc[0], unit="ms", utc=True)
     last = pd.to_datetime(df["ts"].iloc[-1], unit="ms", utc=True)
     rolls = int((df["instrument_id"].diff().fillna(0) != 0).sum()) if "instrument_id" in df else None
@@ -83,6 +91,45 @@ def fetch_databento(start: str, end: str, symbol: str, yes: bool) -> None:
     _save(df[keep], f"Databento {symbol}")
 
 
+def fetch_dukascopy(start: str, end: str, instrument: str) -> None:
+    try:
+        import dukascopy_python as dk
+    except ImportError:
+        sys.exit("  pip install dukascopy-python")
+    print(f"  Dukascopy {instrument}: Nasdaq 100 CFD, 1-minute bid candles. A stand-in for MNQ:")
+    print("  same index, same moves, but quotes rather than trades and no contract rolls.")
+    t, stop = pd.Timestamp(start, tz="UTC"), pd.Timestamp(end, tz="UTC")
+    chunks = []
+    while t < stop:
+        nxt = min(t + pd.DateOffset(months=1), stop)
+        for attempt in range(3):
+            try:
+                df = dk.fetch(instrument=instrument, interval=dk.INTERVAL_MIN_1,
+                              offer_side=dk.OFFER_SIDE_BID,
+                              start=t.to_pydatetime(), end=nxt.to_pydatetime())
+                break
+            except Exception as exc:
+                if attempt == 2:
+                    sys.exit(f"  Dukascopy failed at {t:%Y-%m}: {exc}")
+                time.sleep(2)
+        print(f"    {t:%Y-%m}: {len(df):,} bars")
+        if len(df):
+            chunks.append(df)
+        t = nxt
+    if not chunks:
+        sys.exit(f"  Dukascopy returned nothing for {instrument}")
+    df = pd.concat(chunks)
+    df = df[~df.index.duplicated(keep="first")].sort_index().reset_index()
+    df = df.rename(columns={df.columns[0]: "ts"})
+    # Minutes with no quotes come back as flat zero-volume bars; they would drag
+    # ATR down and invent candles inside the daily halt.
+    flat = (df["high"] == df["low"]) & (df["volume"] == 0)
+    if flat.any():
+        print(f"  dropped {int(flat.sum()):,} empty minutes")
+    _save(df.loc[~flat, ["ts", "open", "high", "low", "close", "volume"]],
+          f"Dukascopy {instrument}, Nasdaq 100 CFD bid candles (a stand-in for MNQ, no rolls)")
+
+
 def fetch_yfinance() -> None:
     try:
         import yfinance as yf
@@ -114,6 +161,10 @@ def main() -> None:
     d.add_argument("--symbol", default="MNQ.v.0",
                    help="continuous contract; .v.0 rolls to the most-traded month, as traders do")
     d.add_argument("--yes", action="store_true", help="skip the cost confirmation")
+    k = sub.add_parser("dukascopy")
+    k.add_argument("--start", required=True)
+    k.add_argument("--end", required=True)
+    k.add_argument("--instrument", default="E_NQ-100", help="Dukascopy's Nasdaq 100 CFD")
     sub.add_parser("yfinance")
     c = sub.add_parser("csv")
     c.add_argument("--path", required=True)
@@ -121,6 +172,8 @@ def main() -> None:
 
     if args.source == "databento":
         fetch_databento(args.start, args.end, args.symbol, args.yes)
+    elif args.source == "dukascopy":
+        fetch_dukascopy(args.start, args.end, args.instrument)
     elif args.source == "yfinance":
         fetch_yfinance()
     else:

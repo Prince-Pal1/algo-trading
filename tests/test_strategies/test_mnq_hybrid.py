@@ -499,3 +499,38 @@ class TestBacktestScript:
                 stored = json.loads((tmp_path / "reports" / f"{r['run_id']}.json").read_text())
                 metrics = stored.get("metrics", stored)
                 assert metrics["initial_capital"] == 100_000
+
+    def test_dukascopy_fetch_saves_labelled_1m_bars(self, tmp_path, monkeypatch):
+        """Offline: a stand-in for dukascopy_python returns overlapping monthly chunks
+        with an empty minute; the saved file is deduped, drops it, and says it's a CFD."""
+        import sys
+        import types
+
+        import scripts.mnq_backtest as mb
+        import scripts.mnq_data as md
+
+        def fake_fetch(instrument, interval, offer_side, start, end):
+            idx = pd.date_range(start, end, freq="1min", tz="UTC")[:6]
+            df = pd.DataFrame({"open": 20_000.0, "high": 20_002.0, "low": 19_998.0,
+                               "close": 20_001.0, "volume": 5.0}, index=idx)
+            df.index.name = "timestamp"
+            df.iloc[2, :] = [20_001.0, 20_001.0, 20_001.0, 20_001.0, 0.0]
+            return df
+
+        fake = types.SimpleNamespace(fetch=fake_fetch, INTERVAL_MIN_1="1MIN", OFFER_SIDE_BID="B")
+        monkeypatch.setitem(sys.modules, "dukascopy_python", fake)
+        monkeypatch.setattr(md, "OUT_DIR", tmp_path)
+        md.fetch_dukascopy("2026-01-01", "2026-03-01", "E_NQ-100")
+
+        saved = pd.read_parquet(tmp_path / "mnq_1m.parquet")
+        assert len(saved) == 2 * 5                      # two months, one empty minute each dropped
+        assert saved["ts"].is_monotonic_increasing and saved["ts"].is_unique
+        assert saved["ts"].iloc[0] == _ms("2025-12-31 19:00")   # 2026-01-01 00:00 UTC
+        assert "stand-in for MNQ" in (tmp_path / "mnq_1m.source.txt").read_text()
+
+        monkeypatch.setattr(mb, "DATA_DIR", tmp_path)
+        rows = pd.DataFrame({"ts": T0 + np.arange(1_000) * 60_000, "open": 1.0, "high": 2.0,
+                             "low": 0.5, "close": 1.5})
+        rows.to_parquet(tmp_path / "mnq_1m.parquet", index=False)
+        _, _, source = mb.load_bars(None, None)
+        assert source.startswith("Dukascopy E_NQ-100")

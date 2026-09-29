@@ -70,6 +70,10 @@ def load_bars(start: str | None, end: str | None):
     else:
         sys.exit(f"  no data in {DATA_DIR}/. Fetch it first:  python3 -m scripts.mnq_data --help")
 
+    label = Path(source).with_suffix(".source.txt")
+    if label.exists():
+        source = f"{label.read_text().strip()} ({source})"
+
     def clip(df):
         if start:
             df = df[df["ts"] >= pd.Timestamp(start, tz=TZ).value // 1_000_000]
