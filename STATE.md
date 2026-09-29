@@ -25,6 +25,15 @@ Prince found TradingView's tester too shallow and asked for the strategy to be r
 
 **No real result yet.** The container reaches no market data source (Yahoo, Stooq, Databento, Polygon, HF all blocked), so the report has to be produced on Prince's Mac and brought back.
 
+### Session 33c — first real report, and why the long isn't settled (2026-09-29)
+
+Databento needed a card, so a free source was added: Dukascopy's `E_NQ-100` Nasdaq 100 CFD (the same free feed as our gold history), 1-minute bid candles. A stand-in for MNQ, labelled as such in the report. Prince ran it on 2020-01 to 2026-09 (460,990 five-minute candles).
+
+- **Short, as stated:** 9,050 trades, PF 0.71, -$97k at 4 contracts. About $81k of that is costs (~$9 a round trip); before costs it is roughly -$16k, i.e. no edge. Every quarter of the trader run lost on the short. The previous-day-red filter halves trades and losses alike.
+- **Long:** 1,560 trades, PF 0.85, but 392 (25%) were guesses: the band fill and a possible target touch in the same minute. Conservative scoring counts all of them against the long, and a bug (below) did too. Not a verdict.
+- **The video's test covered "weeks"** (transcript: the short "started out very strong weeks ago"), almost certainly with TradingView's default zero costs. The report now cuts out those weeks for a like-for-like check.
+- **Added:** `--refine` (Dukascopy 1-second bars for only the uncertain candles, cached, stops if the history runs out), before-costs runs, the video's window, by-hour and cash-session splits. Fixed the fill-minute target bug. 63 tests, same results on pandas 2.2.1.
+
 ## Session 32 — level-gated flow engine + live monitor (2026-09-22)
 
 **Trigger:** Prince proposed a system where HE supplies levels (5–10 dollar windows, fitted to his long-term bias and short-term structure) and an algo reads order flow at them in real time, "like a senior order flow analyst," emitting entry confirmations. Asked whether it could work, then to build it, then added the constraint that it must be fast with minimum lag.

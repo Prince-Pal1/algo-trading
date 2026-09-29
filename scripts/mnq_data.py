@@ -28,9 +28,12 @@ The backtest reports how many trades had to be guessed.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -128,6 +131,93 @@ def fetch_dukascopy(start: str, end: str, instrument: str) -> None:
         print(f"  dropped {int(flat.sum()):,} empty minutes")
     _save(df.loc[~flat, ["ts", "open", "high", "low", "close", "volume"]],
           f"Dukascopy {instrument}, Nasdaq 100 CFD bid candles (a stand-in for MNQ, no rolls)")
+
+
+FIVE_MIN_MS = 300_000
+
+
+def _spans(starts: set[int]) -> list[tuple[int, int]]:
+    """5-minute candle starts -> [start, end) spans, neighbours joined."""
+    out: list[list[int]] = []
+    for s in sorted(starts):
+        if out and s <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], s + FIVE_MIN_MS)
+        else:
+            out.append([s, s + FIVE_MIN_MS])
+    return [(a, b) for a, b in out]
+
+
+def fetch_dukascopy_seconds(starts: set[int], instrument: str = "E_NQ-100",
+                            workers: int = 4) -> pd.DataFrame:
+    """1-second bid bars for the given 5-minute candles, used by the backtest's
+    --refine to settle trades 1-minute bars can't. Cached in data/mnq/: a candle
+    fetched once, even if Dukascopy had nothing for it, is never fetched again."""
+    import dukascopy_python as dk
+
+    cache = OUT_DIR / "mnq_1s_cache.parquet"
+    done_path = cache.with_suffix(".done.json")
+    done = set(json.loads(done_path.read_text())) if done_path.exists() else set()
+    cached = pd.read_parquet(cache) if cache.exists() else None
+    todo = _spans({s for s in starts if s not in done})
+    if not todo:
+        return cached if cached is not None else pd.DataFrame(columns=["ts", "open", "high", "low", "close"])
+
+    def one(span):
+        a, b = span
+        for _ in range(3):
+            try:
+                df = dk.fetch(instrument=instrument, interval=dk.INTERVAL_SEC_1,
+                              offer_side=dk.OFFER_SIDE_BID,
+                              start=datetime.fromtimestamp(a / 1000, tz=timezone.utc),
+                              end=datetime.fromtimestamp(b / 1000, tz=timezone.utc),
+                              limit=int((b - a) / 1000) + 5, max_retries=2)
+                df = df.reset_index()
+                df = df.rename(columns={df.columns[0]: "ts"})
+                ms = (pd.to_datetime(df["ts"], utc=True) - pd.Timestamp(0, tz="UTC")) // pd.Timedelta(milliseconds=1)
+                df["ts"] = ms.astype("int64")
+                return span, df[(df["ts"] >= a) & (df["ts"] < b)][["ts", "open", "high", "low", "close"]]
+            except Exception:
+                time.sleep(2)
+        return span, None
+
+    # Newest first: if Dukascopy's 1-second history runs out going back, the
+    # batches start coming back empty and the fetch stops instead of grinding on.
+    todo = todo[::-1]
+    batch_size = 40
+    print(f"  fetching 1-second bars for {len(todo):,} windows from Dukascopy ({workers} at a time)")
+    got, failed, empty_batches = [], 0, 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for b0 in range(0, len(todo), batch_size):
+            results = list(ex.map(one, todo[b0:b0 + batch_size]))
+            failed += sum(df is None for _, df in results)
+            useful = [(span, df) for span, df in results if df is not None and len(df)]
+            if useful:
+                empty_batches = 0
+                got += [df for _, df in useful]
+                # Dukascopy is answering, so an empty window really is empty: don't ask again.
+                for span, df in results:
+                    if df is not None:
+                        done.update(range(span[0], span[1], FIVE_MIN_MS))
+            else:
+                empty_batches += 1
+            n_done = min(b0 + batch_size, len(todo))
+            if n_done % 200 == 0 or n_done == len(todo):
+                print(f"    {n_done:,}/{len(todo):,}")
+            if empty_batches >= 2:
+                oldest = datetime.fromtimestamp(todo[b0][0] / 1000, tz=timezone.utc)
+                print(f"  Dukascopy returned no 1-second bars for {2 * batch_size} windows in a row "
+                      f"(back to {oldest:%Y-%m-%d}); stopping there. The rest stay on 1-minute bars.")
+                break
+    if failed:
+        print(f"  {failed:,} windows failed; they'll be retried next run")
+
+    parts = [x for x in [cached, *got] if x is not None and len(x)]
+    fine = (pd.concat(parts, ignore_index=True).drop_duplicates("ts").sort_values("ts")
+            .reset_index(drop=True)) if parts else pd.DataFrame(columns=["ts", "open", "high", "low", "close"])
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    fine.to_parquet(cache, index=False)
+    done_path.write_text(json.dumps(sorted(done)))
+    return fine
 
 
 def fetch_yfinance() -> None:

@@ -223,19 +223,29 @@ class TestLongExits:
         assert (t.entry_price, t.exit_reason, t.confidence) == (19_969.0, "stop_loss", RESOLVED)
 
     def test_fill_candle_target_is_not_counted_conservatively(self):
-        """Wick tags the band and the high tags the target: which came first
-        is unknown, so the conservative policy doesn't count the target."""
+        """Wick tags the band, the high tags the target, the close is back under
+        it: whether the high came after the fill is unknown, so the conservative
+        policy doesn't count the target."""
         rows = flat(20)
-        bar(rows, 19_985, 19_995, 19_969, 19_990)
+        bar(rows, 19_980, 19_995, 19_969, 19_985)
         _, (t,) = run(rows)
         # Held to the end of the data, not closed at the target...
-        assert t.exit_reason == "end_of_data" and t.exit_price == 19_990
+        assert t.exit_reason == "end_of_data" and t.exit_price == 19_985
         # ...and marked as a guess, because it was one.
         assert t.confidence == UNCERTAIN
 
+    def test_fill_candle_closing_over_the_target_is_certain(self):
+        """Filled at 19,969, closed at 19,990 over the 19,989 target: price had to
+        climb through the target after the fill. The conservative policy used to
+        ignore this and hold the trade on."""
+        rows = flat(20)
+        bar(rows, 19_985, 19_995, 19_969, 19_990)
+        _, (t,) = run(rows)
+        assert (t.exit_reason, t.exit_price, t.confidence) == ("take_profit", 19_989.0, RESOLVED)
+
     def test_fill_candle_target_heuristic_follows_candle_colour(self):
         rows = flat(20)
-        bar(rows, 19_985, 19_995, 19_969, 19_990)              # green: low then high
+        bar(rows, 19_980, 19_995, 19_969, 19_985)              # green: low then high
         _, (t,) = run(rows, ambiguity="heuristic")
         assert (t.exit_reason, t.confidence) == ("take_profit", HEURISTIC)
 
@@ -534,3 +544,116 @@ class TestBacktestScript:
         rows.to_parquet(tmp_path / "mnq_1m.parquet", index=False)
         _, _, source = mb.load_bars(None, None)
         assert source.startswith("Dukascopy E_NQ-100")
+
+
+class TestOneSecondRefinement:
+    """A fill minute that 1-minute bars can't settle, settled by its 1-second bars."""
+
+    def _fill_candle(self):
+        rows = flat(20)
+        bar(rows, 19_980, 19_995, 19_969, 19_985)   # band 19,969, target 19,989
+        start = rows[-1]["ts"]
+        m1 = pd.DataFrame(
+            [{"ts": start, "open": 19_980, "high": 19_995, "low": 19_969, "close": 19_985}]
+            + [{"ts": start + k * 60_000, "open": 19_985, "high": 19_986, "low": 19_984, "close": 19_985}
+               for k in range(1, 5)])
+        return rows, m1, start
+
+    @staticmethod
+    def _seconds(start, path):
+        """One 1-second bar per step. Keep steps small: a whole band-to-target
+        swing inside one second is still a guess, even at this resolution."""
+        return pd.DataFrame([{"ts": start + k * 1000, "open": a, "high": max(a, b), "low": min(a, b), "close": b}
+                             for k, (a, b) in enumerate(zip(path, path[1:]))])
+
+    def test_one_minute_bars_alone_cannot_settle_it(self):
+        rows, m1, _ = self._fill_candle()
+        _, (t,) = run(rows, bars1=m1)
+        assert t.confidence == UNCERTAIN
+
+    def test_low_then_high_is_a_target(self):
+        from src.strategies.futures.mnq_hybrid import merge_fine
+        rows, m1, start = self._fill_candle()
+        merged, swapped, disagreed = merge_fine(
+            m1, self._seconds(start, [19_980, 19_975, 19_969, 19_980, 19_995, 19_985]))
+        assert (swapped, disagreed) == (1, 0)
+        _, (t,) = run(rows, bars1=merged)
+        assert (t.exit_reason, t.exit_price, t.confidence) == ("take_profit", 19_989.0, RESOLVED_1M)
+
+    def test_high_then_low_is_not(self):
+        from src.strategies.futures.mnq_hybrid import merge_fine
+        rows, m1, start = self._fill_candle()
+        merged, _, _ = merge_fine(
+            m1, self._seconds(start, [19_980, 19_995, 19_990, 19_980, 19_969, 19_975, 19_985]))
+        _, (t,) = run(rows, bars1=merged)
+        assert (t.exit_reason, t.confidence) == ("end_of_data", RESOLVED_1M)
+
+    def test_merge_keeps_every_five_minute_candle(self):
+        """Pinned to the minute's own high and low, so no signal can move."""
+        from src.strategies.futures.mnq_hybrid import merge_fine
+        _, m1, start = self._fill_candle()
+        close_enough = self._seconds(start, [19_980, 19_969.3, 19_994.8, 19_985])
+        merged, swapped, _ = merge_fine(m1, close_enough)
+        assert swapped == 1
+        pd.testing.assert_frame_equal(resample_1m_to_5m(merged)[["ts", "open", "high", "low", "close"]],
+                                      resample_1m_to_5m(m1)[["ts", "open", "high", "low", "close"]])
+
+    def test_a_minute_that_disagrees_is_left_alone(self):
+        from src.strategies.futures.mnq_hybrid import merge_fine
+        _, m1, start = self._fill_candle()
+        merged, swapped, disagreed = merge_fine(m1, self._seconds(start, [19_980, 19_975, 19_995, 19_985]))
+        assert (swapped, disagreed) == (0, 1)
+        assert len(merged) == len(m1)
+
+    def test_uncertain_windows_are_the_fill_and_exit_candles(self):
+        from src.strategies.futures.mnq_hybrid import uncertain_windows
+        rows, m1, start = self._fill_candle()
+        _, trades = run(rows, bars1=m1)
+        assert uncertain_windows(trades) == {start, rows[-1]["ts"]}
+
+    def test_seconds_are_fetched_once_and_neighbours_share_a_request(self, tmp_path, monkeypatch):
+        import sys
+        import types
+
+        import scripts.mnq_data as md
+        calls = []
+
+        def fake_fetch(instrument, interval, offer_side, start, end, limit, **kw):
+            calls.append((start, end))
+            idx = pd.date_range(start, end, freq="1s", tz="UTC", inclusive="left")
+            df = pd.DataFrame({"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0}, index=idx)
+            df.index.name = "timestamp"
+            return df
+
+        monkeypatch.setitem(sys.modules, "dukascopy_python", types.SimpleNamespace(
+            fetch=fake_fetch, INTERVAL_SEC_1="1SEC", OFFER_SIDE_BID="B"))
+        monkeypatch.setattr(md, "OUT_DIR", tmp_path)
+        windows = {T0, T0 + FIVE_MIN_MS, T0 + 4 * FIVE_MIN_MS}
+        fine = md.fetch_dukascopy_seconds(windows)
+        assert len(calls) == 2                          # the first two candles are one request
+        assert len(fine) == 3 * 300 and fine["ts"].is_unique
+        again = md.fetch_dukascopy_seconds(windows)
+        assert len(calls) == 2 and len(again) == len(fine)
+
+    def test_fetch_gives_up_when_dukascopy_has_no_seconds(self, tmp_path, monkeypatch):
+        """No 1-second history: stop after two empty batches, remember nothing,
+        so a later run can try again."""
+        import sys
+        import types
+
+        import scripts.mnq_data as md
+        calls = []
+
+        def empty_fetch(instrument, interval, offer_side, start, end, **kw):
+            calls.append(start)
+            df = pd.DataFrame(columns=["open", "high", "low", "close", "volume"],
+                              index=pd.DatetimeIndex([], tz="UTC", name="timestamp"))
+            return df
+
+        monkeypatch.setitem(sys.modules, "dukascopy_python", types.SimpleNamespace(
+            fetch=empty_fetch, INTERVAL_SEC_1="1SEC", OFFER_SIDE_BID="B"))
+        monkeypatch.setattr(md, "OUT_DIR", tmp_path)
+        windows = {T0 + k * 2 * FIVE_MIN_MS for k in range(500)}      # 500 separate requests
+        fine = md.fetch_dukascopy_seconds(windows)
+        assert len(fine) == 0 and len(calls) == 80
+        assert (tmp_path / "mnq_1s_cache.done.json").read_text() == "[]"

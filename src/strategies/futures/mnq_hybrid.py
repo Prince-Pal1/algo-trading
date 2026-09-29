@@ -370,6 +370,58 @@ def index_1m(bars5: pd.DataFrame, df1: pd.DataFrame | None):
     }
 
 
+def uncertain_windows(trades: list) -> set[int]:
+    """Start times (ms) of the 5-minute candles where an uncertain trade was
+    filled or closed. Those two candles hold every intrabar guess the path
+    walk makes, so they are the ones worth fetching finer data for."""
+    out: set[int] = set()
+    for t in trades:
+        if t.confidence == UNCERTAIN:
+            out.update((int(t.entry_ts), int(t.exit_ts)))
+    return out
+
+
+def merge_fine(bars1: pd.DataFrame, fine: pd.DataFrame | None, tol: float = 0.5):
+    """Swap 1-minute bars for their 1-second bars, for intrabar ORDER only.
+
+    A minute is swapped only when its 1-second bars agree with it on the high
+    and low (within `tol` points). The 1-second prices are then clipped to the
+    minute's range and its extremes pinned to the minute's own, so the 5-minute
+    candles, and every signal built on them, stay exactly as they were; the
+    only new information is which second each level was reached in.
+
+    Returns (merged bars, minutes swapped, minutes that disagreed).
+    """
+    b1 = normalise(bars1)
+    if fine is None or len(fine) == 0:
+        return b1, 0, 0
+    f = normalise(fine)[["ts", "open", "high", "low", "close"]]
+    f["minute"] = f["ts"] - f["ts"] % 60_000
+    m = b1.set_index("ts")[["high", "low"]]
+    g = f.groupby("minute").agg(fh=("high", "max"), fl=("low", "min"))
+    common = g.index.intersection(m.index)
+    agree = ((g.loc[common, "fh"] - m.loc[common, "high"]).abs() <= tol) & \
+            ((g.loc[common, "fl"] - m.loc[common, "low"]).abs() <= tol)
+    ok = common[agree.to_numpy()]
+    disagreed = int(len(common) - len(ok))
+    f = f[f["minute"].isin(ok)].reset_index(drop=True)
+    if f.empty:
+        return b1, 0, disagreed
+
+    hi = m["high"].reindex(f["minute"]).to_numpy()
+    lo = m["low"].reindex(f["minute"]).to_numpy()
+    for col in ("open", "high", "low", "close"):
+        f[col] = np.clip(f[col].to_numpy(), lo, hi)
+    hi_rows = f.groupby("minute")["high"].idxmax()        # minute -> row
+    lo_rows = f.groupby("minute")["low"].idxmin()
+    f.loc[hi_rows.to_numpy(), "high"] = m["high"].reindex(hi_rows.index).to_numpy()
+    f.loc[lo_rows.to_numpy(), "low"] = m["low"].reindex(lo_rows.index).to_numpy()
+
+    keep = b1[~b1["ts"].isin(ok)][["ts", "open", "high", "low", "close"]]
+    merged = pd.concat([keep, f[["ts", "open", "high", "low", "close"]]], ignore_index=True)
+    return merged.sort_values("ts", kind="stable").reset_index(drop=True), int(len(ok)), disagreed
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # INTRABAR PATHS
 # ═══════════════════════════════════════════════════════════════════════════
@@ -458,6 +510,10 @@ def _long_path(segs, used_1m: bool, *, limit: float | None, entry: float | None,
             return entry, sl - slip, "stop_loss", conf, tp, sl
         if hit_sl:
             return entry, sl - slip, "stop_loss", conf, tp, sl
+        if sc >= tp:
+            # Closed at or above the target: price climbed through it after the
+            # fill, whatever the high did before. Certain.
+            return entry, tp, "take_profit", conf, tp, sl
         if hit_tp:
             if policy == "optimistic":
                 return entry, tp, "take_profit", _worse(conf, UNCERTAIN), tp, sl
