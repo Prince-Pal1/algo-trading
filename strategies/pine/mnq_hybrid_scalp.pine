@@ -165,8 +165,7 @@ shortQty       = qtyFor(shortStopTicks * syminfo.mintick)
 // non-repainting way to read a COMPLETED higher-timeframe candle. Without the
 // [1], lookahead_on leaks today's unfinished close into history.
 // -------------------------------------------------------------------------
-prevRedInt = request.security(syminfo.tickerid, "D", close[1] < open[1] ? 1 : 0,
-     lookahead = barmerge.lookahead_on)
+prevRedInt = request.security(syminfo.tickerid, "D", close[1] < open[1] ? 1 : 0, lookahead = barmerge.lookahead_on)
 prevDayRed = nz(prevRedInt) == 1
 
 // -------------------------------------------------------------------------
@@ -264,8 +263,7 @@ if longAllowed
     pendTpTicks := tpTicks
     pendSlTicks := slTicks
     strategy.entry("Long", strategy.long, qty = longQty, limit = lowerNext, comment = "ATR band")
-    strategy.exit("L-X", from_entry = "Long", profit = tpTicks, loss = slTicks,
-         comment_profit = "TP 2 ATR", comment_loss = "SL 1.5 ATR")
+    strategy.exit("L-X", from_entry = "Long", profit = tpTicks, loss = slTicks, comment_profit = "TP 2 ATR", comment_loss = "SL 1.5 ATR")
 else if flat
     strategy.cancel("Long")
     strategy.cancel("L-X")
@@ -281,16 +279,13 @@ plot(showUpper ? upperNext[1] : na, "Upper ATR band (not traded)", color.new(col
 plot(lockTp, "Locked target", color.new(color.teal, 0), 2, plot.style_linebr)
 plot(lockSl, "Locked stop", color.new(color.red, 0), 2, plot.style_linebr)
 
-plotshape(shortSignal, "Short signal (sell next open)", shape.triangledown, location.abovebar,
-     color.new(color.orange, 0), size = size.tiny)
-plotshape(shortOn and isStar and not shortSignal, "Star filtered out", shape.xcross, location.abovebar,
-     color.new(color.gray, 40), size = size.tiny)
+plotshape(shortSignal, "Short signal (sell next open)", shape.triangledown, location.abovebar, color.new(color.orange, 0), size = size.tiny)
+plotshape(shortOn and isStar and not shortSignal, "Star filtered out", shape.xcross, location.abovebar, color.new(color.gray, 40), size = size.tiny)
 
 bgcolor(thisBarIsOpening ? color.new(color.gray, 85) : na, title = "Opening candle (no trading)")
 
 // Status panel: what the next candle will trade with.
-var table info = table.new(position.top_right, 2, 9, bgcolor = color.new(color.black, 25),
-     border_color = color.new(color.gray, 70), border_width = 1)
+var table info = table.new(position.top_right, 2, 9, bgcolor = color.new(color.black, 25), border_color = color.new(color.gray, 70), border_width = 1)
 
 cellTxt(r, k, v) =>
     table.cell(info, 0, r, k, text_color = color.silver, text_size = size.small, text_halign = text.align_left)
