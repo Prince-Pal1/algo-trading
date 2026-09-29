@@ -291,7 +291,7 @@ cellTxt(r, k, v) =>
     table.cell(info, 0, r, k, text_color = color.silver, text_size = size.small, text_halign = text.align_left)
     table.cell(info, 1, r, v, text_color = color.white, text_size = size.small, text_halign = text.align_right)
 
-if barstate.islast
+if barstate.islastconfirmedhistory or barstate.isrealtime
     cellTxt(0, "ATR (prev candle)", atrOk ? str.tostring(atrVal, "#.##") : "-")
     cellTxt(1, "Lower band (next)", str.tostring(lowerNext, format.mintick))
     cellTxt(2, "Long size / stop", str.tostring(longQty) + " / " + str.tostring(slTicks * syminfo.mintick, "#.##") + " pts")
