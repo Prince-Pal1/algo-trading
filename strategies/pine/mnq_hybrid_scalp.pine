@@ -1,6 +1,6 @@
 //@version=5
-// ════════════════════════════════════════════════════════════════════════════
-// MNQ Hybrid Scalp — "Trader MNQ" (IQ Capital video, reverse-engineered)
+// ============================================================================
+// MNQ Hybrid Scalp - "Trader MNQ" (IQ Capital video, reverse-engineered)
 //
 // Two independent modules on the 5-minute chart:
 //
@@ -15,10 +15,10 @@
 //
 // Sources: the video transcript, with timestamps in the comments below.
 //
-// ── What the video does NOT say, and what this script assumes ─────────────
+// -- What the video does NOT say, and what this script assumes -------------
 //   * Which "opening candle": assumed 09:30 New York (input).
 //   * Trading hours: not stated, so all hours by default (optional window).
-//   * ATR smoothing: not stated, so RMA/Wilder, TradingView's ta.atr default.
+//   * ATR smoothing: not stated. ta.atr() (RMA/Wilder), the same ATR TradingView's own indicator draws.
 //   * Short sizing distance: not stated, so 1.5 x ATR (same as the long).
 //   * Overlap: not stated. One position at a time; a short signal pulls the
 //     long limit for the single candle the short is held.
@@ -27,13 +27,13 @@
 //   * The shooting-star thresholds are the VIDEO CREATOR's rule, not the
 //     trader's. The trader eyeballs the candle (17:35-18:24).
 //
-// ── To reproduce the video's backtests ───────────────────────────────────
-//   Sizing = "Fixed contracts", 4. Test one module at a time. For the short,
+// -- To reproduce the video's backtests -----------------------------------
+//   Tick "Use fixed contracts", set 4. Test one module at a time. For the short,
 //   turn "Max-loss stop" OFF. The video's settings for costs and date range
 //   are unknown, so expect the same shape of result, not the same numbers.
 //   Video long:  PF 1.527, ~50% win rate, max DD $2,614
 //   Video short: PF 1.413,  52% win rate, max DD $1,142 (22:42)
-// ════════════════════════════════════════════════════════════════════════════
+// ============================================================================
 
 // Declaration notes:
 //   initial_capital  100000: IQ Capital 100K account.
@@ -48,19 +48,18 @@
 //   process_orders_on_close = false: market orders fill at the NEXT candle's open.
 strategy("MNQ Hybrid Scalp - ATR Band Long / Shooting Star Short", shorttitle = "MNQ Hybrid Scalp", overlay = true, initial_capital = 100000, currency = currency.USD, pyramiding = 0, commission_type = strategy.commission.cash_per_contract, commission_value = 0.62, slippage = 1, margin_long = 0, margin_short = 0, use_bar_magnifier = true, process_orders_on_close = false, calc_on_every_tick = false)
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 // INPUTS
-// ─────────────────────────────────────────────────────────────────────────
-grpL = "Long — ATR band scalp"
+// -------------------------------------------------------------------------
+grpL = "Long - ATR band scalp"
 longOn    = input.bool(true, "Enable long module", group = grpL)
 atrLen    = input.int(14, "ATR length", minval = 1, group = grpL, tooltip = "Video 11:55: period 14.")
-atrSmooth = input.string("RMA", "ATR smoothing", options = ["RMA", "SMA", "EMA", "WMA"], group = grpL, tooltip = "Not stated in the video. RMA (Wilder) is what ta.atr() uses.")
 bandMult  = input.float(3.1, "Band multiplier (x ATR)", step = 0.1, group = grpL, tooltip = "Video 11:55: scale factor 3.1.")
 tpMult    = input.float(2.0, "Target (x ATR)", step = 0.1, group = grpL)
 slMult    = input.float(1.5, "Stop (x ATR)", step = 0.1, group = grpL)
 showUpper = input.bool(false, "Plot upper band (never traded)", group = grpL, tooltip = "Video 8:14: the trader only uses the lower band.")
 
-grpS = "Short — shooting star scalp"
+grpS = "Short - shooting star scalp"
 shortOn       = input.bool(true, "Enable short module", group = grpS)
 wickBodyRatio = input.float(2.0, "Upper wick >= N x body", step = 0.1, group = grpS)
 lowerWickFrac = input.float(0.10, "Lower wick <= N x upper wick", step = 0.01, group = grpS)
@@ -70,7 +69,7 @@ shortRiskMult = input.float(1.5, "Short sizing distance (x ATR)", step = 0.1, gr
 shortStopOn   = input.bool(true, "Max-loss stop at that distance", group = grpS, tooltip = "Sizing alone cannot cap a loss that has no exit price. The video says the trader closes early if a trade risks the max-position-loss rule (26:08); this is that rule made mechanical. Turn OFF to reproduce the video's no-stop backtest.")
 
 grpR = "Risk & sizing"
-sizeMode = input.string("Risk % of starting balance", "Sizing", options = ["Risk % of starting balance", "Fixed contracts"], group = grpR)
+useFixedQty = input.bool(false, "Use fixed contracts instead of risk %", group = grpR, tooltip = "Tick this and set 4 to reproduce the video's backtests.")
 riskPct  = input.float(0.5, "Max loss per position (% of starting balance)", step = 0.1, group = grpR, tooltip = "Video 14:55: IQ Capital limits loss per position to 0.5% of STARTING balance on a funded account, 1% on a challenge. Starting balance = Initial capital in Properties.")
 fixedQty = input.int(4, "Fixed contracts", minval = 1, group = grpR, tooltip = "The video's backtests used a static 4.")
 maxQty   = input.int(20, "Max contracts", minval = 1, group = grpR)
@@ -85,12 +84,12 @@ winEnd      = input.int(1600, "Window end (HHMM)", group = grpT)
 useFlatten  = input.bool(false, "Flatten everything at a fixed time", group = grpT, tooltip = "Not in the video. Stops a long from being held overnight.")
 flattenHHMM = input.int(1555, "Flatten at (HHMM)", group = grpT)
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 // TIME HELPERS
 // A strategy decides at a candle's CLOSE what orders are live during the NEXT
 // candle. So "don't trade the opening candle" has to be checked one candle
 // early, against the next candle's open time, which is this candle's close.
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 TZ = "America/New_York"
 
 minuteOfDay(t) => hour(t, TZ) * 60 + minute(t, TZ)
@@ -111,46 +110,38 @@ flattenNow   = useFlatten and nextBarMin == hhmmToMin(flattenHHMM)
 nextBarBlocked   = isOpeningMin(nextBarMin) or globexNext or not inWindow(nextBarMin) or flattenNow
 thisBarIsOpening = isOpeningMin(thisBarMin) or globexThis
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 // ATR
 // Evaluated at this candle's close, this value is the "previous candle's ATR"
 // for everything in the next candle: the band, the target and the stop.
 // That's what makes them static (11:55-12:45). The current candle's ATR moves
 // with every tick; the previous candle's never changes.
-// ─────────────────────────────────────────────────────────────────────────
-// All four are computed on every bar and one is selected. A ta.* call inside
-// a conditional branch only updates its history on the bars where that branch
-// runs, which Pine warns about.
-trueRange = ta.tr(true)
-atrRma = ta.rma(trueRange, atrLen)
-atrSma = ta.sma(trueRange, atrLen)
-atrEma = ta.ema(trueRange, atrLen)
-atrWma = ta.wma(trueRange, atrLen)
-atrVal = atrSmooth == "SMA" ? atrSma : atrSmooth == "EMA" ? atrEma : atrSmooth == "WMA" ? atrWma : atrRma
-atrOk  = not na(atrVal) and atrVal > 0
+// -------------------------------------------------------------------------
+atrVal = ta.atr(atrLen)
+atrOk = not na(atrVal) and atrVal > 0
 
-// ─────────────────────────────────────────────────────────────────────────
-// ATR BANDS — anchored on the PREVIOUS candle's close (6:27-7:52)
+// -------------------------------------------------------------------------
+// ATR BANDS - anchored on the PREVIOUS candle's close (6:27-7:52)
 // Computed now, live during the next candle. Anchoring on the current price
 // would make the band move with price and it would never get touched: the
 // video's own reason for the static anchor.
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 lowerNext = math.round_to_mintick(close - bandMult * atrVal)
 upperNext = math.round_to_mintick(close + bandMult * atrVal)
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 // POSITION SIZING
 // Contracts = floor(allowed loss / (stop distance x $ per point)).
 // MNQ is $2 a point (syminfo.pointvalue), so 5 contracts = $10/point (13:55).
 // Wider ATR -> wider stop -> fewer contracts; narrower ATR -> more.
 // Commission and slippage are NOT in this sum, so a stop-out can land a
 // little over the limit. Lower riskPct slightly if that matters to you.
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 riskUsd = strategy.initial_capital * riskPct / 100.0
 
 qtyFor(stopPts) =>
     int q = 0
-    if sizeMode == "Fixed contracts"
+    if useFixedQty
         q := fixedQty
     else
         perContract = stopPts * syminfo.pointvalue
@@ -168,24 +159,24 @@ longQty  = qtyFor(slTicks * syminfo.mintick)
 shortStopTicks = atrOk ? math.round(shortRiskMult * atrVal / syminfo.mintick) : 0
 shortQty       = qtyFor(shortStopTicks * syminfo.mintick)
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 // DAILY FILTER (24:33)
 // Previous completed day closed red. `[1]` with lookahead_on is the
 // non-repainting way to read a COMPLETED higher-timeframe candle. Without the
 // [1], lookahead_on leaks today's unfinished close into history.
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 prevRedInt = request.security(syminfo.tickerid, "D", close[1] < open[1] ? 1 : 0,
      lookahead = barmerge.lookahead_on)
 prevDayRed = nz(prevRedInt) == 1
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 // SHOOTING STAR (17:35-18:24): the video creator's objective version
 //   upper wick >= 2 x body
 //   lower wick <= 1/10 of the upper wick
 //   either colour
 // The upper wick must exist, or a flat candle (all four prices equal) passes
 // both ratio tests at 0 >= 0.
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 body      = math.abs(close - open)
 upperWick = high - math.max(open, close)
 lowerWick = math.min(open, close) - low
@@ -194,11 +185,11 @@ isStarShape = upperWick > 0 and upperWick >= wickBodyRatio * body and lowerWick 
 isStarSize  = minWickAtr <= 0 or upperWick >= minWickAtr * atrVal
 isStar      = isStarShape and isStarSize
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 // STATE: record the locked exits when a long fills
 // Read BEFORE this candle places new orders, so we get the values from the
 // order that actually filled rather than the next one.
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 var float pendAtr     = na
 var int   pendTpTicks = 0
 var int   pendSlTicks = 0
@@ -220,19 +211,19 @@ if strategy.position_size <= 0
 
 flat = strategy.position_size == 0
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 // SHORT: TIME EXIT (19:18-19:48)
 // The short was entered at the open of the candle that just closed. At its
 // close, buy back, which fills at the NEXT open: one candle, five minutes,
 // "no matter what". Any open short at a candle's close is exited this way.
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 if strategy.position_size < 0
     strategy.close("Short", comment = "1-candle time exit")
 
 if flattenNow and strategy.position_size != 0
     strategy.close_all(comment = "Flatten time")
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 // SHORT: ENTRY
 // The signal candle has closed, so sell at market, which fills at the next
 // open (18:24-18:40). Skipped when:
@@ -242,7 +233,7 @@ if flattenNow and strategy.position_size != 0
 //   * the daily filter is on and yesterday wasn't red
 //   * the size works out below 1 contract
 // Evaluated before the long so it can pull the long limit (see below).
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 shortTimingOk = not thisBarIsOpening and not nextBarBlocked
 shortFilterOk = not dailyFilter or prevDayRed
 shortSignal   = shortOn and atrOk and flat and isStar and shortTimingOk and shortFilterOk and shortQty >= 1
@@ -252,7 +243,7 @@ if shortSignal
     if shortStopOn
         strategy.exit("S-X", from_entry = "Short", loss = shortStopTicks, comment_loss = "Max-loss stop")
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 // LONG: THE FOLLOWING LIMIT ORDER (8:33-8:42)
 // "Wherever the lower band goes, there's a limit order following it." While
 // flat, re-place the limit at this candle's band every candle. Using the same
@@ -265,7 +256,7 @@ if shortSignal
 //
 // The limit is pulled for the next candle when that candle is the opening
 // candle, is outside the window, or is the candle a short is being held in.
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 longAllowed = longOn and atrOk and flat and not nextBarBlocked and not shortSignal and longQty >= 1
 
 if longAllowed
@@ -279,11 +270,11 @@ else if flat
     strategy.cancel("Long")
     strategy.cancel("L-X")
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 // VISUALS
 // The band live on each candle is the one computed at the PREVIOUS close,
 // hence [1]. That's the price the limit order sat at during this candle.
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 plot(lowerNext[1], "Lower ATR band (live limit)", color.new(color.red, 0), 1, plot.style_stepline)
 plot(showUpper ? upperNext[1] : na, "Upper ATR band (not traded)", color.new(color.gray, 50), 1, plot.style_stepline)
 
@@ -306,12 +297,12 @@ cellTxt(r, k, v) =>
     table.cell(info, 1, r, v, text_color = color.white, text_size = size.small, text_halign = text.align_right)
 
 if barstate.islast
-    cellTxt(0, "ATR (prev candle)", atrOk ? str.tostring(atrVal, "#.##") : "—")
+    cellTxt(0, "ATR (prev candle)", atrOk ? str.tostring(atrVal, "#.##") : "-")
     cellTxt(1, "Lower band (next)", str.tostring(lowerNext, format.mintick))
     cellTxt(2, "Long size / stop", str.tostring(longQty) + " / " + str.tostring(slTicks * syminfo.mintick, "#.##") + " pts")
     cellTxt(3, "Short size / dist", str.tostring(shortQty) + " / " + str.tostring(shortStopTicks * syminfo.mintick, "#.##") + " pts")
     cellTxt(4, "Max loss / position", "$" + str.tostring(riskUsd, "#,###"))
     cellTxt(5, "Previous day", prevDayRed ? "red (shorts OK)" : "green")
-    cellTxt(6, "Locked TP / SL", na(lockTp) ? "—" : str.tostring(lockTp, format.mintick) + " / " + str.tostring(lockSl, format.mintick))
-    cellTxt(7, "Locked ATR (in trade)", na(lockAtr) ? "—" : str.tostring(lockAtr, "#.##"))
+    cellTxt(6, "Locked TP / SL", na(lockTp) ? "-" : str.tostring(lockTp, format.mintick) + " / " + str.tostring(lockSl, format.mintick))
+    cellTxt(7, "Locked ATR (in trade)", na(lockAtr) ? "-" : str.tostring(lockAtr, "#.##"))
     cellTxt(8, "Next candle", nextBarBlocked ? "BLOCKED" : "tradeable")
