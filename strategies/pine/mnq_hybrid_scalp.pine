@@ -35,82 +35,54 @@
 //   Video short: PF 1.413,  52% win rate, max DD $1,142 (22:42)
 // ════════════════════════════════════════════════════════════════════════════
 
-strategy("MNQ Hybrid Scalp — ATR Band Long / Shooting Star Short",
-     shorttitle              = "MNQ Hybrid Scalp",
-     overlay                 = true,
-     initial_capital         = 100000,        // IQ Capital 100K account
-     currency                = currency.USD,
-     pyramiding              = 0,             // one position at a time
-     commission_type         = strategy.commission.cash_per_contract,
-     commission_value        = 0.62,          // per contract, per side. Set 0 to match an idealised test
-     slippage                = 1,             // ticks; applies to market and stop orders, not limits
-     // Margin simulation OFF. TradingView's default margin (100% of notional)
-     // would force-liquidate futures: one MNQ is ~$40k of notional, so a 100K
-     // account "runs out of margin" at 2-3 contracts. 0 disables that check.
-     margin_long             = 0,
-     margin_short            = 0,
-     // On a 5-minute chart TradingView can't tell whether the target or the
-     // stop was hit first when both sit inside one candle. The bar magnifier
-     // resolves it from lower-timeframe data (Premium plans). Without it,
-     // tight scalps like these can have their result flipped by one guess.
-     use_bar_magnifier       = true,
-     process_orders_on_close = false,         // market orders fill at the NEXT open
-     calc_on_every_tick      = false)
+// Declaration notes:
+//   initial_capital  100000: IQ Capital 100K account.
+//   commission       $0.62 per contract per side. Set 0 in Properties for an idealised test.
+//   slippage         1 tick. Applies to market and stop orders, not to limits.
+//   margin           OFF (0). TradingView's default margin (100% of notional) would
+//                    force-liquidate futures: one MNQ is ~$40k of notional, so a 100K
+//                    account "runs out of margin" at 2-3 contracts.
+//   bar magnifier    ON. On a 5-minute chart TradingView can't tell whether the target
+//                    or the stop was hit first when both sit inside one candle; the
+//                    magnifier resolves it from lower-timeframe data (Premium plans).
+//   process_orders_on_close = false: market orders fill at the NEXT candle's open.
+strategy("MNQ Hybrid Scalp - ATR Band Long / Shooting Star Short", shorttitle = "MNQ Hybrid Scalp", overlay = true, initial_capital = 100000, currency = currency.USD, pyramiding = 0, commission_type = strategy.commission.cash_per_contract, commission_value = 0.62, slippage = 1, margin_long = 0, margin_short = 0, use_bar_magnifier = true, process_orders_on_close = false, calc_on_every_tick = false)
 
 // ─────────────────────────────────────────────────────────────────────────
 // INPUTS
 // ─────────────────────────────────────────────────────────────────────────
 grpL = "Long — ATR band scalp"
 longOn    = input.bool(true, "Enable long module", group = grpL)
-atrLen    = input.int(14, "ATR length", minval = 1, group = grpL,
-     tooltip = "Video 11:55: period 14.")
-atrSmooth = input.string("RMA", "ATR smoothing", options = ["RMA", "SMA", "EMA", "WMA"], group = grpL,
-     tooltip = "Not stated in the video. RMA (Wilder) is what ta.atr() uses.")
-bandMult  = input.float(3.1, "Band multiplier (x ATR)", step = 0.1, group = grpL,
-     tooltip = "Video 11:55: scale factor 3.1.")
+atrLen    = input.int(14, "ATR length", minval = 1, group = grpL, tooltip = "Video 11:55: period 14.")
+atrSmooth = input.string("RMA", "ATR smoothing", options = ["RMA", "SMA", "EMA", "WMA"], group = grpL, tooltip = "Not stated in the video. RMA (Wilder) is what ta.atr() uses.")
+bandMult  = input.float(3.1, "Band multiplier (x ATR)", step = 0.1, group = grpL, tooltip = "Video 11:55: scale factor 3.1.")
 tpMult    = input.float(2.0, "Target (x ATR)", step = 0.1, group = grpL)
 slMult    = input.float(1.5, "Stop (x ATR)", step = 0.1, group = grpL)
-showUpper = input.bool(false, "Plot upper band (never traded)", group = grpL,
-     tooltip = "Video 8:14: the trader only uses the lower band.")
+showUpper = input.bool(false, "Plot upper band (never traded)", group = grpL, tooltip = "Video 8:14: the trader only uses the lower band.")
 
 grpS = "Short — shooting star scalp"
 shortOn       = input.bool(true, "Enable short module", group = grpS)
 wickBodyRatio = input.float(2.0, "Upper wick >= N x body", step = 0.1, group = grpS)
 lowerWickFrac = input.float(0.10, "Lower wick <= N x upper wick", step = 0.01, group = grpS)
-minWickAtr    = input.float(0.0, "Min upper wick (x ATR, 0 = off)", step = 0.05, group = grpS,
-     tooltip = "Not in the video. A tiny candle can pass the ratio tests (a 1-tick wick on a " +
-               "0-tick body is technically a 'shooting star'). Raise this to demand a real rejection.")
-dailyFilter   = input.bool(false, "Only short after a red previous day", group = grpS,
-     tooltip = "Video 24:33: improved the test, but on only 60 trades, which the video itself " +
-               "says is not a significant sample.")
-shortRiskMult = input.float(1.5, "Short sizing distance (x ATR)", step = 0.1, group = grpS,
-     tooltip = "The video gives no sizing formula for shorts. This is the adverse move the " +
-               "size is calculated against.")
-shortStopOn   = input.bool(true, "Max-loss stop at that distance", group = grpS,
-     tooltip = "Sizing alone cannot cap a loss that has no exit price. The video says the trader " +
-               "closes early if a trade risks the max-position-loss rule (26:08); this is that " +
-               "rule made mechanical. Turn OFF to reproduce the video's no-stop backtest.")
+minWickAtr    = input.float(0.0, "Min upper wick (x ATR, 0 = off)", step = 0.05, group = grpS, tooltip = "Not in the video. A tiny candle can pass the ratio tests (a 1-tick wick on a 0-tick body is technically a 'shooting star'). Raise this to demand a real rejection.")
+dailyFilter   = input.bool(false, "Only short after a red previous day", group = grpS, tooltip = "Video 24:33: improved the test, but on only 60 trades, which the video itself says is not a significant sample.")
+shortRiskMult = input.float(1.5, "Short sizing distance (x ATR)", step = 0.1, group = grpS, tooltip = "The video gives no sizing formula for shorts. This is the adverse move the size is calculated against.")
+shortStopOn   = input.bool(true, "Max-loss stop at that distance", group = grpS, tooltip = "Sizing alone cannot cap a loss that has no exit price. The video says the trader closes early if a trade risks the max-position-loss rule (26:08); this is that rule made mechanical. Turn OFF to reproduce the video's no-stop backtest.")
 
 grpR = "Risk & sizing"
-sizeMode = input.string("Risk % of starting balance", "Sizing",
-     options = ["Risk % of starting balance", "Fixed contracts"], group = grpR)
-riskPct  = input.float(0.5, "Max loss per position (% of starting balance)", step = 0.1, group = grpR,
-     tooltip = "Video 14:55: IQ Capital limits loss per position to 0.5% of STARTING balance on a " +
-               "funded account, 1% on a challenge. Starting balance = Initial capital in Properties.")
-fixedQty = input.int(4, "Fixed contracts", minval = 1, group = grpR,
-     tooltip = "The video's backtests used a static 4.")
+sizeMode = input.string("Risk % of starting balance", "Sizing", options = ["Risk % of starting balance", "Fixed contracts"], group = grpR)
+riskPct  = input.float(0.5, "Max loss per position (% of starting balance)", step = 0.1, group = grpR, tooltip = "Video 14:55: IQ Capital limits loss per position to 0.5% of STARTING balance on a funded account, 1% on a challenge. Starting balance = Initial capital in Properties.")
+fixedQty = input.int(4, "Fixed contracts", minval = 1, group = grpR, tooltip = "The video's backtests used a static 4.")
 maxQty   = input.int(20, "Max contracts", minval = 1, group = grpR)
 
 grpT = "Session (all times New York)"
-skipOpen    = input.bool(true, "Never trade the opening candle", group = grpT,
-     tooltip = "Video 11:14: 'He never trades the opening candle.' Which open isn't stated; 09:30 assumed.")
+skipOpen    = input.bool(true, "Never trade the opening candle", group = grpT, tooltip = "Video 11:14: 'He never trades the opening candle.' Which open isn't stated; 09:30 assumed.")
 openHHMM    = input.int(930, "Opening candle time (HHMM)", group = grpT)
 skipGlobex  = input.bool(false, "Also skip the 18:00 Globex reopen candle", group = grpT)
 useWindow   = input.bool(false, "Only trade inside a time window", group = grpT)
 winStart    = input.int(930, "Window start (HHMM)", group = grpT)
 winEnd      = input.int(1600, "Window end (HHMM)", group = grpT)
-useFlatten  = input.bool(false, "Flatten everything at a fixed time", group = grpT,
-     tooltip = "Not in the video. Stops a long from being held overnight.")
+useFlatten  = input.bool(false, "Flatten everything at a fixed time", group = grpT, tooltip = "Not in the video. Stops a long from being held overnight.")
 flattenHHMM = input.int(1555, "Flatten at (HHMM)", group = grpT)
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -218,10 +190,9 @@ body      = math.abs(close - open)
 upperWick = high - math.max(open, close)
 lowerWick = math.min(open, close) - low
 
-isStar = upperWick > 0
-     and upperWick >= wickBodyRatio * body
-     and lowerWick <= lowerWickFrac * upperWick
-     and (minWickAtr <= 0 or upperWick >= minWickAtr * atrVal)
+isStarShape = upperWick > 0 and upperWick >= wickBodyRatio * body and lowerWick <= lowerWickFrac * upperWick
+isStarSize  = minWickAtr <= 0 or upperWick >= minWickAtr * atrVal
+isStar      = isStarShape and isStarSize
 
 // ─────────────────────────────────────────────────────────────────────────
 // STATE: record the locked exits when a long fills
@@ -272,10 +243,9 @@ if flattenNow and strategy.position_size != 0
 //   * the size works out below 1 contract
 // Evaluated before the long so it can pull the long limit (see below).
 // ─────────────────────────────────────────────────────────────────────────
-shortSignal = shortOn and atrOk and flat and isStar
-     and not thisBarIsOpening and not nextBarBlocked
-     and (not dailyFilter or prevDayRed)
-     and shortQty >= 1
+shortTimingOk = not thisBarIsOpening and not nextBarBlocked
+shortFilterOk = not dailyFilter or prevDayRed
+shortSignal   = shortOn and atrOk and flat and isStar and shortTimingOk and shortFilterOk and shortQty >= 1
 
 if shortSignal
     strategy.entry("Short", strategy.short, qty = shortQty, comment = "Shooting star")
