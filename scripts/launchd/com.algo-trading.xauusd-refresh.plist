@@ -10,7 +10,7 @@
         <string>/Library/Frameworks/Python.framework/Versions/3.11/bin/python3</string>
         <string>scripts/download_xauusd.py</string>
         <string>--years</string>
-        <string>2.0</string>
+        <string>8.75</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -27,8 +27,13 @@
          60h warmup-recency tolerance is never exceeded — fixes the Session 29
          re-staleness (cache went stale ~2.5d after each manual refresh, which
          starved donchian_gold's warmup on restart). download_xauusd.py uses
-         REPLACE semantics with the full 2y window (the known small-window
-         truncation footgun). -->
+         REPLACE semantics -- it OVERWRITES the parquet with exactly the
+         requested window, it does not merge. At --years 2.0 this silently
+         truncated the research history from 619,590 bars (2017-12-18) back to
+         141,516 (2024-09-15) on 2026-09-15, mid-run. Raised to 8.75y so the
+         one file serves both the gold engine's freshness requirement and the
+         walk-forward's need for history. Do not lower it without moving
+         research to its own differently-named file. -->
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
