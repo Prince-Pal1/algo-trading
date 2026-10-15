@@ -186,6 +186,7 @@ class ResultStore:
         config_json: str = "",
         params_json: str = "",
         source_format: str = "python",
+        initial_capital: float = 10_000.0,
     ) -> RunRecord:
         """Produce all 3 outputs atomically:
 
@@ -198,7 +199,7 @@ class ResultStore:
         conn = self._ensure_conn()
 
         # Step 1: compute_metrics() — SINGLE source of truth (Invariant #2)
-        metrics = compute_metrics(equity, trades, ohlcv=ohlcv_df)
+        metrics = compute_metrics(equity, trades, initial_capital=initial_capital, ohlcv=ohlcv_df)
 
         # Step 2: data fingerprint (Invariant #3)
         fingerprint = _data_fingerprint(ohlcv_df)

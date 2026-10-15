@@ -17,7 +17,7 @@ dependencies = [
     "pyarrow>=15.0.0",          # Parquet read/write
 
     # Exchange connections
-    "websockets>=12.0",
+    "websockets>=13.0",        # websockets.asyncio.* — used by binance_ws + flow live_server
     "httpx>=0.27.0",
     "ccxt>=4.2.0",              # Unified crypto exchange API
 

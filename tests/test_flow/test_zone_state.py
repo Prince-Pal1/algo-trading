@@ -1,0 +1,392 @@
+"""Tests for src/flow/zone_state.py — state transitions and signal discipline.
+
+Two rules here are safety-critical:
+  · invalidation beats confirmation — a level that broke cannot also confirm
+  · one signal per test — a zone must not fire repeatedly while price loiters
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from src.flow.features import MarketContext
+from src.flow.level_registry import Level, LevelRegistry, LevelSide
+from src.flow.zone_state import FlowEngine, ZoneMonitor, ZonePhase, ZoneState
+from src.utils.types import Tick
+
+TS = 1_757_000_000_000
+# Market norms the engine would normally supply.
+CTX = MarketContext(baseline_range=100.0, baseline_trade_size=1.0)
+
+
+def _tick(price: float, maker: bool = True, ts: int = TS, qty: float = 1.0) -> Tick:
+    return Tick(symbol="BTCUSDT", price=price, quantity=qty,
+                timestamp=ts, is_buyer_maker=maker)
+
+
+def _support(width: float = 100.0) -> Level:
+    return Level("sup", "BTCUSDT", 98000.0, width, LevelSide.LONG, note="pdl")
+
+
+def _monitor(**kw) -> ZoneMonitor:
+    # require_turn defaults False here: most tests exercise scoring and
+    # state transitions, not the absorption->turn sequence, which has its
+    # own class below.
+    kw.setdefault("require_turn", False)
+    return ZoneMonitor(level=_support(), **kw)
+
+
+def _absorb(mon: ZoneMonitor, n: int, start_ms: int, price_fn=None) -> list:
+    """Feed absorbed selling: one-sided sells, price pinned."""
+    price_fn = price_fn or (lambda i: 97990.0 + (i % 3))
+    out = []
+    for i in range(n):
+        sig = mon.on_tick(_tick(price_fn(i), True, start_ms + i * 100), CTX)
+        if sig:
+            out.append(sig)
+    return out
+
+
+class TestTransitions:
+    def test_starts_idle(self):
+        assert _monitor().state is ZoneState.IDLE
+
+    def test_far_price_stays_idle(self):
+        mon = _monitor()
+        mon.on_tick(_tick(99000.0), CTX)
+        assert mon.state is ZoneState.IDLE
+
+    def test_near_price_approaches(self):
+        mon = _monitor(approach_mult=3.0)
+        mon.on_tick(_tick(98250.0), CTX)   # 150 away, within 3x100
+        assert mon.state is ZoneState.APPROACHING
+
+    def test_entering_zone_evaluates(self):
+        mon = _monitor()
+        mon.on_tick(_tick(97950.0), CTX)
+        assert mon.state is ZoneState.EVALUATING
+
+    def test_entering_increments_test_count(self):
+        mon = _monitor()
+        mon.on_tick(_tick(97950.0), CTX)
+        assert mon.test_count == 1
+
+    def test_leaving_area_returns_to_idle(self):
+        mon = _monitor()
+        mon.on_tick(_tick(97950.0, ts=TS), CTX)
+        mon.on_tick(_tick(99500.0, ts=TS + 1000), CTX)
+        assert mon.state is ZoneState.IDLE
+
+    def test_approaching_then_away_returns_idle(self):
+        mon = _monitor()
+        mon.on_tick(_tick(98250.0, ts=TS), CTX)
+        mon.on_tick(_tick(99500.0, ts=TS + 1000), CTX)
+        assert mon.state is ZoneState.IDLE
+
+    def test_test_count_survives_leaving_and_returning(self):
+        mon = _monitor()
+        mon.on_tick(_tick(97950.0, ts=TS), CTX)
+        mon.on_tick(_tick(99500.0, ts=TS + 1000), CTX)
+        mon.on_tick(_tick(97950.0, ts=TS + 2000), CTX)
+        assert mon.test_count == 2
+
+
+class TestConfirmation:
+    def test_absorbed_selling_confirms(self):
+        mon = _monitor(min_dwell_ms=5_000)
+        signals = _absorb(mon, 200, TS)
+        assert signals, "expected a confirmation"
+        assert mon.state is ZoneState.CONFIRMED
+        assert signals[0].score >= signals[0].threshold
+
+    def test_min_dwell_blocks_early_signal(self):
+        """Strong evidence must still wait out the minimum dwell."""
+        mon = _monitor(min_dwell_ms=60_000)
+        signals = _absorb(mon, 100, TS)     # 100 ticks x 100ms = 10s
+        assert signals == []
+        assert mon.state is ZoneState.EVALUATING
+        assert mon.report.confirmed is True   # evidence was there, time was not
+
+    def test_only_one_signal_per_test(self):
+        mon = _monitor(min_dwell_ms=5_000)
+        signals = _absorb(mon, 400, TS)
+        assert len(signals) == 1
+
+    def test_signal_carries_reasoning(self):
+        mon = _monitor(min_dwell_ms=5_000)
+        sig = _absorb(mon, 200, TS)[0]
+        assert sig.report.supporting
+        assert sig.level_id == "sup"
+        assert sig.side is LevelSide.LONG
+
+    def test_invalidation_is_the_far_edge_of_the_zone(self):
+        """At mult=1 the published stop IS the edge price must not cross.
+
+        It used to be computed as `level.low - width`, a full width BEYOND the
+        zone — so the engine killed a level at one price while every signal
+        published a stop at another, and the outcome log scored wins and losses
+        against the wider one.
+        """
+        mon = _monitor(min_dwell_ms=5_000, invalidation_mult=1.0)
+        sig = _absorb(mon, 200, TS)[0]
+        assert sig.invalidation == mon.level.low == 97_900.0
+        assert sig.invalidation == mon.invalidation_price()
+
+    def test_invalidation_matches_where_the_engine_kills_it(self):
+        """The one number, from both ends: what a signal promises and what the
+        state machine does must not be two different prices."""
+        mon = _monitor(min_dwell_ms=0, invalidation_mult=1.0, threshold=2.0)
+        stop = mon.invalidation_price()
+        ts, price, died = TS, 97_995.0, None
+        while died is None and price > 97_500.0:
+            ts += 100
+            mon.on_tick(_tick(price, True, ts), CTX)
+            if mon.state is ZoneState.INVALIDATED:
+                died = price
+            price -= 1.0
+        assert died is not None
+        assert stop - 2.0 <= died <= stop, f"stop {stop}, died at {died}"
+
+    def test_signal_dict_serializable(self):
+        import orjson
+        mon = _monitor(min_dwell_ms=5_000)
+        sig = _absorb(mon, 200, TS)[0]
+        assert orjson.loads(orjson.dumps(sig.to_dict()))["level_id"] == "sup"
+
+
+class TestInvalidation:
+    def test_push_through_invalidates(self):
+        mon = _monitor(invalidation_mult=1.0)
+        mon.on_tick(_tick(97950.0, ts=TS), CTX)
+        mon.on_tick(_tick(97850.0, ts=TS + 1000), CTX)   # past 97,900
+        assert mon.state is ZoneState.INVALIDATED
+
+    def test_invalidation_beats_confirmation(self):
+        """Evidence may look great; a broken level is still broken."""
+        mon = _monitor(min_dwell_ms=0, invalidation_mult=1.0)
+        _absorb(mon, 200, TS)
+        mon._signalled_this_test = False
+        mon.state = ZoneState.EVALUATING
+        sig = mon.on_tick(_tick(97800.0, True, TS + 50_000), CTX)
+        assert sig is None
+        assert mon.state is ZoneState.INVALIDATED
+
+    def test_resistance_invalidates_upward(self):
+        """A resistance zone sits ABOVE the level: 98,000-98,100."""
+        level = Level("res", "BTCUSDT", 98000.0, 100.0, LevelSide.SHORT)
+        mon = ZoneMonitor(level=level, invalidation_mult=1.0, require_turn=False)
+        mon.on_tick(_tick(98050.0, ts=TS), CTX)
+        mon.on_tick(_tick(98250.0, ts=TS + 1000), CTX)
+        assert mon.state is ZoneState.INVALIDATED
+
+
+class TestCooldown:
+    def test_outcome_persists_through_cooldown(self):
+        """A dashboard must be able to show 'confirmed N minutes ago'."""
+        mon = _monitor(min_dwell_ms=5_000, cooldown_ms=600_000)
+        _absorb(mon, 200, TS)
+        mon.on_tick(_tick(97950.0, ts=TS + 30_000), CTX)
+        assert mon.state is ZoneState.CONFIRMED
+
+    def test_cooldown_blocks_new_signals(self):
+        mon = _monitor(min_dwell_ms=5_000, cooldown_ms=600_000)
+        _absorb(mon, 200, TS)
+        mon.on_tick(_tick(97950.0, ts=TS + 30_000), CTX)
+        assert _absorb(mon, 200, TS + 40_000) == []
+
+    def test_cooldown_expires_to_idle(self):
+        mon = _monitor(min_dwell_ms=5_000, cooldown_ms=10_000)
+        _absorb(mon, 200, TS)
+        mon.on_tick(_tick(99000.0, ts=TS + 100_000), CTX)
+        assert mon.state is ZoneState.IDLE
+
+
+class TestSnapshot:
+    def test_snapshot_shape_when_idle(self):
+        snap = _monitor().snapshot()
+        assert snap["state"] == "IDLE"
+        assert snap["score"] is None
+
+    def test_snapshot_carries_live_evidence(self):
+        mon = _monitor(min_dwell_ms=600_000)
+        _absorb(mon, 200, TS)
+        snap = mon.snapshot()
+        assert snap["state"] == "EVALUATING"
+        assert snap["score"] > 0.5
+        assert snap["supporting"]
+
+    def test_snapshot_serializable(self):
+        import orjson
+        mon = _monitor(min_dwell_ms=600_000)
+        _absorb(mon, 200, TS)
+        assert orjson.loads(orjson.dumps(mon.snapshot()))["level_id"] == "sup"
+
+
+class TestFlowEngine:
+    def _engine(self, *levels) -> FlowEngine:
+        reg = LevelRegistry()
+        reg.levels = {lv.id: lv for lv in (levels or (_support(),))}
+        eng = FlowEngine(registry=reg, symbol="BTCUSDT")
+        eng.sync_levels(now_ms=TS)
+        return eng
+
+    def test_sync_creates_monitors(self):
+        assert set(self._engine().monitors) == {"sup"}
+
+    def test_sync_drops_removed_levels(self):
+        eng = self._engine()
+        eng.registry.levels = {}
+        eng.sync_levels(now_ms=TS)
+        assert eng.monitors == {}
+
+    def test_sync_preserves_state_on_edit(self):
+        eng = self._engine()
+        eng.on_tick(_tick(97950.0), local_ms=TS)
+        assert eng.monitors["sup"].state is ZoneState.EVALUATING
+        eng.registry.levels["sup"].note = "edited"
+        eng.sync_levels(now_ms=TS)
+        assert eng.monitors["sup"].state is ZoneState.EVALUATING
+
+    def test_routes_to_all_monitors(self):
+        second = Level("sup2", "BTCUSDT", 97000.0, 100.0, LevelSide.LONG)
+        eng = self._engine(_support(), second)
+        eng.on_tick(_tick(97950.0), local_ms=TS)
+        assert eng.monitors["sup"].state is ZoneState.EVALUATING
+        assert eng.monitors["sup2"].state is ZoneState.IDLE
+
+    def test_lag_measured(self):
+        eng = self._engine()
+        eng.on_tick(_tick(97950.0, ts=TS), local_ms=TS + 250)
+        assert eng._lag_ms == 250
+
+    def test_baseline_range_from_history(self):
+        eng = self._engine()
+        for i in range(100):
+            eng.on_tick(_tick(98500.0 + i, ts=TS + i * 1000), local_ms=TS)
+        assert eng._baseline_range(TS + 99_000) == pytest.approx(99.0)
+
+    def test_baseline_ignores_stale_prices(self):
+        eng = self._engine()
+        eng.on_tick(_tick(90000.0, ts=TS), local_ms=TS)
+        eng.on_tick(_tick(98000.0, ts=TS + 3_600_000), local_ms=TS)
+        assert eng._baseline_range(TS + 3_600_000) == pytest.approx(0.0)
+
+    def test_engine_snapshot_serializable(self):
+        import orjson
+        eng = self._engine()
+        eng.on_tick(_tick(97950.0, ts=TS), local_ms=TS + 10)
+        snap = orjson.loads(orjson.dumps(eng.snapshot(local_ms=TS + 10)))
+        assert snap["symbol"] == "BTCUSDT"
+        assert snap["lag_ms"] == 10
+        assert len(snap["levels"]) == 1
+
+
+class TestSequenceDetection:
+    """Absorption alone must NOT fire. The attack has to fail AND reverse."""
+
+    def _run(self, mon: ZoneMonitor, absorb_n: int, turn_n: int) -> list:
+        out, ts = [], TS
+        for i in range(absorb_n):                      # aggressive sells, price pinned
+            sig = mon.on_tick(_tick(98000.0 + (i % 4), True, ts), CTX)
+            ts += 120
+            if sig:
+                out.append(sig)
+        for i in range(turn_n):                        # flow flips to buyers
+            sig = mon.on_tick(_tick(98005.0 + (i % 4), False, ts), CTX)
+            ts += 120
+            if sig:
+                out.append(sig)
+        return out
+
+    def test_absorption_alone_does_not_fire(self):
+        mon = ZoneMonitor(level=_support(), min_dwell_ms=5_000, require_turn=True)
+        signals = self._run(mon, absorb_n=300, turn_n=0)
+        assert signals == []
+        assert mon.phase is ZonePhase.ABSORBING
+        assert mon.report.confirmed is True   # the score was there; the turn was not
+
+    def test_turn_after_absorption_fires(self):
+        mon = ZoneMonitor(level=_support(), min_dwell_ms=5_000, require_turn=True)
+        signals = self._run(mon, absorb_n=300, turn_n=300)
+        assert signals
+        assert signals[0].phase is ZonePhase.TURNING
+
+    def test_require_turn_false_fires_on_absorption(self):
+        """The comparison arm — so the two can be judged on logged outcomes."""
+        mon = ZoneMonitor(level=_support(), min_dwell_ms=5_000, require_turn=False)
+        assert self._run(mon, absorb_n=300, turn_n=0)
+
+    def test_breaking_sets_failing_phase(self):
+        """Selling through a support zone, most of the way to invalidation."""
+        mon = ZoneMonitor(level=_support(), min_dwell_ms=5_000, require_turn=True)
+        ts = TS
+        for i in range(80):
+            mon.on_tick(_tick(97995.0 - i * 1.0, True, ts), CTX)
+            ts += 120
+        assert mon.phase is ZonePhase.FAILING
+
+    def test_failing_needs_more_than_a_dip(self):
+        """A shallow probe into the zone is not the level failing."""
+        mon = ZoneMonitor(level=_support(), min_dwell_ms=5_000, require_turn=True)
+        ts = TS
+        for i in range(80):
+            mon.on_tick(_tick(97995.0 - (i % 20) * 1.0, True, ts), CTX)
+            ts += 120
+        assert mon.phase is not ZonePhase.FAILING
+
+    def test_phase_resets_on_new_test(self):
+        mon = ZoneMonitor(level=_support(), min_dwell_ms=5_000, require_turn=True)
+        self._run(mon, absorb_n=300, turn_n=0)
+        assert mon.phase is ZonePhase.ABSORBING
+        mon.on_tick(_tick(99500.0, True, TS + 500_000), CTX)   # leave
+        mon.on_tick(_tick(97950.0, True, TS + 501_000), CTX)   # return
+        assert mon.phase is ZonePhase.WATCHING
+
+    def test_phase_in_snapshot(self):
+        mon = ZoneMonitor(level=_support(), min_dwell_ms=600_000, require_turn=True)
+        self._run(mon, absorb_n=300, turn_n=0)
+        assert mon.snapshot()["phase"] == "ABSORBING"
+
+
+class TestStaleness:
+    """A dead feed must not read as a calm market.
+
+    `lag_ms` is measured when a tick arrives, so it freezes at its last good
+    value when nothing arrives — 40ms, green, forever. `stale_ms` is measured
+    at publish time and keeps climbing either way.
+    """
+
+    def _engine(self) -> FlowEngine:
+        reg = LevelRegistry()
+        reg.levels = {"sup": _support()}
+        eng = FlowEngine(registry=reg, symbol="BTCUSDT")
+        eng.sync_levels(now_ms=TS)
+        return eng
+
+    def test_stale_ms_climbs_while_the_feed_is_dead(self):
+        eng = self._engine()
+        eng.on_tick(_tick(97950.0, True, TS), local_ms=TS + 40)
+        assert eng.snapshot(local_ms=TS + 40)["stale_ms"] == 40
+        assert eng.snapshot(local_ms=TS + 600_000)["stale_ms"] == 600_000
+
+    def test_lag_alone_would_have_lied(self):
+        """Pinning the exact failure: lag stays green while nothing arrives."""
+        eng = self._engine()
+        eng.on_tick(_tick(97950.0, True, TS), local_ms=TS + 40)
+        snap = eng.snapshot(local_ms=TS + 600_000)
+        assert snap["lag_ms"] == 40                  # frozen, and reassuring
+        assert snap["stale_ms"] == 600_000           # the truth
+
+    def test_stale_is_zero_before_any_tick(self):
+        assert self._engine().snapshot(local_ms=TS)["stale_ms"] == 0
+
+    def test_stale_never_goes_negative(self):
+        """A snapshot taken against a clock behind the tape is not -3 seconds."""
+        eng = self._engine()
+        eng.on_tick(_tick(97950.0, True, TS + 5000), local_ms=TS)
+        assert eng.snapshot(local_ms=TS)["stale_ms"] == 0
+
+    def test_cooldown_is_published_so_the_page_can_count_down(self):
+        eng = self._engine()
+        eng.on_tick(_tick(97950.0, True, TS), local_ms=TS)
+        assert eng.snapshot(local_ms=TS)["levels"][0]["cooldown_ms"] > 0

@@ -1,6 +1,251 @@
 # STATE — Session Continuity Tracker
 
-**Last updated:** 2026-06-24 (Session 30 — built `adaptive_momentum`, a multi-horizon volatility-normalized regime-gated trend strategy improving on `vol_momentum`. Stage 3-5 backtested/validated on its 1h design TF; head-to-head beats vol_momentum on mean Sharpe (0.45 vs 0.27), roughly halves mean drawdown (5.8% vs 11.9%), and cuts turnover ~8× (62 vs 500 trades). `enabled=false` pending review. See Session 30 below.) Prior: 2026-06-16 (Session 29 — donchian_gold warmup-starvation root-caused + fixed: it had emitted 0 signals since 2026-04-29 because `warmup(min_candles=200)` never gave `_compute_indicators` the ≥245 bars needed to produce DCH_120/DCL_120, so the strategy's all-channels-non-NaN guard tripped every bar. Fix: refreshed XAUUSD_1h cache (65.5h→19.4h stale) + bumped `min_candles` 200→300; gold engine restarted and reloaded **300** warmup candles → channels valid, strategy armed. Durable cTrader-trendbar-backfill fix still open. See Session 29 below.) Prior: 2026-06-12 (Session 28 — vol_momentum "edge decay" root-caused as a SYSTEMATIC stale-warmup-cache bug, not strategy logic. Warmup recency gate + phantom-signal suppression shipped, 472 phantom rows purged, XAUUSD cache rebuilt (2y, ends today), `caffeinate -i -s`, both engines restarted clean and verified downloading fresh warmup data. vol_momentum live stats quarantined until ≥30d clean window.)
+**Last updated:** 2026-09-29 (Session 33 — MNQ hybrid scalp: Pine v5 script compiles in TradingView; then rebuilt as a transcript-exact Python simulator (`src/strategies/futures/mnq_hybrid.py`) with `scripts/mnq_data.py` + `scripts/mnq_backtest.py`, 53 tests. Real report waits on MNQ data fetched on Prince's Mac. See Session 33 below.) Prior: 2026-09-22 (Session 32 — level-gated flow engine + live monitor built. Prince supplies levels; the engine measures flow at them and reports evidence for AND against. `src/flow/` (7 modules), `scripts/flow_monitor.py`, live WebSocket page. Then sequence detection (absorption alone no longer fires — the signal requires the TURN), iceberg detection (traded vs max-ever-displayed per price), optional level memory (prior held/failed outcomes per level, persisted and age-decayed, OFF by default via `--level-memory`), and in-UI level editing (add/edit/park/delete + live threshold and toggles, writing through to `config/levels.toml`). 242 flow tests. Advisory only, forward-test only, live feed unverified. See Session 32 below.) Prior: 2026-09-21 (Session 31 — order-flow/CVD research tooling built on the crypto book, where Binance already gives us complete free aggressor data. New `src/data/cvd.py` (streaming `CVDCalculator` + vectorized `compute_delta_bars`, parity-tested; `detect_divergences` + `detect_absorption`), `src/data/agg_trades.py` (free Binance Data Vision aggTrades backfill), `scripts/cvd.py` CLI, dashboard page 8 "Order Flow", plus the depth/heatmap stack (`order_book.py`, `depth_recorder.py`, `scripts/depth.py`, binance_ws depth wiring). 222 tests pass; the live depth path is UNTESTED against Binance (container egress blocks it). Research-only — nothing is wired into FeatureEngine, any strategy, or the live engines. See Session 31 below.) Prior: 2026-06-24 (Session 30 — built `adaptive_momentum`, a multi-horizon volatility-normalized regime-gated trend strategy improving on `vol_momentum`. Stage 3-5 backtested/validated on its 1h design TF; head-to-head beats vol_momentum on mean Sharpe (0.45 vs 0.27), roughly halves mean drawdown (5.8% vs 11.9%), and cuts turnover ~8× (62 vs 500 trades). `enabled=false` pending review. See Session 30 below.) Prior: 2026-06-16 (Session 29 — donchian_gold warmup-starvation root-caused + fixed: it had emitted 0 signals since 2026-04-29 because `warmup(min_candles=200)` never gave `_compute_indicators` the ≥245 bars needed to produce DCH_120/DCL_120, so the strategy's all-channels-non-NaN guard tripped every bar. Fix: refreshed XAUUSD_1h cache (65.5h→19.4h stale) + bumped `min_candles` 200→300; gold engine restarted and reloaded **300** warmup candles → channels valid, strategy armed. Durable cTrader-trendbar-backfill fix still open. See Session 29 below.) Prior: 2026-06-12 (Session 28 — vol_momentum "edge decay" root-caused as a SYSTEMATIC stale-warmup-cache bug, not strategy logic. Warmup recency gate + phantom-signal suppression shipped, 472 phantom rows purged, XAUUSD cache rebuilt (2y, ends today), `caffeinate -i -s`, both engines restarted clean and verified downloading fresh warmup data. vol_momentum live stats quarantined until ≥30d clean window.)
+
+
+
+## Session 33 — MNQ hybrid scalp, Pine v5 (2026-09-29)
+
+Prince asked for a TradingView Pine v5 strategy reverse-engineered from an IQ Capital video on "Trader MNQ" (MNQ, 5-minute). Before any code, the brief was run past a video-reading AI, and that settled its two internal contradictions: the short's hold is ONE candle (exit at the open of N+2, not N+3), and the trader's "close early if the max-position-loss rule is at risk" (26:08) is the stop the short model appeared not to have. Saved as `strategies/pine/mnq_hybrid_scalp.pine`.
+
+Two modules: a long whose limit order follows the lower ATR band (previous close − 3.1×ATR) with static +2.0/−1.5 ATR exits locked at the fill, and a shooting-star short held for one candle. Sizing is floor(0.5% of STARTING balance / (stop × $2/pt)). The script reproduces the video's worked example exactly: ATR 17.85 → TP 35.75, SL 26.75 on 0.25 ticks.
+
+Assumptions where the video is silent, all exposed as inputs: 09:30 NY as the opening candle, all hours by default, RMA smoothing, a 1.5×ATR sizing distance for shorts with a max-loss stop at that distance (ON; turn it OFF to reproduce the video's backtest), one position at a time, and skipping any trade that sizes below one contract. The shooting-star thresholds are the video creator's objective rule, not the trader's. The trader eyeballs the candle.
+
+**Compiles in TradingView** after three fixes found by pasting it in (a truncated paste, `options=` lists the translator rejected, a `barstate.islast` warning).
+
+### Session 33b — deep-backtest simulator (2026-09-29)
+
+Prince found TradingView's tester too shallow and asked for the strategy to be rebuilt on our backtest architecture, simulating the transcript exactly. He also pointed at hypo-development-project's backtester; it is gold/CFD-only with no futures path, so only its 3-tier intrabar ambiguity resolver was ported. `BacktestEngine` can't express a resting limit that follows a band or per-contract CME costs, so the strategy got its own simulator that emits engine-compatible trades — see ARCHITECTURE.md Known Gotchas 2026-09-29.
+
+- **`src/strategies/futures/mnq_hybrid.py`** — every rule from the transcript, each pinned by a hand-worked test (53): the video's own trade (ATR 17.85 → TP 143 ticks, SL 107 ticks, 9 contracts), band fills including gap-through opens, one-candle short exits at the next open, no-lookahead previous-day filter, opening-candle skip, rolls closing positions. Ambiguous candles where the stop and target both sit inside the range are settled by 1-minute bars when present, counted when not.
+- **`scripts/mnq_data.py`** — Databento (cost shown and confirmed first; key only from `DATABENTO_API_KEY`), yfinance, or CSV into `data/mnq/`.
+- **`scripts/mnq_backtest.py`** — four runs (video long, video short, short + daily filter, trader as he trades), band sweep 2.5–3.7 to test whether 3.1 is fitted, quarterly split, and a report comparing against the video's PF 1.527 / 1.413. Stored through `save_run()`.
+- **Two bugs caught on a synthetic smoke run:** Sharpe was 0.0 everywhere (pandas 3 ms-resolution index → equity dated 1970), and `save_run()` measured returns against $10k. Both fixed; `save_run` gained an `initial_capital` kwarg with the old default.
+
+**No real result yet.** The container reaches no market data source (Yahoo, Stooq, Databento, Polygon, HF all blocked), so the report has to be produced on Prince's Mac and brought back.
+
+### Session 33c — first real report, and why the long isn't settled (2026-09-29)
+
+Databento needed a card, so a free source was added: Dukascopy's `E_NQ-100` Nasdaq 100 CFD (the same free feed as our gold history), 1-minute bid candles. A stand-in for MNQ, labelled as such in the report. Prince ran it on 2020-01 to 2026-09 (460,990 five-minute candles).
+
+- **Short, as stated:** 9,050 trades, PF 0.71, -$97k at 4 contracts. About $81k of that is costs (~$9 a round trip); before costs it is roughly -$16k, i.e. no edge. Every quarter of the trader run lost on the short. The previous-day-red filter halves trades and losses alike.
+- **Long:** 1,560 trades, PF 0.85, but 392 (25%) were guesses: the band fill and a possible target touch in the same minute. Conservative scoring counts all of them against the long, and a bug (below) did too. Not a verdict.
+- **The video's test covered "weeks"** (transcript: the short "started out very strong weeks ago"), almost certainly with TradingView's default zero costs. The report now cuts out those weeks for a like-for-like check.
+- **Added:** `--refine` (Dukascopy 1-second bars for only the uncertain candles, cached, stops if the history runs out), before-costs runs, the video's window, by-hour and cash-session splits. Fixed the fill-minute target bug. 63 tests, same results on pandas 2.2.1.
+
+## Session 32 — level-gated flow engine + live monitor (2026-09-22)
+
+**Trigger:** Prince proposed a system where HE supplies levels (5–10 dollar windows, fitted to his long-term bias and short-term structure) and an algo reads order flow at them in real time, "like a senior order flow analyst," emitting entry confirmations. Asked whether it could work, then to build it, then added the constraint that it must be fast with minimum lag.
+
+**Why this design survives the arithmetic that killed the previous one.** Session 31's conclusion stands: OFI predicts at seconds, and a 5-second BTC move (~0.02%) is ~25× smaller than round-trip costs (~0.1%). This design sidesteps that entirely — the human-supplied level moves the trade onto a minutes-to-hours horizon where a level-to-level target clears fees comfortably (gold ~36:1, BTC ~3–7:1). The level is the expensive part, and it is supplied free by the person who already has that skill.
+
+**Reframe given, and it matters:** it cannot be a senior analyst. A senior analyst's edge is contextual transfer across thousands of sessions with narrative memory. This is a *consistent, fast measurement instrument* — and the realistic win is **filtering out entries, not finding them** (no sunk cost, no boredom, no need to be right after waiting two hours).
+
+**What shipped — `src/flow/`:**
+- **`level_registry.py`** — TOML levels, validated, hot-reloaded every 10s. `first_seen_ms` is preserved across reloads: it is the only thing separating a level written before price arrived from hindsight, and an edit elsewhere in the file must not reset an untouched level's provenance. A malformed file keeps the previously loaded levels rather than disarming live ones.
+- **`features.py`** — `ZoneAccumulator`. Measured at **~0.9 µs/tick (1.1M ticks/sec)**, roughly 5000× headroom over BTCUSDT's peak trade rate; bounded deques, no per-tick allocation, no clock calls, no pandas. `absorption = |delta_ratio| × (1 − min(1, range_ratio))`.
+- **`evidence.py`** — rule-based scorer, **by design not as a placeholder**: no labelled data exists yet, rules are debuggable, and the rules generate the labels ML would need later. Tape weighted ~2× book (crypto book display is spoofable and barely policed). Every report carries FOR **and** AGAINST — a scorer that only surfaces confirming evidence manufactures confidence.
+- **`zone_state.py`** — `ZoneMonitor` state machine + `FlowEngine`. Invalidation beats confirmation; one signal per test; scoring throttled to 1 Hz (re-scoring per tick buys nothing). Measures its own lag against exchange timestamps.
+- **`signal_log.py`** — JSONL. Logs a **null-hypothesis baseline for every zone ENTRY**, not just confirmations. Phase 3's only real question is "does the scorer beat simply taking the level?", and that is only answerable if the baseline was recorded from day one.
+- **`live_server.py` + `live_page.html`** — page served on `GET /`, state pushed on `/ws` at 5 Hz, zero new dependencies (`websockets` was already in). 50-signal ring buffer replayed on connect so a late-opened page is self-consistent with the level cards it shows.
+- **`scripts/flow_monitor.py`** — uvloop, feed → engine → log → UI, each on its own task so neither disk nor browser can apply backpressure to ingestion.
+
+**Architecture decision forced by the speed constraint: Streamlit is the wrong tool for the live view.** It re-runs the whole script per refresh (1–3 s), which makes every number stale on a page you watch while price is inside your level. Streamlit keeps the post-hoc analysis (page 8), where lag does not matter.
+
+**Two bugs caught by tests, not by review:**
+1. **Absorption was maximal on a near-empty zone** — three trades give ~0 excursion, so the formula returned ~1.0. `sufficient` blocked the *signal* but the score renders live, and a confident 0.95 built on three prints is exactly the false authority this system exists to avoid. Fixed with a trade-count confidence ramp.
+2. **`CONFIRMED` lasted a single tick** before hopping to a `COOLDOWN` state, so a dashboard would essentially never show it. Removed the transient state; outcomes now persist for the cooldown duration, which is both simpler and correct for the UI.
+
+**Verification:** 128 tests pass. The full stack was driven end-to-end on a synthetic tape and the live page screenshotted in a real browser — 45 ms lag, a 0.890 confirmation rendered with its evidence, metric grid and signal table.
+
+**KNOWN UNVERIFIED — the live Binance feed has never run.** Egress is blocked here, as with the depth work. The feed wiring is the same `BinanceWebSocketFeed` used by the depth stack, but the flow monitor's specific path is untested against a real socket.
+
+**Not backtestable, by design.** Level selection is hindsight-contaminated on historical data, so evaluation is forward-only. This is the same methodological reason quant funds avoid human-in-the-loop systems, and it is inherited here whether or not it is liked. The mitigation is the split: the *level* half is forward-only, but the *scorer* half is replayable offline against recorded flow once levels exist with timestamps — which argues for recording all flow continuously, not only when a level is armed.
+
+**`DEFAULT_THRESHOLD = 0.62` is a guess.** It is the weakest part of the system and stays a guess until outcomes calibrate it. Phase 2 is a month of shadow running for ~30–50 signals; Phase 3 compares them against the logged baselines.
+
+
+**Sequence detection + tape microstructure (same session, after "what does an advanced order flow trader see?").** Four signals the first cut missed, three of them cheap and one structural:
+
+- **Tape velocity + acceleration** — trades/sec over a rolling window and recent-vs-earlier rate. Acceleration into a level is the stop-run signature; cumulative trade count says nothing about it.
+- **Large-print share** — fraction of zone volume arriving in prints above `LARGE_PRINT_MULT × the market's` rolling average size. Measured against the *market* norm, not the zone's own, via a new `MarketContext` the engine threads through. Five prints of 40 and five hundred of 0.4 are identical in volume and opposite in meaning.
+- **Lower-volume retest** — probe tracking. After the first reaction price returns to probe the zone extreme; if that probe trades *less* than the first, the aggressors are spent. This is the strongest single read available and it needs probes, not totals. **The first implementation was wrong**: it accumulated volume *between* probes rather than *during* them, reporting 74× where the answer was 0.08× — an inverted signal. Caught by a smoke test before it reached the scorer. A continuous push to new lows correctly stays ONE probe, and the open probe is included, because a retest happening right now is what you want to see.
+- **`ZonePhase` — the structural one.** Absorption is not the entry; the TURN is. A defender can absorb for twenty minutes and then step away, which is exactly what region C→D of the teaching chart did. The sequence is now modelled explicitly: WATCHING → ABSORBING (aggression failing) → TURNING (it reverses), or FAILING. A signal fires only on the transition to TURNING. Verified live: the score reached **0.89 during absorption and correctly held fire**, then fired at 0.936 once flow flipped. `require_turn=False` is retained as the comparison arm so turn-gated vs score-only can be judged on logged outcomes rather than argued about.
+
+Four new evidence rules (`exhausted_retest`, `heavy_retest`, `large_prints_absorbed`, `accelerating_break`); live page gained a phase badge and six metrics. **151 flow tests pass.** Hot path re-benchmarked at **1.17 µs/tick** (from 0.92) — 27% slower for four signals, still ~4000× headroom over peak BTCUSDT trade rate. Full sequence driven end-to-end and screenshotted: TURNING badge, retest at 3%, 265 outsized prints absorbed, score 1.000.
+
+**Open at that point:** volume-traded-at-price vs displayed size (the true iceberg signature) — built later the same session, see below. And prior-test *outcomes* as level memory.
+
+
+**Iceberg detection (same session) — the last item off the "what does a pro see" list.** Previously deferred pending depth; built and tested now.
+
+`iceberg_ratio = volume traded at a price / MAX size ever displayed there`. Dividing by the **maximum** is the whole trick and it is deliberately conservative:
+
+- a genuine 200-lot order eaten 200 → 150 → … → 0 has max-displayed 200 against 200 traded → ratio **1.0**, correctly NOT an iceberg
+- an order that only ever shows 5 while 200 trades through it → ratio **40**, correctly an iceberg
+
+Using last-seen or average displayed inverts this — the real order would look increasingly "hidden" as its display drained toward zero. Both directions are pinned in `test_iceberg.py::TestDiscriminator`.
+
+It needs **both halves**: the book alone shows a small order, the tape alone shows volume with no reference size. So it only fires with `--depth`, and without a book the ratio stays 0 — an absent signal rather than a false one. Tick size is inferred from **book level spacing** (exact, since levels sit on tick boundaries; trades would need statistics) and latched once, because a single odd book must not shrink an already-known tick. A volume gate (`ICEBERG_MIN_PRINTS`) stops 1 unit against a 0.001 display reporting a ratio of 1000, and the price-bucket dict is capped.
+
+**176 flow tests pass** (25 new). Benchmarks: **1.50 µs/tick** (from 1.17) and **15.7 µs per book snapshot** against the ~10/sec the feed actually delivers — roughly 3000× and 6000× headroom respectively. End-to-end screenshot shows the full professional read on one card: 912 traded at 98,010 against 4.00 ever displayed (**228× hidden**), absorbed sell delta −794 at 0.14× normal range, retest at 3% of the first probe, 328 outsized prints, flow turning +0.23, and a TURNING phase gate.
+
+Note the design consistency: book evidence stays weighted below tape, but the iceberg reads what actually **traded** against what was displayed, so it survives the crypto-spoofing objection far better than raw wall size does.
+
+**Now genuinely open:** only prior-test *outcomes* as level memory — `test_count` counts tests but does not remember how they resolved.
+
+
+**Level memory (same session) — optional, and off.** Prince asked for prior test outcomes "but keep it optional means user will turn it off or on". New `src/flow/level_memory.py`: per-level held/failed history, JSON-persisted with atomic writes, age-decayed at 14 days, capped at 50 outcomes per level. `--level-memory` turns it on; with it off the features read zero and the rules never fire, the same discipline `--depth` already follows. Off is the right default for a new heuristic that changes scoring — it must not start moving signals silently before anything has calibrated it.
+
+**What counts as an outcome** is the part that decides whether the memory is worth anything:
+
+- invalidation → `failed`
+- leaving the area on the favourable side → `held`
+- a confirmation that later breaches its own invalidation → `failed`, caught **during** the cooldown, because by the time the cooldown expires price may have wandered back and the exit test would score that a hold
+- anything else → **nothing recorded**. An inconclusive test is not evidence, and recording it as a hold would be the single easiest way to make the whole feature lie.
+
+Weighting is asymmetric on purpose: `failed` is 2× `held`, and `prior_hold` is suppressed entirely once a level has ever failed. A break has *demonstrated* the defender is not there; a hold may only mean nobody tested it seriously. This sits in deliberate tension with the existing `repeated_test` rule — that measures rapid retesting consuming liquidity right now, this measures how tests *resolved*, possibly days ago. They are meant to disagree about a level tested four times in an hour versus one that held once last week.
+
+Two real bugs surfaced while building it. `counts()` called `prune()` before counting, so every diagnostic read, dashboard poll and snapshot silently deleted the history it was reporting on — and the number it returned was still correct *that* time, which is what would have made it survive. And a confirmed level that subsequently broke recorded no outcome at all, losing exactly the case memory most needs to hear about. Both are now Known Gotchas. The prior counts are snapshotted at zone entry so a write arriving mid-test cannot shift the score under it.
+
+The hunt for a third bug came up empty in a useful way: a test sequence that broke a level and re-entered it seconds later appeared to prove the `held` path dead. It was the 300-second cooldown — the monitor ignores ticks entirely while an outcome is displayed, so the re-entry never happened. Advancing event time past the cooldown records the hold correctly. That is also now a gotcha, since any future test of this path will hit it.
+
+**207 flow tests pass** (31 new). `--no-turn` was added alongside as the explicit comparison arm for Phase 3. End-to-end screenshot shows `failed 2×` in red on the level being tested and `held 1×` on an idle one — deliberately rendered on idle cards too, since the useful moment for "this broke twice" is *before* price arrives — with "level failed 2x before — the defender was not there" listed under AGAINST on a card that still scored 1.000 on absorption, iceberg and turn. That disagreement is the feature working, not a bug: the evidence is shown, the judgement stays with the reader.
+
+**Level editing in the UI (same session).** Prince pulled the branch, ran the monitor for the first time and asked the obvious question: why does marking a level mean editing a file? It does not any more. The live page has a **levels & settings** panel — add, edit, park, delete, plus live threshold, require-turn and level-memory controls.
+
+Edits **write through to `config/levels.toml`**. The alternative, a separate UI store merged at load, is how a level ends up armed in one place and parked in the other; the file stays the single source of truth and what you add on the page survives a restart. The socket is two-way now, which is a bigger change than it sounds: a read-only display became something that mutates a file on disk. WebSockets are exempt from the same-origin policy, so any page Prince happens to have open could otherwise post commands to 127.0.0.1 — loopback binding stops the network, not the browser. The handshake now refuses a foreign Origin (verified: 403), and allows an absent one, since browsers always send it and a local non-browser client can already edit the file.
+
+Adding a level while price is **already inside it** warns rather than refuses. Sometimes that genuinely is the trade, but it is the one move that breaks the forward-test guarantee, so it gets said out loud and `first_seen` leaves it detectable in the log afterwards.
+
+Three bugs, two found only by driving the real page in a browser:
+
+- **`first_seen_ms` was re-stamped on every restart.** It was set to `now` at parse and only carried forward from levels already in memory — nothing, on a fresh process. So each restart quietly reset the provenance of every level and "written before price arrived" became unfalsifiable after the first crash. It is now persisted to the file and read back.
+- **Editing a note re-armed a parked level**, because the form has no `enabled` box and the constructor defaulted it to True.
+- **Editing also cleared an expiry**, the same bug in the other field.
+
+The last two are one lesson: a form that edits a subset of fields must inherit the rest, never default them. Unit tests would not have caught either — the bug lived in the gap between the form and the constructor, which is exactly what a browser drive-through covers.
+
+**242 flow tests pass** (35 new). `--depth` stays a launch flag, since toggling it means resubscribing the feed mid-run; the panel says so rather than offering a control that lies.
+
+**Directional zone geometry (same session, after the first live run).** Prince: "if its 4000 short 100-width, then the range will be 4000-4100; if its 4000 long 100-width then the range will be 3900-4000."
+
+He is right, and the old centred zone (`price ± width`) was wrong in a way worth naming: half of a support's zone sat ABOVE the level, territory price has not tested yet. The zone now runs from the level INTO the side price penetrates. The level is the edge you trade off; the width is how far through it you tolerate — and therefore the risk.
+
+That last part is the payoff: `width` is now one number meaning one thing. Leaving the far side of the zone IS the level failing, so the zone edge and the invalidation price are the same price.
+
+Which exposed that they had not been:
+
+- **The published stop was twice the engine's own invalidation.** `_build_signal` used `level.low - width * mult` — for a support, `price - 2*width` — while `on_tick` killed the level at `adverse_excursion > width * mult`, i.e. `price - width`. Every signal advertised a stop twice as far as the engine's, and `SignalLog` scored outcomes against the wider one, inflating the logged win rate of signals *and* baselines. One definition now, `invalidation_price()`, with a test that drives price down until the engine kills it and asserts the two agree.
+- **`ZonePhase.FAILING` had become unreachable.** It was gated on `range_ratio > 1.2` — in-zone travel exceeding 1.2× the 15-minute baseline range. With a directional zone the in-zone range cannot exceed the width, because leaving invalidates: a 200-wide level against a 350-wide baseline could never reach 1.2 however hard it broke. Now gated on `adverse_excursion >= 0.6 × width`. The general lesson is worth keeping: a threshold in units of one thing, gating a quantity bounded by another, is a silent no-op waiting to happen.
+
+**Scores are not comparable across this change.** The zone halved in height, which caps `range_ratio`, which raises absorption (`|delta_ratio| × (1 − min(1, range_ratio))`). Anything collected in shadow mode before this is calibrated to different geometry and should not be pooled with what comes after.
+
+**250 flow tests pass** — 18 rewritten rather than patched, since they encoded the old geometry as intent. The page now previews the resulting zone live as you type price/width/side, which is cheaper than any label for making the direction unambiguous.
+
+**Live chart (same session).** Prince asked for candles, CVD, order flow and price-relative-to-zone, drawn the way Bookmap does it. The card was text for a situation that is inherently spatial.
+
+New `src/flow/tape.py` keeps rolling columns — candle, aggressor volume, volume-at-price footprint, and one book sample per column — sparse and keyed by an absolute price-bucket index, because price drifts and a fixed grid would either clip or rebuild. New `src/flow/narrative.py` turns the current features into a plain-English read: where price sits in the zone, who is pushing, whether it is working, what the last 30 seconds did. It states measurements only; a parametrised test asserts no advice vocabulary leaks into it.
+
+The page gained a canvas chart — depth heatmap, zone band, delta-coloured candles, footprint rail, CVD pane, crosshair readout. No charting library and no CDN: a console you watch mid-trade must not depend on the internet being up. Closed columns rasterise once per `seq` into an offscreen canvas and get blitted; only the forming column redraws at 5 Hz, which is also why the transport sends the history only when a column closes.
+
+**Bookmap's framework adapted, not copied.** Its price window is the market's; ours is anchored on the zone, because that is the only part being watched. Candles outside the window are clipped rather than allowed to stretch the axis.
+
+Four bugs, all found by rendering it and looking, none by the tests:
+
+- **the axis stretched to fit the tape**, so an hour that opened 900 above the level squashed the zone into four pixels
+- **the footprint row height latched before the baseline range existed** — computed the first time a book arrived, when the price deque is still nearly empty, so it latched at one tick and every bar clamped to 1px. A chart that draws nothing looks empty, not broken.
+- **`sqrt` on the heatmap ramp** lifted a near-uniform book to mid-ramp everywhere and buried the zone under a bright slab. Linear is the honest map: a book IS mostly nothing with a few walls.
+- **the APPROACHING branch was unreachable** — `narrative.describe` tested `features is None` first, and there is no accumulator until price is inside, so every approach printed "Waiting"
+
+All four are Known Gotchas. The palette went through the dataviz skill's validator rather than being eyeballed: blue↔red passes every check on the dark surface (CVD ΔE 19.2 protan, 29.0 normal), and the sequential blue ramp was checked for lightness monotonicity.
+
+**294 flow tests pass** (42 new).
+
+**Live soak (same session) — five defects, all load- or time-dependent.** Prince asked for the running console to be watched for bugs and performance problems. Binance is unreachable from this container, so the real `FlowMonitor` was soaked against a realistic tape (45 trades/sec, walking in and out of the zone and breaking it) with a browser in front of it for 150 s, plus hot-path profiling from 5 to 500 trades/sec.
+
+Not one of these was reachable by the existing tests, because every one of them needs either load or elapsed time:
+
+1. **A dead feed read as a calm market.** `lag_ms` is measured when a tick *arrives*, so with nothing arriving it froze at its last good value — 40 ms, green, indefinitely — while the WebSocket to the monitor stayed up so "link: live" agreed. On a console built around *a stale score is worse than no score*, that was the most dangerous thing in the stack. `stale_ms` is now measured at publish time and the page leads with whichever is worse, with a red NO DATA banner past 10 s. The general shape is worth keeping: **a freshness metric computed on arrival cannot detect absence.**
+2. **`_baseline_range` was a full window scan per tick** — 99.7% of the hot path, and it got *worse as the market got busier*: 153 µs/tick at 5 trades/sec, 3653 µs/tick at 50. At a burst of several hundred a second it would have stopped keeping up, and the symptom would have been the lag number climbing during fast tape. Replaced with `RollingExtremes` (two monotonic deques): exact, O(1) amortized, 188 entries held for a 60,000-tick window, zero disagreement with the scan it replaced.
+3. **The whole feature set was rebuilt every tick to read one O(1) field.** The invalidation check needs `adverse_excursion`; `features()` also runs two windowed scans and the iceberg pass. ~550 µs/tick for nothing.
+4. **A `maxlen` deque silently shortened a TIME window under load.** `_recent` held 89 s at 45 trades/sec but 16 s at 500, while the turn detector reads 30 s and velocity reads 60. So "recent" quietly redefined itself during exactly the fast tape where the turn is the whole question — no error, no symptom.
+5. **A resolved card showed a verdict with no age**, and the level is ignored entirely for 300 s, so a break-and-reclaim inside the window is missed. The card now counts down to re-arm and `--cooldown` makes it settable; the default is unchanged, because shortening it trades missed reclaims for re-entering a level that is still falling.
+
+**Hot path is now flat at ~10-17 µs/tick from 5 to 500 trades/sec** — 217× headroom at 500/s, where before it could not keep up.
+
+The clean results are worth recording too, since they were measured rather than assumed: no JS errors across 745 frames, heap flat at 1.0-2.6 MB with no leak, canvas rebuild 11.6 ms at full history (it does *not* scale with history, because closed columns are rasterised once), and the WebSocket transport holding 22 KB/s sustained.
+
+**299 flow tests** (5 new, pinning the dead-feed lie specifically). **Still never exercised against a live Binance feed from here** — egress is blocked, so all of this is a realistic simulation, not the real tape.
+
+**Next:** Phase 2 — run it in shadow mode on BTC, ignore everything it says, collect outcomes. Whether level memory helps is a Phase 3 question against the logged null-hypothesis baselines, which is precisely why it ships off.
+
+## Session 31 — order-flow / CVD research tooling (2026-09-21)
+
+**Trigger:** Prince shared Discord screenshots from a gold-futures order-flow channel (ATAS liquidity heatmap, large-trade bubbles, CVD divergence talk), asked what they were doing, then asked for a learning roadmap and for the CVD module to be built.
+
+**Key finding that shaped the scope — our gold book cannot do this at all.** `icmarkets_feed.py:412-418` constructs every `Tick` with `quantity=0.0, is_buyer_maker=False`, because a CFD is bilateral: no central tape, no trade size, no aggressor side. Candle volume from cTrader trendbars (`icmarkets_feed.py:472`, `tb.volume`) is tick count, not contracts. So CVD/footprint/delta are structurally impossible on XAUUSD, and anything volume-derived there (incl. `vpin.py` BVC) reads noise. Real gold flow needs COMEX GC/MGC via IBKR tick-by-tick (aggressor must be reconstructed — IBKR does not tag it) or Databento GLBX.MDP3 (aggressor included). Both are paid; neither was bought.
+
+**Verified as part of the research:** the cTrader Open API *does* expose depth — `ProtoOASubscribeDepthQuotesReq` → `ProtoOADepthEvent{newQuotes[], deletedQuotes[]}` with `ProtoOADepthQuote{id, size, bid|ask}`. Our feed subscribes only to spots (`icmarkets_feed.py:225`) and trendbars (line 240), never depth. That means a *liquidity heatmap* on XAUUSD is buildable from our existing broker connection, but CVD/footprint still are not — depth is resting liquidity, not trades. Not implemented; noted as an option.
+
+**What shipped (crypto, free data, research-only):**
+- **`src/data/cvd.py`** — `CVDCalculator` (streaming `Tick` → `DeltaBar`; timeframe bucketing reuses `candle_builder.TF_MS`; tracks intrabar `delta_high`/`delta_low`; drops out-of-order ticks rather than mis-bucketing them; `_check_degenerate()` warns once on an all-zero-quantity feed instead of emitting a plausible-looking flat zero series). `compute_delta_bars()` vectorized path for backfill, with `initial_cvd` so day chunks form one continuous series. `detect_divergences()` (rolling z-score of price change vs CVD change, opposite signs, both legs above threshold) and `detect_absorption()` (one-sided `delta/volume` inside an unusually small range). The `is_buyer_maker` → side mapping lives in exactly one function, `_signed_quantity`, and is documented at length — inverting it silently flips every downstream signal.
+- **`src/data/agg_trades.py`** — free Binance Data Vision daily aggTrades dumps (no API key). Folds each day into bars and releases the raw rows before fetching the next, so peak memory is one day. Handles headerless (pre-~2024) and headered dumps, 8-column spot and 7-column USD-M futures, and the 2025 µs-timestamp switch.
+- **`scripts/cvd.py`** — `fetch` / `show` / `screen` CLI, with price-vs-CVD unicode sparklines so a divergence is visible in the terminal.
+- **`src/dashboard/flow_charts.py` + dashboard page 8 "Order Flow"** — `price_cvd_panels()` renders price, CVD and per-bar delta as three panels sharing one x-axis. Deliberately **not** a dual-y-axis chart: overlaying two unrelated scales lets the scaling decide whether the series appear to agree, which is exactly the judgement a divergence chart should leave to the reader. Divergence direction is carried by marker *shape* (triangle-up / triangle-down) as well as colour, so nothing reads by colour alone; absorption bars shade as recessive time bands. Colours are the diverging blue↔red pair, run through the dataviz validator (worst-pair CVD ΔE 21.6 light / 19.2 dark, normal-vision 32.3 / 29.0 — all six checks PASS in both modes; the first attempt used orange↔red and FAILED at ΔE 5.6, so it was re-picked). Page carries Divergences / Absorption / Bars table views and a research-only warning banner. The `<tf>_cvd` ParquetStore naming convention was centralized into `agg_trades.flow_series_key()` / `list_flow_series()` — it had been duplicated across three files and the parsing side was untestable inside `app.py` at the time.
+
+**Tests:** 107 pass (`tests/test_data/test_cvd.py` 48, `tests/test_data/test_agg_trades.py` 33, `tests/test_dashboard/test_flow_charts.py` 26). The two load-bearing ones are the aggressor-convention tests and the streaming-vs-vectorized parity test across 1m/5m/15m on 500 pseudo-random trades. End-to-end CLI smoke run on a synthetic series built to diverge (price up, aggressive selling dominant) correctly flagged bearish divergences and a `sell_absorbed` bar. The chart was also rendered to PNG and visually checked — the first render had the title colliding with the legend and subplot titles duplicating the y-axis titles; both fixed before commit.
+
+**Explicitly NOT done:** no FeatureEngine field, no strategy, no router registration, no config entry, no engine wiring. Nothing trades off this. Per `STRATEGY_DEVELOPMENT_PROCESS.md` this is pre-Stage-1: no edge has been researched, let alone validated. Full suite could not be run in the cloud container (`ta` fails to build there) — CVD tests were run with `--noconftest`; the full suite still needs a local run.
+
+**Dashboard page 8 verified end-to-end (2026-09-21, after the depth work).** Earlier in the session the page was
+flagged as unproven — only the chart builders beneath it were covered, because `streamlit` was not installed in the
+container. That gap is now closed: streamlit installed, both caches seeded with synthetic data in the scratchpad
+(NOT the repo — verified `git status` clean afterwards), the app served headless on 127.0.0.1:8599, and Playwright
+drove the pre-installed Chromium through to the page. Note for future runs: the bundled playwright expects browser
+build 1243 while the container ships 1194, and `playwright install` is unavailable, so launch with
+`executable_path="/opt/pw-browsers/chromium-1194/chrome-linux/chrome"`. Both halves render — the CVD panels with
+divergence markers plus the Divergences/Absorption/Bars tabs, and the depth heatmap with tick-aligned bucketing.
+Zero JS errors, no tracebacks. The page is proven; only the *live Binance socket* remains untested.
+
+**Depth / heatmap stack (same session, after Prince asked to "connect Claude to Bookmap"):** the answer was that
+routing through Bookmap is the wrong shape — Bookmap renders the same public Binance feed we already consume, so it
+adds a desktop-app dependency and a license question to reach free data. What was actually missing was the depth
+subscription.
+
+- **`src/data/order_book.py`** — `OrderBookState`. Depth streams send diffs, not snapshots, so one missed update
+  leaves the book permanently wrong *while it keeps answering queries normally*. Contiguity is checked on every event
+  (spot `U <= lastUpdateId+1`; USD-M futures `pu == lastUpdateId`), a gap flips it to DESYNCED, and `snapshot()` then
+  returns `None` until a fresh REST bootstrap. Refusing to serve is the design: a stale book is worse than no book.
+- **`src/data/feeds/binance_ws.py`** — opt-in `depth_symbols=[...]`. Adds `@depth@100ms`, one book per symbol, REST
+  bootstrap 0.5s after connect (the stream must be buffering first, per Binance's procedure), auto re-bootstrap on
+  desync guarded against storms, and an `on_depth` callback. A reconnect resets and rebuilds every book rather than
+  resuming, since the gap invalidates them.
+- **`src/data/depth_recorder.py`** — `DepthRecorder` decimates 100ms updates to a sampling cadence; `DepthStore`
+  persists long-form `(timestamp, price, size, side)` rows. It exists as a separate store because `ParquetStore`
+  dedupes on `timestamp` alone, which would have kept one price level per sample and silently discarded the rest.
+  `to_heatmap_grid` buckets prices on the *inferred tick size*; equal-width bins that don't divide the tick produce
+  moiré banding that reads like real structure (caught by rendering it and looking).
+- **`scripts/depth.py`** record/show/heatmap CLI, and a heatmap section on dashboard page 8. The colour ramp is a
+  single hue light→dark — Bookmap's blue→yellow→red is a rainbow, and the hue flips invent thresholds readers then
+  treat as meaningful.
+
+**Tests now 222 across the flow stack** (order_book 38, depth_recorder 41, binance_depth 21, flow_charts 41, cvd 48,
+agg_trades 33), all passing with `--noconftest`.
+
+**KNOWN UNVERIFIED — the live depth path has never run against Binance.** The cloud container's egress proxy blocks
+`api.binance.com` (confirmed: HTTP 000; the allowlist covers package registries only). A real recording attempt was
+made and failed at connect, exercising only the reconnect-backoff and zero-sample-detection paths. So the REST
+bootstrap, real `depthUpdate` payload parsing, and the full sync handshake are covered by unit tests against
+synthetic events and by nothing else. **The first local run on Prince's Mac is the real test** — expect to debug it.
+
+**Also note:** depth has no historical backfill. Binance archives trades (which is why CVD could be backfilled years
+deep from Data Vision) but not order books, so the heatmap only ever shows what was recorded live from the moment
+recording starts.
+
+**Next if pursued:** Stage 1 alpha research on whether CVD divergence/absorption has any edge on crypto perps — on
+the market where the data is free and complete — before spending anything on gold futures data.
 
 ## Session 30 — adaptive_momentum strategy build + validation (2026-06-24)
 

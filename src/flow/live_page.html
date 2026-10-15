@@ -1,0 +1,783 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Flow Monitor</title>
+<style>
+  :root{
+    --bg:#1a1a19; --card:#232322; --line:#383835;
+    --ink:#fff; --ink2:#c3c2b7; --ink3:#8a8980;
+    --for:#3987e5; --against:#e66767; --ok:#199e70; --warn:#c98500;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+  header{display:flex;align-items:center;gap:24px;flex-wrap:wrap;
+         padding:14px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;
+         background:var(--bg);z-index:5}
+  .sym{font-size:20px;font-weight:700;letter-spacing:.5px}
+  .stat{display:flex;flex-direction:column;gap:2px}
+  .stat .k{font-size:10px;text-transform:uppercase;letter-spacing:.9px;color:var(--ink3)}
+  .stat .v{font-size:18px;font-variant-numeric:tabular-nums}
+  .lag .v{font-weight:700;padding:1px 8px;border-radius:4px}
+  .lag.good .v{background:rgba(25,158,112,.18);color:#4cd4a0}
+  .lag.warn .v{background:rgba(201,133,0,.2);color:#e0a52e}
+  .lag.bad  .v{background:rgba(230,103,103,.2);color:var(--against)}
+  .lag.dead .v{background:var(--against);color:#fff;font-weight:700}
+  .dead-banner{display:none;padding:9px 20px;background:rgba(208,59,59,.16);
+    border-bottom:1px solid var(--against);color:#f09a9a;font-size:12px}
+  .dead-banner.on{display:block}
+  .panes.stale{opacity:.4}
+  main{padding:18px 20px;display:grid;gap:14px;
+       grid-template-columns:repeat(auto-fill,minmax(420px,1fr))}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .card.eval{border-color:var(--for);box-shadow:0 0 0 1px rgba(57,135,229,.35)}
+  .card.conf{border-color:var(--ok);box-shadow:0 0 0 1px rgba(25,158,112,.4)}
+  .card.inval{border-color:var(--against);opacity:.75}
+  .ctop{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+  .lvl{font-size:17px;font-weight:700;font-variant-numeric:tabular-nums}
+  .badge{font-size:10px;letter-spacing:1px;padding:3px 8px;border-radius:4px;
+         background:#2e2e2c;color:var(--ink2);text-transform:uppercase}
+  .badge.eval{background:rgba(57,135,229,.2);color:#7fb4f0}
+  .badge.conf{background:rgba(25,158,112,.2);color:#4cd4a0}
+  .badge.inval{background:rgba(230,103,103,.2);color:var(--against)}
+  .phase{font-size:10px;letter-spacing:1px;padding:3px 8px;border-radius:4px;
+         background:#2e2e2c;color:var(--ink3);text-transform:uppercase;margin-left:6px}
+  .phase.absorbing{background:rgba(201,133,0,.22);color:#e0a52e}
+  .phase.turning{background:rgba(25,158,112,.22);color:#4cd4a0;font-weight:700}
+  .phase.failing{background:rgba(230,103,103,.22);color:var(--against)}
+  .note{color:var(--ink3);font-size:12px;margin:4px 0 10px}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}
+  .grid div{background:#1e1e1d;border-radius:6px;padding:6px 8px}
+  .grid .k{font-size:9px;text-transform:uppercase;letter-spacing:.8px;color:var(--ink3)}
+  .grid .v{font-size:14px;font-variant-numeric:tabular-nums}
+  .bar{height:8px;background:#1e1e1d;border-radius:4px;overflow:hidden;margin:10px 0 4px;
+       position:relative}
+  .bar i{display:block;height:100%;background:var(--for)}
+  .bar .th{position:absolute;top:-3px;width:2px;height:14px;background:var(--ink2)}
+  .scorerow{display:flex;justify-content:space-between;font-size:11px;color:var(--ink3)}
+  ul{list-style:none;margin:8px 0 0;padding:0}
+  li{padding:3px 0 3px 14px;position:relative;font-size:12px;color:var(--ink2)}
+  li:before{position:absolute;left:0;font-weight:700}
+  li.f:before{content:"+";color:var(--for)} li.a:before{content:"\2212";color:var(--against)}
+  .lab{font-size:10px;letter-spacing:1px;color:var(--ink3);text-transform:uppercase;margin-top:10px}
+  .thin{color:var(--warn);font-size:11px;margin-top:8px}
+  .mem{font-variant-numeric:tabular-nums}
+  .mem .h{color:var(--for)} .mem .x{color:var(--against)}
+  .ice{margin-top:10px;padding:8px 10px;border-radius:6px;font-size:12px;
+       background:rgba(25,158,112,.14);border:1px solid rgba(25,158,112,.4);color:#4cd4a0}
+  .ice b{font-size:14px}
+  .feed{padding:0 20px 24px}
+  .feed table{width:100%;border-collapse:collapse;font-size:12px}
+  .feed th{text-align:left;color:var(--ink3);font-weight:400;font-size:10px;
+           text-transform:letter-spacing:1px;padding:6px 8px;border-bottom:1px solid var(--line)}
+  .feed td{padding:6px 8px;border-bottom:1px solid #2a2a28;font-variant-numeric:tabular-nums}
+  .empty{color:var(--ink3);padding:40px 20px;text-align:center}
+  .adv{padding:10px 20px;color:var(--ink3);font-size:11px;border-top:1px solid var(--line)}
+
+  /* chart */
+  .chartwrap{margin:16px 20px 0;border:1px solid var(--line);border-radius:10px;
+             background:var(--card);overflow:hidden}
+  .chead{display:flex;align-items:center;gap:14px;padding:11px 14px;flex-wrap:wrap;
+         border-bottom:1px solid var(--line)}
+  .chead h2{font-size:13px;margin:0;font-weight:700;letter-spacing:.3px}
+  .chead .sub{color:var(--ink3);font-size:11px}
+  .tabs{display:flex;gap:6px;flex-wrap:wrap}
+  .tab{font-size:11px;padding:3px 9px;border-radius:5px;border:1px solid var(--line);
+       background:#1c1c1b;color:var(--ink2);cursor:pointer}
+  .tab.on{border-color:var(--for);color:#9cc6f5;background:rgba(57,135,229,.14)}
+  .tab .d{color:var(--ink3);margin-left:5px}
+  .situ{padding:12px 14px;border-bottom:1px solid var(--line)}
+  .situ .hl{font-size:14px;font-weight:700;margin-bottom:5px}
+  .situ ul{margin:0;padding:0;list-style:none}
+  .situ li{color:var(--ink2);font-size:12px;line-height:1.6;padding-left:13px;position:relative}
+  .situ li:before{content:"·";position:absolute;left:3px;color:var(--ink3)}
+  .panes{position:relative}
+  .panes canvas{display:block;width:100%}
+  .legend{display:flex;gap:16px;align-items:center;padding:8px 14px;flex-wrap:wrap;
+          border-top:1px solid var(--line);font-size:11px;color:var(--ink3)}
+  .key{display:flex;align-items:center;gap:6px}
+  .sw{width:10px;height:10px;border-radius:2px;display:inline-block}
+  .ramp{width:74px;height:9px;border-radius:2px;display:inline-block;
+        background:linear-gradient(90deg,#1a1a19,#184f95,#3987e5,#9ec5f4,#cde2fb)}
+  .readout{position:absolute;pointer-events:none;background:#000000e6;
+           border:1px solid var(--line);border-radius:6px;padding:7px 9px;font-size:11px;
+           color:var(--ink2);white-space:nowrap;display:none;z-index:3;
+           font-variant-numeric:tabular-nums}
+  .readout b{color:var(--ink)}
+  .nochart{padding:34px 14px;text-align:center;color:var(--ink3);font-size:12px}
+
+  /* editor */
+  .panel{margin:0 20px 20px;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+  .phead{display:flex;align-items:center;gap:14px;padding:10px 14px;cursor:pointer;
+         user-select:none;flex-wrap:wrap}
+  .phead h2{font-size:12px;letter-spacing:1px;text-transform:uppercase;
+            color:var(--ink2);margin:0;font-weight:400}
+  .phead .caret{color:var(--ink3);font-size:11px}
+  .pbody{padding:0 14px 14px;display:none}
+  .panel.open .pbody{display:block}
+  .set{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink2)}
+  .set input[type=number]{width:72px}
+  input,select,textarea{background:#1c1c1b;color:var(--ink);border:1px solid var(--line);
+    border-radius:5px;padding:5px 7px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
+  input:focus,select:focus{outline:none;border-color:var(--for)}
+  input[type=checkbox]{accent-color:var(--for);width:14px;height:14px;padding:0}
+  button{background:#2e2e2c;color:var(--ink);border:1px solid var(--line);border-radius:5px;
+    padding:5px 11px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;cursor:pointer}
+  button:hover{border-color:var(--ink3)}
+  button.primary{background:rgba(57,135,229,.2);border-color:var(--for);color:#9cc6f5}
+  button.danger:hover{border-color:var(--against);color:var(--against)}
+  .addrow{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;
+          padding:10px 0 12px;border-bottom:1px solid var(--line)}
+  .fld{display:flex;flex-direction:column;gap:3px}
+  .fld label{font-size:10px;text-transform:uppercase;letter-spacing:.9px;color:var(--ink3)}
+  .fld.grow{flex:1;min-width:160px}
+  .fld.grow input{width:100%}
+  .ltable{width:100%;border-collapse:collapse;font-size:12px;margin-top:4px}
+  .ltable th{text-align:left;color:var(--ink3);font-weight:400;font-size:10px;
+             letter-spacing:1px;text-transform:uppercase;padding:7px 8px;
+             border-bottom:1px solid var(--line)}
+  .ltable td{padding:6px 8px;border-bottom:1px solid #2a2a28;font-variant-numeric:tabular-nums}
+  .ltable tr.off td{opacity:.45}
+  .ltable .acts{text-align:right;white-space:nowrap}
+  .ltable .acts button{padding:3px 8px;margin-left:5px}
+  .msg{font-size:12px;padding:8px 10px;border-radius:6px;margin-top:10px;display:none}
+  .msg.show{display:block}
+  .msg.ok{background:rgba(25,158,112,.14);border:1px solid rgba(25,158,112,.4);color:#4cd4a0}
+  .msg.err{background:rgba(230,103,103,.14);border:1px solid rgba(230,103,103,.45);color:#f09a9a}
+  .msg.warn{background:rgba(201,133,0,.14);border:1px solid rgba(201,133,0,.45);color:#e0a52e}
+</style></head><body>
+<header>
+  <div class="sym" id="sym">—</div>
+  <div class="stat"><span class="k">price</span><span class="v" id="px">—</span></div>
+  <div class="stat lag" id="lagbox"><span class="k">lag</span><span class="v" id="lag">—</span></div>
+  <div class="stat"><span class="k">ticks</span><span class="v" id="ticks">0</span></div>
+  <div class="stat"><span class="k">baseline range</span><span class="v" id="base">—</span></div>
+  <div class="stat"><span class="k">link</span><span class="v" id="conn">connecting</span></div>
+</header>
+<div class="dead-banner" id="deadbar"></div>
+<section class="chartwrap" id="chartwrap" style="display:none">
+  <div class="chead">
+    <h2 id="cTitle">—</h2>
+    <span class="sub" id="cSub"></span>
+    <span style="flex:1"></span>
+    <div class="tabs" id="cTabs"></div>
+  </div>
+  <div class="situ"><div class="hl" id="cHead">—</div><ul id="cLines"></ul></div>
+  <div class="panes" id="panes">
+    <canvas id="cMain"></canvas>
+    <canvas id="cCvd"></canvas>
+    <div class="readout" id="cRead"></div>
+  </div>
+  <div class="legend">
+    <span class="key"><i class="sw" style="background:#3987e5"></i>buying (aggressive)</span>
+    <span class="key"><i class="sw" style="background:#e66767"></i>selling (aggressive)</span>
+    <span class="key" id="kBook"><i class="ramp"></i>resting size</span>
+    <span class="key"><i class="sw" style="background:#c98500"></i>your zone</span>
+    <span class="key"><i class="sw" style="background:#d03b3b"></i>invalidation</span>
+    <span style="flex:1"></span>
+    <span id="cMeta"></span>
+  </div>
+</section>
+<main id="cards"><div class="empty">waiting for data…</div></main>
+<div class="feed">
+  <div class="lab">signals this session</div>
+  <table><thead><tr><th>time</th><th>level</th><th>test</th><th>side</th><th>price</th>
+  <th>score</th><th>invalidation</th></tr></thead><tbody id="sigs"></tbody></table>
+</div>
+<div class="panel" id="panel">
+  <div class="phead" id="phead">
+    <span class="caret" id="caret">&#9656;</span>
+    <h2>levels &amp; settings</h2>
+    <span style="flex:1"></span>
+    <span class="set" onclick="event.stopPropagation()">threshold
+      <input type="number" id="setTh" step="0.01" min="0" max="1"></span>
+    <label class="set" onclick="event.stopPropagation()">
+      <input type="checkbox" id="setTurn"> require turn</label>
+    <label class="set" onclick="event.stopPropagation()">
+      <input type="checkbox" id="setMem"> level memory</label>
+    <span class="set" id="depthState">book —</span>
+  </div>
+  <div class="pbody">
+    <div class="addrow">
+      <div class="fld"><label>price</label><input type="number" id="fPrice" step="any" placeholder="98000"></div>
+      <div class="fld"><label>width</label><input type="number" id="fWidth" step="any" placeholder="150"></div>
+      <div class="fld"><label>side</label>
+        <select id="fSide"><option value="long">long (support)</option>
+                           <option value="short">short (resistance)</option></select></div>
+      <div class="fld"><label>zone</label>
+        <div id="zonePreview" style="font-size:12px;color:var(--ink3);padding:6px 0">—</div></div>
+      <div class="fld grow"><label>note — why you marked it</label>
+        <input type="text" id="fNote" placeholder="prior day low + 4h demand"></div>
+      <div class="fld"><label>&nbsp;</label><button class="primary" id="btnAdd">add level</button></div>
+    </div>
+    <table class="ltable"><thead><tr>
+      <th>level</th><th>zone</th><th>side</th><th>note</th><th>marked</th><th></th>
+    </tr></thead><tbody id="ltbody"></tbody></table>
+    <div class="msg" id="msg"></div>
+    <div style="color:var(--ink3);font-size:11px;margin-top:10px">
+      <b>width</b> runs from the level into the side price penetrates: a <b>short</b> at 4000
+      width 100 is watched 4000–4100, a <b>long</b> at 4000 width 100 is watched 3900–4000. It is
+      also the risk — price leaving the far side is the level failing, and that price is the
+      invalidation published with every signal.<br>
+      Edits write through to <span id="lpath">config/levels.toml</span> — the file stays the
+      source of truth, so what you add here survives a restart. <b>marked</b> is when the level
+      was first written down; it is preserved through edits, because a level you moved is still
+      a level you marked then.
+    </div>
+  </div>
+</div>
+<div class="adv">Advisory only — this never places an order. Evidence is shown for and against;
+read both before acting. A signal needs the sequence: <b>ABSORBING</b> (aggression failing) then
+<b>TURNING</b> (it reverses). Absorption on its own does not fire.</div>
+<script>
+const $=id=>document.getElementById(id);
+const fmt=(v,d=2)=>v==null?"—":Number(v).toLocaleString(undefined,{minimumFractionDigits:d,maximumFractionDigits:d});
+const hhmmss=ms=>new Date(ms).toISOString().slice(11,19);
+let signals=[];
+let openedOnce=false;
+let lastTick=0;
+
+function lagClass(ms){ if(ms==null)return"";return ms<500?"good":ms<2000?"warn":"bad"; }
+// BTCUSDT trades continuously; ten seconds of silence is a broken feed, not a
+// quiet market. Raise it for an instrument that genuinely goes quiet.
+const STALE_MS=10_000;
+
+// Prior outcomes. Rendered on idle levels too: the useful moment for "this
+// broke twice" is before price arrives, not once it is already in the zone.
+// Blank when level memory is off, which is the default.
+function mem(l){
+  const h=l.prior_held||0, x=l.prior_failed||0;
+  if(!h&&!x) return "";
+  const parts=[];
+  if(x) parts.push(`<span class="x">failed ${x}\u00d7</span>`);
+  if(h) parts.push(`<span class="h">held ${h}\u00d7</span>`);
+  return ` \u00b7 <span class="mem">${parts.join(" / ")}</span>`;
+}
+
+// A resolved verdict with no age is misleading: CONFIRMED could be four
+// seconds or four minutes old, and the level is blind until it re-arms.
+function ago(l){
+  if(!l.resolved_ms||!(l.state==="CONFIRMED"||l.state==="INVALIDATED")) return "";
+  const since=Math.max(0,(lastTick-l.resolved_ms)/1000);
+  const left=Math.max(0,(l.cooldown_ms||300000)/1000-since);
+  return ` · <span style="color:var(--warn)">${since.toFixed(0)}s ago, `
+        +`re-arms in ${Math.floor(left/60)}m ${String(Math.floor(left%60)).padStart(2,"0")}s</span>`;
+}
+
+function card(l){
+  const st=l.state, ph=l.phase, cls=st==="EVALUATING"?"eval":st==="CONFIRMED"?"conf":st==="INVALIDATED"?"inval":"";
+  const score=l.score, pct=score==null?0:Math.round(score*100);
+  const thPct=Math.round((l.threshold||0.62)*100);
+  // Metrics stay visible after resolution — the numbers behind a
+  // confirmation matter most in the moments right after it fires.
+  const inZone=st==="EVALUATING"||st==="CONFIRMED"||st==="INVALIDATED";
+  const dist=l.distance==null?"—":(l.distance===0?"IN ZONE":fmt(l.distance,2));
+  return `<div class="card ${cls}">
+    <div class="ctop">
+      <span class="lvl">${fmt(l.price,2)} <span style="color:var(--ink3);font-size:12px">
+        ${fmt(l.low,2)}–${fmt(l.high,2)}</span></span>
+      <span>${ph&&ph!=="WATCHING"?`<span class="phase ${ph.toLowerCase()}">${ph}</span>`:""}<span class="badge ${cls}" style="margin-left:6px">${st}</span></span>
+    </div>
+    <div class="note">${l.side.toUpperCase()} · ${l.note||""} · test #${l.test_count} · ${dist}${mem(l)}${ago(l)}</div>
+    ${score!=null?`<div class="bar"><i style="width:${pct}%"></i><span class="th" style="left:${thPct}%"></span></div>
+      <div class="scorerow"><span>score ${fmt(score,3)}</span><span>threshold ${fmt(l.threshold,2)}</span></div>`:""}
+    ${inZone?`<div class="grid">
+      <div><div class="k">dwell</div><div class="v">${Math.round((l.dwell_ms||0)/1000)}s</div></div>
+      <div><div class="k">delta</div><div class="v" style="color:${l.delta<0?'var(--against)':'var(--for)'}">${fmt(l.delta,1)}</div></div>
+      <div><div class="k">absorption</div><div class="v">${fmt(l.absorption,2)}</div></div>
+      <div><div class="k">range</div><div class="v">${fmt(l.range_ratio,2)}x</div></div>
+      <div><div class="k">tape</div><div class="v">${fmt(l.trades_per_sec,1)}/s
+        <span style="color:var(--ink3);font-size:11px">${fmt(l.velocity_ratio,1)}x</span></div></div>
+      <div><div class="k">retest</div><div class="v">${l.probe_count>1?
+        `<span style="color:${l.retest_volume_ratio<0.7?'var(--ok)':'var(--against)'}">${fmt(l.retest_volume_ratio*100,0)}%</span>`
+        :`<span style="color:var(--ink3)">probe ${l.probe_count||0}</span>`}</div></div>
+    </div>`:""}
+    ${!l.sufficient&&inZone?`<div class="thin">thin — ${l.trade_count} trades, not enough to act on</div>`:""}
+    ${l.iceberg_ratio>=3?`<div class="ice">🧊 ICEBERG at ${fmt(l.iceberg_price,2)} —
+      <b>${fmt(l.iceberg_ratio,0)}x</b> more traded than was ever displayed</div>`:""}
+    ${l.supporting?.length?`<div class="lab">for</div><ul>${l.supporting.map(i=>`<li class="f">${i.detail}</li>`).join("")}</ul>`:""}
+    ${l.opposing?.length?`<div class="lab">against</div><ul>${l.opposing.map(i=>`<li class="a">${i.detail}</li>`).join("")}</ul>`:""}
+  </div>`;
+}
+
+function render(s){
+  $("sym").textContent=s.symbol;
+  $("ticks").textContent=(s.tick_count||0).toLocaleString();
+  $("base").textContent=fmt(s.baseline_range,2);
+  const lvls=s.levels||[];
+  const px=lvls.length?lvls[0].last_price:null;
+  $("px").textContent=fmt(px,2);
+  // A feed that stops updates nothing, so arrival lag freezes at its last
+  // good value. Staleness is measured at publish time and keeps climbing, so
+  // the headline leads with whichever is worse — otherwise a dead feed reads
+  // as a calm market.
+  lastTick=s.last_tick_ms||0;
+  const lag=s.lag_ms, stale=s.stale_ms;
+  const dead = stale!=null && stale>=STALE_MS;
+  if(dead){
+    $("lag").textContent=(stale/1000).toFixed(0)+"s";
+    $("lagbox").className="stat lag dead";
+    $("deadbar").className="dead-banner on";
+    $("deadbar").innerHTML=`<b>NO DATA for ${(stale/1000).toFixed(0)}s.</b> `
+      +`Nothing below is current — the last trade arrived at `
+      +`${hhmmss(s.last_tick_ms)}. Check the monitor's terminal.`;
+    $("panes").classList.add("stale");
+  }else{
+    $("lag").textContent=lag==null?"—":lag+"ms";
+    $("lagbox").className="stat lag "+lagClass(lag);
+    $("deadbar").className="dead-banner";
+    $("panes").classList.remove("stale");
+  }
+  const sorted=[...lvls].sort((a,b)=>(a.distance??1e18)-(b.distance??1e18));
+  $("cards").innerHTML=sorted.length?sorted.map(card).join(""):
+    `<div class="empty">no active levels — add one in <b>levels &amp; settings</b> below,
+     before price gets there</div>`;
+  // Nothing to watch means the first thing you need is the editor. Once only:
+  // re-opening a panel the operator closed would be the page arguing with them.
+  if(!openedOnce && !(s.registry||[]).length){ openedOnce=true;
+    $("panel").classList.add("open"); $("caret").innerHTML="&#9662;"; }
+  syncSettings(s);
+  renderRegistry(s.registry);
+  if(s.chart) chart=s.chart;
+  renderChart(s);
+  if(s.new_signals?.length){ signals=[...s.new_signals,...signals].slice(0,50); }
+  // The test number is here so an open position can be told apart from the
+  // card. A level re-arms `cooldown_ms` after it resolves and starts a fresh
+  // test; if the card reads test #3 and your signal was test #1, the card is
+  // measuring a later test of the same level, not the trade you are in.
+  const liveTest=Object.fromEntries(lvls.map(l=>[l.level_id,l.test_count]));
+  $("sigs").innerHTML=signals.map(x=>{
+    const stale=liveTest[x.level_id]>x.test_count;
+    return `<tr><td>${hhmmss(x.timestamp)}</td><td>${x.level_id}</td>
+    <td${stale?' style="color:var(--ink3)" title="the card has moved on to a later test"':""}>#${x.test_count}${stale?` &rarr; #${liveTest[x.level_id]}`:""}</td>
+    <td style="color:${x.side==="long"?"var(--for)":"var(--against)"}">${x.side.toUpperCase()}</td>
+    <td>${fmt(x.price,2)}</td><td>${fmt(x.score,3)}</td><td>${fmt(x.invalidation,2)}</td></tr>`;
+  }).join("");
+}
+
+// ── editor ────────────────────────────────────────────────────────────
+// The panel writes through the same socket the state arrives on. Every field
+// the process reads at runtime is here: anything still requiring a restart
+// says so rather than pretending to be editable.
+let sock=null, editing=null;
+
+const send=o=>{ if(sock&&sock.readyState===1){ sock.send(JSON.stringify(o)); return true; }
+                say("not connected — the monitor may have stopped","err"); return false; };
+
+function say(text,kind){
+  const m=$("msg"); m.textContent=text; m.className="msg show "+(kind||"ok");
+  clearTimeout(say._t); say._t=setTimeout(()=>{m.className="msg";}, 7000);
+}
+
+function addLevel(){
+  const price=parseFloat($("fPrice").value), width=parseFloat($("fWidth").value);
+  if(!(price>0)) return say("price must be a number above 0","err");
+  if(!(width>0)) return say("width must be a number above 0 — it is the half-width, "
+                            +"so the zone is price \u00b1 width","err");
+  const lv={price,width,side:$("fSide").value,note:$("fNote").value.trim()};
+  if(editing) lv.id=editing;
+  if(send({cmd:"level.upsert",level:lv})){
+    $("fPrice").value=""; $("fWidth").value=""; $("fNote").value="";
+    setEditing(null);
+  }
+}
+
+function setEditing(id){
+  editing=id;
+  $("btnAdd").textContent=id?"save "+id:"add level";
+  $("btnAdd").classList.toggle("primary",true);
+}
+
+function editLevel(l){
+  setEditing(l.id);
+  $("fPrice").value=l.price; $("fWidth").value=l.width;
+  $("fSide").value=l.side; $("fNote").value=l.note||""; previewZone();
+  $("panel").classList.add("open"); $("caret").innerHTML="&#9662;";
+  $("fPrice").focus();
+}
+
+function delLevel(l){
+  // Outcomes are keyed by id and are NOT deleted with the level, so re-adding
+  // the same price later inherits them. Worth saying before, not after.
+  if(!confirm(`Delete ${l.id}?\n\nIts recorded outcomes stay on disk — re-adding `
+              +`the same level later will inherit them.`)) return;
+  send({cmd:"level.remove",id:l.id});
+}
+
+function renderRegistry(reg){
+  const tb=$("ltbody");
+  if(!reg||!reg.length){
+    tb.innerHTML=`<tr><td colspan="6" style="color:var(--ink3);padding:14px 8px">`
+      +`no levels yet — add one above, before price gets there</td></tr>`;
+    return;
+  }
+  tb.innerHTML=reg.map((l,i)=>`<tr class="${l.enabled&&!l.expired?"":"off"}">
+    <td>${l.id}</td>
+    <td>${fmt(l.price,2)} <span style="color:var(--ink3)">${fmt(l.low,2)}–${fmt(l.high,2)}</span></td>
+    <td style="color:${l.side==="long"?"var(--for)":"var(--against)"}">${l.side.toUpperCase()}</td>
+    <td style="color:var(--ink2)">${l.note||""}</td>
+    <td style="color:var(--ink3)">${l.first_seen_ms?hhmmss(l.first_seen_ms):"—"}${l.expired?" · expired":""}</td>
+    <td class="acts">
+      <button data-act="edit" data-i="${i}">edit</button>
+      <button data-act="park" data-i="${i}">${l.enabled?"park":"arm"}</button>
+      <button class="danger" data-act="del" data-i="${i}">delete</button>
+    </td></tr>`).join("");
+  tb.onclick=e=>{
+    const b=e.target.closest("button"); if(!b) return;
+    const l=reg[+b.dataset.i];
+    if(b.dataset.act==="edit") editLevel(l);
+    else if(b.dataset.act==="park") send({cmd:"level.enable",id:l.id,enabled:!l.enabled});
+    else if(b.dataset.act==="del") delLevel(l);
+  };
+}
+
+// Settings mirror the process, EXCEPT while focused: overwriting a box mid-type
+// at 5 Hz makes it impossible to type a threshold at all.
+function syncSettings(s){
+  const th=$("setTh");
+  if(document.activeElement!==th) th.value=Number(s.threshold??0.62).toFixed(2);
+  $("setTurn").checked=!!s.require_turn;
+  $("setMem").checked=!!s.level_memory;
+  $("depthState").textContent="book "+(s.depth?"on":"off — restart with --depth");
+  $("depthState").style.color=s.depth?"var(--ink2)":"var(--ink3)";
+  if(s.levels_path) $("lpath").textContent=s.levels_path;
+}
+
+$("phead").onclick=()=>{
+  const open=$("panel").classList.toggle("open");
+  $("caret").innerHTML=open?"&#9662;":"&#9656;";
+};
+// The width runs one way, not both. Showing the resulting zone as it is typed
+// is cheaper than any label: a support at 4000 width 100 is 3900-4000, and a
+// resistance at 4000 width 100 is 4000-4100.
+function previewZone(){
+  const p=parseFloat($("fPrice").value), w=parseFloat($("fWidth").value);
+  const el=$("zonePreview");
+  if(!(p>0)||!(w>0)){ el.textContent="—"; return; }
+  const short=$("fSide").value==="short";
+  const lo=short?p:p-w, hi=short?p+w:p;
+  el.innerHTML=`<b style="color:var(--ink2)">${fmt(lo,2)} – ${fmt(hi,2)}</b>`;
+}
+["fPrice","fWidth","fSide"].forEach(id=>{
+  $(id).oninput=previewZone; $(id).onchange=previewZone;
+});
+
+$("btnAdd").onclick=addLevel;
+$("fNote").onkeydown=e=>{ if(e.key==="Enter") addLevel(); };
+$("setTh").onchange=()=>send({cmd:"config.set",threshold:parseFloat($("setTh").value)});
+$("setTurn").onchange=()=>send({cmd:"config.set",require_turn:$("setTurn").checked});
+$("setMem").onchange=()=>send({cmd:"config.set",level_memory:$("setMem").checked});
+
+function onAck(a){
+  if(!a.ok) return say(a.error||"command failed","err");
+  if(a.warning) return say(a.warning,"warn");
+  if(a.cmd==="config.set") return say("applied: "+Object.keys(a.changed||{}).join(", "),"ok");
+  if(a.cmd==="level.remove") return say("deleted "+a.id,"ok");
+  if(a.cmd==="level.enable") return say((a.enabled?"armed ":"parked ")+a.id,"ok");
+  say("saved "+a.id,"ok");
+}
+
+
+// ── chart ─────────────────────────────────────────────────────────────
+// Canvas, not SVG: a depth heatmap is thousands of cells and SVG would put
+// each one in the DOM. No charting library either — this console has to work
+// with no network, and a CDN script is a dependency on the internet being
+// there while you are in a trade.
+//
+// Two layers. The heatmap and closed candles only change when a column closes
+// (every interval_ms), so they are drawn once into an offscreen canvas and
+// blitted; the live candle, price line and crosshair redraw at 5 Hz on top.
+// Re-rasterising 180 columns five times a second would be ~99% wasted work.
+
+const RAMP = ["#1a1a19","#104281","#184f95","#256abf","#3987e5","#6da7ec","#9ec5f4","#cde2fb"];
+const C_BUY="#3987e5", C_SELL="#e66767", C_INK="#c3c2b7", C_MUTED="#898781",
+      C_GRID="#2c2c2a", C_ZONE="#c98500", C_INVAL="#d03b3b";
+
+let chart=null, chartSeq=-1, focusId=null, layer=null, geo=null, hoverX=null, hoverY=null;
+
+const DPR=()=>Math.min(2,window.devicePixelRatio||1);
+function sizeCanvas(cv,h){
+  const w=cv.parentElement.clientWidth, d=DPR();
+  if(cv.width!==Math.round(w*d)||cv.height!==Math.round(h*d)){
+    cv.width=Math.round(w*d); cv.height=Math.round(h*d);
+    cv.style.height=h+"px";
+  }
+  const ctx=cv.getContext("2d");
+  ctx.setTransform(d,0,0,d,0,0);
+  ctx.clearRect(0,0,w,h);
+  return {ctx,w,h};
+}
+function rampColor(t){                       // t in [0,1]
+  const x=Math.max(0,Math.min(1,t))*(RAMP.length-1);
+  return RAMP[Math.round(x)];
+}
+
+// Geometry is computed from the FOCUSED level, not from the market: the zone is
+// what you are watching, so it must always be on screen and never a sliver.
+function computeGeo(lv,cols,w,h){
+  const padL=0, padR=76, padT=8, padB=18;
+  // The window is anchored on the ZONE and does not stretch to fit the tape.
+  // Fitting every candle is what a generic chart does, and it is wrong here: an
+  // hour that opened 900 above your level would squash the zone — the only part
+  // you are watching — into a few pixels. Bookmap works the same way: you set a
+  // price window and price moves through it. Candles outside are clipped.
+  let lo=Math.min(lv.low,lv.invalidation??lv.low), hi=Math.max(lv.high,lv.invalidation??lv.high);
+  const zh=Math.max(hi-lo,1e-9);
+  lo-=zh*0.9; hi+=zh*0.9;
+  const px=lv.last_price;
+  if(px){ if(px<lo) lo=px-zh*0.25; if(px>hi) hi=px+zh*0.25; }
+  const plotW=w-padL-padR, plotH=h-padT-padB;
+  return {
+    lo,hi,padL,padR,padT,padB,plotW,plotH,w,h,
+    y:p=>padT+plotH*(1-(p-lo)/(hi-lo)),
+    priceAt:py=>lo+(hi-lo)*(1-(py-padT)/plotH),
+    x:i=>padL+plotW*(i+0.5)/Math.max(1,cols.length),
+    colAt:px=>Math.floor((px-padL)/plotW*cols.length),
+    cw:Math.max(1,plotW/Math.max(1,cols.length)),
+  };
+}
+
+function buildLayer(lv,cols,w,h){
+  const off=document.createElement("canvas"), d=DPR();
+  off.width=Math.round(w*d); off.height=Math.round(h*d);
+  const ctx=off.getContext("2d"); ctx.setTransform(d,0,0,d,0,0);
+  const g=computeGeo(lv,cols,w,h);
+  const bs=chart.bucket_size||0;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0,g.padT,g.padL+g.plotW,g.plotH); ctx.clip();
+
+  // 1. resting size — sequential, one hue, near-zero recedes into the surface
+  if(bs>0){
+    let maxBook=0;
+    for(const c of cols) for(let i=1;i<c.ka.length;i+=2) if(c.ka[i]>maxBook) maxBook=c.ka[i];
+    if(maxBook>0){
+      for(let ci=0;ci<cols.length;ci++){
+        const c=cols[ci], x=g.x(ci)-g.cw/2;
+        for(let i=0;i<c.ka.length;i+=2){
+          const price=c.ka[i]*bs, v=c.ka[i+1];
+          const y0=g.y(price+bs/2), y1=g.y(price-bs/2);
+          if(y1<g.padT||y0>g.padT+g.plotH) continue;
+          // Linear, not sqrt. A book IS mostly nothing with a few walls, and
+          // the honest sequential map says so: dark almost everywhere, bright
+          // where size actually rests. sqrt lifted a uniform book to mid-ramp
+          // and painted a solid slab that buried the zone under it.
+          ctx.globalAlpha=0.62;      // candles and the zone must read above it
+          ctx.fillStyle=rampColor(v/maxBook);
+          ctx.fillRect(x,y0,g.cw+0.5,Math.max(1,y1-y0));
+          ctx.globalAlpha=1;
+        }
+      }
+    }
+  }
+
+  // 2. your zone, drawn over the book so it is never lost in it
+  // The zone has to survive being drawn over a busy book, so it is carried by
+  // its EDGES rather than by a tint — a 10% wash over bright liquidity is
+  // invisible, and the one thing that must never be ambiguous is where your
+  // zone is.
+  const zy0=g.y(lv.high), zy1=g.y(lv.low), zw=g.padL+g.plotW;
+  ctx.fillStyle="rgba(201,133,0,0.09)";
+  ctx.fillRect(0,zy0,zw,Math.max(1,zy1-zy0));
+  ctx.strokeStyle=C_ZONE; ctx.lineWidth=1; ctx.globalAlpha=0.85;
+  ctx.beginPath(); ctx.moveTo(0,zy0+0.5); ctx.lineTo(zw,zy0+0.5);
+  ctx.moveTo(0,zy1-0.5); ctx.lineTo(zw,zy1-0.5); ctx.stroke();
+  ctx.globalAlpha=1;
+  // the level itself — the edge you are trading off
+  const ly=g.y(lv.price);
+  ctx.strokeStyle=C_ZONE; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(0,ly); ctx.lineTo(zw,ly); ctx.stroke();
+
+  if(lv.invalidation!=null){
+    const iy=g.y(lv.invalidation);
+    ctx.strokeStyle=C_INVAL; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(0,iy+0.5); ctx.lineTo(g.padL+g.plotW,iy+0.5); ctx.stroke();
+  }
+
+  // 3. candles — coloured by DELTA, not by close-vs-open. On an order-flow
+  // console who won the bar is the information; direction you can already see
+  // from the shape.
+  const bw=Math.max(1.5,Math.min(11,g.cw-1.5));
+  for(let ci=0;ci<cols.length;ci++){
+    const c=cols[ci], x=g.x(ci), up=(c.b-c.s)>=0;
+    ctx.strokeStyle=up?C_BUY:C_SELL; ctx.fillStyle=up?C_BUY:C_SELL;
+    ctx.globalAlpha=0.9; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(x,g.y(c.h)); ctx.lineTo(x,g.y(c.l)); ctx.stroke();
+    const yo=g.y(c.o), yc=g.y(c.c);
+    ctx.fillRect(x-bw/2,Math.min(yo,yc),bw,Math.max(1,Math.abs(yc-yo)));
+    ctx.globalAlpha=1;
+  }
+
+  ctx.restore();
+
+  // 4. footprint rail — volume traded at each price over the window, sell left
+  // of the axis, buy right. This is the absorption picture: a long red bar at a
+  // price price never left is somebody eating every offer.
+  if(bs>0){
+    const buy={}, sell={};
+    let peak=0;
+    for(const c of cols){
+      for(let i=0;i<c.ba.length;i+=2){ buy[c.ba[i]]=(buy[c.ba[i]]||0)+c.ba[i+1]; }
+      for(let i=0;i<c.sa.length;i+=2){ sell[c.sa[i]]=(sell[c.sa[i]]||0)+c.sa[i+1]; }
+    }
+    for(const k in buy) peak=Math.max(peak,buy[k]);
+    for(const k in sell) peak=Math.max(peak,sell[k]);
+    const x0=g.padL+g.plotW, railW=g.padR-6, mid=x0+railW/2;
+    ctx.fillStyle="#141413"; ctx.fillRect(x0,g.padT,railW,g.plotH);
+    if(peak>0){
+      const keys=new Set([...Object.keys(buy),...Object.keys(sell)]);
+      for(const k of keys){
+        const price=Number(k)*bs;
+        const y0=g.y(price+bs/2), y1=g.y(price-bs/2);
+        if(y1<g.padT||y0>g.padT+g.plotH) continue;
+        const bh=Math.max(1,y1-y0-1);
+        const bv=(buy[k]||0)/peak*(railW/2), sv=(sell[k]||0)/peak*(railW/2);
+        ctx.fillStyle=C_SELL; ctx.fillRect(mid-sv,y0,sv,bh);
+        ctx.fillStyle=C_BUY;  ctx.fillRect(mid,y0,bv,bh);
+      }
+    }
+    ctx.strokeStyle=C_GRID; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(mid+0.5,g.padT); ctx.lineTo(mid+0.5,g.padT+g.plotH); ctx.stroke();
+  }
+  return {off,g};
+}
+
+function drawMain(lv,cols){
+  const {ctx,w,h}=sizeCanvas($("cMain"),380);
+  if(!cols.length){ return null; }
+  if(!layer||chartSeq!==chart.seq||layer.w!==w){
+    layer=buildLayer(lv,cols,w,h); layer.w=w; chartSeq=chart.seq;
+  }
+  ctx.drawImage(layer.off,0,0,w,h);
+  const g=layer.g; geo=g;
+
+  // price axis — hairline, recessive, tabular
+  ctx.font="10px ui-monospace,Menlo,monospace"; ctx.textBaseline="middle";
+  const tag=(text,y,color)=>{
+    ctx.textAlign="left";
+    const w2=ctx.measureText(text).width+7;
+    ctx.fillStyle="rgba(10,10,10,0.82)";        // legible over the heatmap
+    ctx.fillRect(2,y-13,w2,13);
+    ctx.fillStyle=color; ctx.fillText(text,5,y-6.5);
+  };
+  tag(fmt(lv.high,1),g.y(lv.high),C_ZONE);
+  tag(fmt(lv.low,1),g.y(lv.low),C_ZONE);
+  if(lv.invalidation!=null) tag(fmt(lv.invalidation,1),g.y(lv.invalidation),C_INVAL);
+  // live price
+  const px=lv.last_price;
+  if(px){
+    const y=g.y(px);
+    ctx.strokeStyle=C_INK; ctx.lineWidth=1; ctx.globalAlpha=0.65;
+    ctx.beginPath(); ctx.moveTo(0,y+0.5); ctx.lineTo(g.padL+g.plotW,y+0.5); ctx.stroke();
+    ctx.globalAlpha=1;
+    const t=fmt(px,1), tw=ctx.measureText(t).width+8;
+    ctx.fillStyle="rgba(10,10,10,0.82)";
+    ctx.fillRect(g.padL+g.plotW-tw-2,y-13,tw,13);
+    ctx.fillStyle=C_INK; ctx.textAlign="right";
+    ctx.fillText(t,g.padL+g.plotW-5,y-6.5);
+  }
+  return g;
+}
+
+function drawCvd(cols,g){
+  const {ctx,w,h}=sizeCanvas($("cCvd"),96);
+  if(!cols.length||!g) return;
+  let lo=Infinity,hi=-Infinity;
+  for(const c of cols){ if(c.cvd<lo)lo=c.cvd; if(c.cvd>hi)hi=c.cvd; }
+  if(!isFinite(lo)){ return; }
+  if(hi-lo<1e-9){ hi=lo+1; }
+  const padT=14,padB=6,plotH=h-padT-padB;
+  const y=v=>padT+plotH*(1-(v-lo)/(hi-lo));
+  ctx.fillStyle=C_MUTED; ctx.font="9px ui-monospace,Menlo,monospace";
+  ctx.textAlign="left"; ctx.textBaseline="top";
+  ctx.fillText("CVD  cumulative volume delta",4,3);
+  if(lo<0&&hi>0){
+    ctx.strokeStyle=C_GRID; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(0,y(0)+0.5); ctx.lineTo(g.padL+g.plotW,y(0)+0.5); ctx.stroke();
+  }
+  ctx.strokeStyle=(cols[cols.length-1].cvd>=cols[0].cvd)?C_BUY:C_SELL;
+  ctx.lineWidth=2; ctx.beginPath();
+  cols.forEach((c,i)=>{ const X=g.x(i),Y=y(c.cvd); i?ctx.lineTo(X,Y):ctx.moveTo(X,Y); });
+  ctx.stroke();
+  ctx.fillStyle=C_MUTED; ctx.textAlign="right"; ctx.textBaseline="middle";
+  ctx.fillText(fmt(cols[cols.length-1].cvd,1),g.padL+g.plotW-3,y(cols[cols.length-1].cvd));
+}
+
+function focusLevel(s){
+  const lvls=s.levels||[];
+  if(!lvls.length) return null;
+  if(focusId){ const hit=lvls.find(l=>l.level_id===focusId); if(hit) return hit; }
+  // Nearest by default — the level price is walking into is the one to watch.
+  return [...lvls].sort((a,b)=>(a.distance??1e18)-(b.distance??1e18))[0];
+}
+
+function renderChart(s){
+  const lv=focusLevel(s);
+  const wrap=$("chartwrap");
+  if(!lv||!chart){ wrap.style.display="none"; return; }
+  wrap.style.display="";
+  $("cTitle").textContent=`${fmt(lv.price,2)} ${lv.side.toUpperCase()}`;
+  $("cSub").textContent=`${fmt(lv.low,2)}–${fmt(lv.high,2)} · ${lv.note||""}`;
+  $("cTabs").innerHTML=(s.levels||[]).map(l=>
+    `<button class="tab ${l.level_id===lv.level_id?"on":""}" data-id="${l.level_id}">
+      ${fmt(l.price,0)}<span class="d">${l.state==="EVALUATING"?"in zone":fmt(l.distance,0)}</span>
+     </button>`).join("");
+  $("cTabs").onclick=e=>{ const b=e.target.closest("button"); if(b){ focusId=b.dataset.id; layer=null; render(s); } };
+
+  const n=(lv.narrative)||{};
+  $("cHead").textContent=n.headline||"";
+  $("cLines").innerHTML=(n.lines||[]).map(t=>`<li>${t}</li>`).join("");
+
+  const cols=(chart.columns||[]).slice();
+  const live=(s.tape||{}).live;
+  if(live){ if(cols.length&&cols[cols.length-1].t===live.t) cols[cols.length-1]=live; else cols.push(live); }
+  const g=drawMain(lv,cols);
+  drawCvd(cols,g);
+  $("kBook").style.display=(s.tape||{}).has_book?"":"none";
+  $("cMeta").textContent=`${cols.length} x ${Math.round((chart.interval_ms||5000)/1000)}s`
+    +(chart.bucket_size?` · rows ${fmt(chart.bucket_size,2)}`:"")
+    +((s.tape||{}).has_book?"":" · no book (run with --depth)");
+  window.__cols=cols; window.__lv=lv;
+}
+
+// crosshair: a chart you cannot interrogate is a picture
+$("panes").addEventListener("mousemove",e=>{
+  const r=$("cMain").getBoundingClientRect();
+  hoverX=e.clientX-r.left; hoverY=e.clientY-r.top;
+  showReadout(e);
+});
+$("panes").addEventListener("mouseleave",()=>{ hoverX=null; $("cRead").style.display="none"; });
+
+function showReadout(e){
+  const cols=window.__cols||[], g=geo, ro=$("cRead");
+  if(!g||!cols.length||hoverX==null||hoverX>g.padL+g.plotW){ ro.style.display="none"; return; }
+  const i=Math.max(0,Math.min(cols.length-1,g.colAt(hoverX)));
+  const c=cols[i], price=g.priceAt(hoverY);
+  const d=(c.b||0)-(c.s||0);
+  ro.innerHTML=`<b>${hhmmss(c.t)}</b> &nbsp; price <b>${fmt(price,2)}</b><br>`
+    +`O ${fmt(c.o,2)} H ${fmt(c.h,2)} L ${fmt(c.l,2)} C ${fmt(c.c,2)}<br>`
+    +`<span style="color:${C_BUY}">buy ${fmt(c.b,3)}</span> &nbsp; `
+    +`<span style="color:${C_SELL}">sell ${fmt(c.s,3)}</span><br>`
+    +`delta <b style="color:${d>=0?C_BUY:C_SELL}">${d>=0?"+":""}${fmt(d,3)}</b>`
+    +` &nbsp; cvd ${fmt(c.cvd,2)}`;
+  ro.style.display="block";
+  const pr=$("panes").getBoundingClientRect();
+  let x=e.clientX-pr.left+14, y=e.clientY-pr.top+14;
+  if(x+ro.offsetWidth>pr.width-6) x=e.clientX-pr.left-ro.offsetWidth-14;
+  if(y+ro.offsetHeight>pr.height-6) y=pr.height-ro.offsetHeight-6;
+  ro.style.left=x+"px"; ro.style.top=y+"px";
+}
+window.addEventListener("resize",()=>{ layer=null; });
+
+function connect(){
+  const ws=new WebSocket(`ws://${location.host}/ws`);
+  sock=ws;
+  ws.onopen =()=>{$("conn").textContent="live";$("conn").style.color="#4cd4a0";};
+  ws.onclose=()=>{$("conn").textContent="reconnecting";$("conn").style.color="var(--against)";
+                  setTimeout(connect,1000);};
+  ws.onmessage=e=>{try{
+    const m=JSON.parse(e.data);
+    if(m.ack) onAck(m); else render(m);
+  }catch(err){console.error(err);}};
+}
+connect();
+</script></body></html>

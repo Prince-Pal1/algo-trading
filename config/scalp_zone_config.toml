@@ -1,0 +1,23 @@
+# Gold Scalp Zone Detector Configuration
+# Watches XAUUSD 1-minute candles for smooth directional regimes suitable for trendline-break scalping.
+
+[detector]
+symbol = "XAUUSD"
+timeframe = "1m"
+window_size = 10                  # Rolling candles in evaluation window
+min_score_threshold = 80.0        # Composite score threshold (0-100) to trigger alert
+atr_window = 14                   # Window for volatility scaling
+
+[scoring_weights]
+er_weight = 25.0                  # Kaufman Efficiency Ratio max points
+r2_weight = 25.0                  # Linearity / R² max points
+directional_weight = 20.0         # Candle direction persistence max points
+displacement_weight = 15.0        # ATR-relative move max points
+smoothness_weight = 15.0          # Range uniformity (CV) + Body fullness max points
+
+[alerter]
+cooldown_seconds = 300            # 5-minute cooldown between repeated alerts in same direction
+desktop_notifications = true      # macOS Notification Center alerts
+audio_beep = true                 # Terminal audible bell
+tv_screenshot_enabled = false     # Auto-capture TradingView chart on alert (requires TV Desktop)
+log_filepath = "data/logs/scalp_zones.jsonl"
